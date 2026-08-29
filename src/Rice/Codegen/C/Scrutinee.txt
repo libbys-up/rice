@@ -1,0 +1,54 @@
+
+I'm keeping this around so I remember my line of reasoning.
+
+I used to use a scrutinee variable in the case while loop.
+The point of this is to avoid path compression.
+example:
+double x = case x of 
+                Int# x' -> double' x' x
+double' x' y case y of 
+                  Int# y' -> Int# (x' +# y')
+double (Int# 0 ? Int# 1)
+
+I didn't want double to reduce down to (double' 0 (Int# 0)) and avoid the forwarding node,
+because the forwarding node is the one with the non-determinism information.
+
+So I should get
+x = (Int# 0 ? Int# 1)
+x reduces to ->(Int# 0)
+push <x, ?(Int# 1)>
+double x reduces to (double' 0 x)
+Then double' has to follow the forwarding node for x.
+When chacing down the forwarding node, we realize that x is nondet, and so we push double' on the stack.
+
+I don't think I actually need this though.
+It doesn't mattar that double' is on the stack, because its the same node as double,
+so if we undid double', we would immedeatly undo double.
+In fact, if we pass in a deterministic y, then double' is a completely deterministic computation,
+so it really shouldn't be undone.
+
+I don't think I need to do this
+
+statement of theorem:
+if f x1 ... xn = case x1 of
+                      ...
+                      P y1 ... ym -> E[x1]
+                      ...
+
+and x1 => ->(e)
+then E[e] will evalute to the same thing.
+Proofish:
+when evaluating x1, we push it on to the backtracking stack
+this will mark f as nondet, so f will get pushed onto the backtracking stack.
+E[x1] and E[*x1] will evaluate to the same value, the only difference is if 
+parts of E are pushed on the backtracking stack.
+Since E was created entirely in f, it will all be undone by the time we backtrack to f.
+
+problem with the proof:
+E might evaluate x1 as part of its evaluation.
+could this change what answers we get from E?
+No: Even though we'll mark parts of E as non-det, x1 has already been evaluated, so
+we won't push that on the stack again.
+at worst we'll unnecessarily put parts of E on the stack and then immedeatly unto them after another
+choice point.
+

@@ -1,0 +1,370 @@
+
+Code generation strategy
+
+I'll be using 
+
+data Light = Green | Yellow | Red
+
+slow :: Light -> Light
+slow l = fcase l of
+               Green  -> Yellow
+               Yellow -> Red
+
+Since there is no (slow Red) we really have the function
+
+slow :: Light -> Light
+slow l = fcase l of
+               Green  -> Yellow
+               Yellow -> id Red
+               Red    -> Exempt
+
+This is translated to ICurry as
+
+slow
+{
+    v0 = root[0]
+    case v0 of
+         Green  -> return Yellow
+         Yellow -> return id(Red)
+         Red    -> Exempt
+}
+
+Version 0
+=========
+
+Initial C code
+Notes
+1. save_copy makes a copy of the current node and puts them on the backtracking stack
+   so (slow Yellow) would push <slow Yellow, slow Yellow> onto the stack
+   then we would immedieatly change our initial node to Red, so our stack would look like <Red, slow Yellow>
+2. fail just sets a node to be the unique Fail node.
+3. Right now we save the root before we reduce it.
+   This is true if we reduce it with a rule, or if it reduces to failure.
+4. We don't automatically reduce expressions in a return statement.
+   This is one of the optimizations we're testing, so we'll return id(Red) instead of reducing it to Red
+5. since f(fail) is always fail, we'll propogate a filure all the way up to main before backtracking.
+
+void save_copy(Node* n)
+{
+    Node* cpy = (Node*)malloc(sizeof(Node));
+    memcpy(cpy, n, sizeof(Node*));
+    push(bt_stack, n, cpy, false);
+}
+
+slow_hnf(Node* root)
+{
+    field v0 = root->children[0];
+    while(true)
+    {
+        switch(v0.n->symbol->tag)
+        {
+            case FAIL_TAG:
+            {
+                save_copy(root);
+                fail(root);
+                return;
+            }
+            case FORWARD_TAG:
+            {
+                v0 = v0.n->children[0];
+                break;
+            }
+            case FUN_TAG:
+            {
+                v0.n->symbol->hnf(v0);
+                break;
+            }
+            case CHOICE_TAG:
+            {
+                choose(v0);
+                break;
+            }
+            case FREE_TAG:
+            {
+                push(bt_stack, true, v0, new_Red());
+                push(bt_stack, true, v0, new_Yellow());
+                set_Green(v0);
+                break;
+            }
+            case Green_TAG:
+            {
+                save_copy(root);
+                set_Yellow(root);
+                return;
+            }
+            case Yellow_TAG:
+            {
+                save_copy(root);
+                set_id(root, make_Red());
+                return;
+            }
+            case Red_TAG:
+            {
+                save_copy(root);
+                fail(root);
+                return;
+            }
+        }
+    }
+}
+
+Version 1
+=========
+
+This version uses memoized backtracking.
+The idea here is that we don't add deterministic computations to the backtracking stack.
+
+This is similar to the WAM not adding anything if the stack pointer was past the backtracking
+pointer, but a little differen in ways that I'm not 100% sure on yet.
+
+Each node has a nondet flag.
+If nondet is true, then the node is pushed on the stack.
+A node's nondet flag is set to true if it has a case on a non-det node.
+we update save_copy to only push a node if the nondet flag was ever set.
+
+void save_copy(Node* n, bool nondet)
+{
+    if(nondet)
+    {
+        Node* cpy = (Node*)malloc(sizeof(Node));
+        memcpy(cpy, n, sizeof(Node*));
+        n->nondet = true;
+        push(bt_stack, n, cpy, false);
+    }
+}
+
+slow_hnf(Node* root)
+{
+    field v0 = root->children[0];
+    bool nondet = v0.n->nondet;
+    while(true)
+    {
+        switch(v0.n->symbol->tag)
+        {
+            case FAIL_TAG:
+            {
+                save_copy(root);
+                fail(root);
+                return;
+            }
+            case FORWARD_TAG:
+            {
+                v0 = v0.n->children[0];
+                nondet |= v0.n->nondet;
+                break;
+            }
+            case FUN_TAG:
+            {
+                v0.n->symbol->hnf(v0);
+                break;
+            }
+            case CHOICE_TAG:
+            {
+                choose(v0);
+                nondet = true;
+                break;
+            }
+            case FREE_TAG:
+            {
+                push(bt_stack, true, v0, new_Red());
+                push(bt_stack, true, v0, new_Yellow());
+                set_Green(v0);
+                nondet = true;
+                break;
+            }
+            case Green_TAG:
+            {
+                save_copy(root);
+                set_Yellow(root);
+                return;
+            }
+            case Yellow_TAG:
+            {
+                save_copy(root);
+                set_id(root, make_Red());
+                return;
+            }
+            case Red_TAG:
+            {
+                save_copy(root);
+                fail(root);
+                return;
+            }
+        }
+    }
+}
+
+Version 2
+=========
+
+This time we perform a limited TCO.
+We call functions in the return position directly.
+The only change we make is calling the hnf function after calling set.
+
+void save_copy(Node* n, bool nondet)
+{
+    if(nondet)
+    {
+        Node* cpy = (Node*)malloc(sizeof(Node));
+        memcpy(cpy, n, sizeof(Node*));
+        n->nondet = true;
+        push(bt_stack, n, cpy, false);
+    }
+}
+
+slow(Node* root, field v0)
+{
+    bool nondet = v0.n->nondet;
+    while(true)
+    {
+        switch(v0.n->symbol->tag)
+        {
+            case FAIL_TAG:
+            {
+                save_copy(root);
+                fail(root);
+                return;
+            }
+            case FORWARD_TAG:
+            {
+                v0 = v0.n->children[0];
+                nondet |= v0.n->nondet;
+                break;
+            }
+            case FUN_TAG:
+            {
+                v0.n->symbol->hnf(v0);
+                break;
+            }
+            case CHOICE_TAG:
+            {
+                choose(v0);
+                nondet = true;
+                break;
+            }
+            case FREE_TAG:
+            {
+                push(bt_stack, true, v0, new_Red());
+                push(bt_stack, true, v0, new_Yellow());
+                set_Green(v0);
+                nondet = true;
+                break;
+            }
+            case Green_TAG:
+            {
+                save_copy(root);
+                set_Yellow(root);
+                return;
+            }
+            case Yellow_TAG:
+            {
+                save_copy(root);
+                field t = make_Red();
+                set_id(root, t);
+                id_HNF(root);
+                return;
+            }
+            case Red_TAG:
+            {
+                save_copy(root);
+                fail(root);
+                return;
+            }
+        }
+    }
+}
+
+Version 3
+=========
+
+The final version also doesn't change a lot about the generated code.
+This is kind of similar to version 2 in that we don't want to return (and propogate) fail.
+Instead I want to immediately backtrack to that last choice that was made,
+but I only want to backtrack to choices that were made while in this function.
+So, I'll remember the stack height at the start of the function.
+If backtracking ever passes that, then I'll propogate the failure.
+
+backtrack(int cutoff)
+{
+    boolean found_choice = false;
+    while(bt_stack->size > cutoff && !found_choice)
+    {
+        Pair* p = pop(bt_stack);
+        found_choice = p->is_choice;
+        memcpy(p->left, p->right)
+    }
+    return bt_stack->size == cutoff;
+}
+
+
+slow(Node* root)
+{
+    field v0 = root->children[0];
+    bool nondet = v0.n->nondet;
+    int stack_height = bt_stack->size;
+    while(true)
+    {
+        switch(v0.n->symbol->tag)
+        {
+            case FAIL_TAG:
+            {
+                if(backtrack(stack_height))
+                {
+                    save_copy(root);
+                    fail(root);
+                    return;
+                }
+                break;
+            }
+            case FORWARD_TAG:
+            {
+                v0 = v0.n->children[0];
+                nondet |= v0.n->nondet;
+                break;
+            }
+            case FUN_TAG:
+            {
+                v0.n->symbol->hnf(v0);
+                break;
+            }
+            case CHOICE_TAG:
+            {
+                choose(v0);
+                nondet = true;
+                break;
+            }
+            case FREE_TAG:
+            {
+                push(bt_stack, true, v0, new_Red());
+                push(bt_stack, true, v0, new_Yellow());
+                set_Green(v0);
+                nondet = true;
+                break;
+            }
+            case Green_TAG:
+            {
+                save_copy(root);
+                set_Yellow(root);
+                return;
+            }
+            case Yellow_TAG:
+            {
+                save_copy(root);
+                field t = make_Red();
+                set_id(root, t);
+                id_HNF(root);
+                return;
+            }
+            case Red_TAG:
+            {
+                if(backtrack(stack_height))
+                {
+                    save_copy(root);
+                    fail(root);
+                    return;
+                }
+                break;
+            }
+        }
+    }
+}
