@@ -1,250 +1,260 @@
-module Rice.Codegen.C.ToH (toH) where
+------------------------------------------------------------------------------
+--- ICurry -> C header (`ModuleName.h`) generation.
+---
+--- Every constructor and non-primitive function gets: a tag `#define`, a
+--- static `Symbol`, and `make_X`/`set_X` (`make_X_free`/`set_X_free` too,
+--- for constructors). Two deliberate simplifications relative to both
+--- reference sources this was designed against (see `STATUS.md`'s Phase 1
+--- scoping and `src/codegen-runtime-review.md`):
+---
+--- - **No zero-arity-constructor/small-integer preallocation.** old_rice's
+---   `writeMain` preallocated every 0-arity constructor and every `Int` in
+---   [-127,128] as a flyweight, needing a whole-program `DataTable` this
+---   pass doesn't have. Every constructor, 0-arity or not, just goes
+---   through the same `make_X`/`set_X` as everything else -- correct,
+---   marginally more allocation, no `DataTable` dependency.
+--- - **Boxed `Int`/`Char`/`Float` need no special case at all**, beyond
+---   setting `.payload` on their `Symbol` -- confirmed empirically (see
+---   `archetecture.md`'s "Boxed primitives" section): by the time
+---   `Rice.Transform.Unbox`'s output reaches real ICurry, a boxed value's
+---   case branch is just an ordinary one-constructor `ICaseCons`, with no
+---   dummy branches surviving to this stage. `Rice.Codegen.C.ToC` still
+---   needed the empirical check; this file didn't need to know at all.
+---
+--- One bug found and fixed by actually running a compiled program, not
+--- just reading the generated C: `setRealChildren` originally stored a
+--- constructor/function's arguments into `root`'s child slots in
+--- *reverse* order, copying old_rice's own convention uncritically. That
+--- convention was old_rice's own ICurry generator's (`Compile.ToICurry`,
+--- not what Rice actually uses) internal agreement with itself, not a
+--- property of ICurry in general -- the external `icurry` package Rice
+--- depends on indexes `IVarAccess`/`INodeAssign` in plain forward order,
+--- and the mismatch was invisible in every arity-1 test (only one slot to
+--- get "wrong") until a real arity-2 function (`(?)`, `True ? False`)
+--- silently swapped its own two arguments. See `setRealChildren` below.
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
 
-import Codegen.C.C
+module Rice.Codegen.C.ToH (toHeader) where
+
+import Data.Maybe (isJust)
+import Text.Pretty
+
 import ICurry.Types
-import ICurry.Goodies
-import Data.Functional.DList
-import Codegen.Names
-import Codegen.CodeGen
+import Rice.Codegen.C.C
+import Rice.Codegen.C.PrimOps (lookupPrim)
+import Rice.Codegen.Names (mangle, uninstance, toName, getTag)
 
+--- A module's whole header, as one `Doc` -- `pPrint` it and write the
+--- result to `ModuleName.h`.
+toHeader :: IProg -> Doc
+toHeader (IProg name imps types allFuns) = vcat $
+  [ text ("#ifndef " ++ name ++ "_H")
+  , text ("#define " ++ name ++ "_H")
+  , text ""
+  , cinclude "runtime"
+  ] ++ map cinclude imps ++
+  [ text "" ] ++
+  map declareFun funs ++
+  [ text "" ] ++
+  concatMap makeTagsFor types ++
+  map writeConSymbol cons ++
+  map writeFunSymbol funs ++
+  [ text "" ] ++
+  concatMap setCon cons ++
+  concatMap setFun funs ++
+  concatMap makeCon cons ++
+  concatMap makeFun funs ++
+  concatMap setConFree cons ++
+  concatMap makeConFree cons ++
+  [ text ("#endif //" ++ name ++ "_H") ]
+ where
+  -- Primitive functions (Rice.Codegen.C.PrimOps) are inlined at every call
+  -- site (Rice.Codegen.C.ToC) and never actually invoked as real
+  -- functions -- no declaration, no Symbol, no make/set for them at all.
+  funs = [f | f@(IFunction n _ _ _ _) <- allFuns, not (isJust (lookupPrim n))]
+  cons = [c | IDataType _ cs <- types, c <- cs]
 
-toH :: IProg -> String -> IO ()
-toH ip file = do let ((), dlist) = runWriter (toHeader ip)
-                 writeFile file (toList dlist)
+------------------------------------------------------------------------------
+-- Function prototypes (so `&F_hnf` in a Symbol literal, and any call to
+-- F_hnf from another module's generated code, both have a declaration in
+-- scope before they're used).
+------------------------------------------------------------------------------
 
-toHeader :: IProg -> CodeGen ()
-toHeader (IProg name imps types allFuns)
- = do let internal = filter (not . isExternal) allFuns
-      let external = filter isExternal allFuns
-      makeIntro name imps allFuns
-      mapM_ makeTags types 
-      writeSymbols types funs
-      -- optimization: Don't make multiple copies of constant values.
-      -- This is part of the flywheel pattern.
-      mapM_ declConstant [n | (IDataType _ cs) <- types, (n,0) <- cs]
-      mapM_ setType types
-      mapM_ setFun funs
-      mapM_ makeType types
-      mapM_ makeFun funs
-      mapM_ setTypeFree types
-      mapM_ makeTypeFree types
-      emit $ "#endif //"++name++"_H"
-
-makeIntro :: String -> [String] -> [IFuncDecl] -> CodeGen ()
-makeIntro name imps funs
- = do emit $ "#ifndef "++name++"_H"
-      emit $ "#define "++name++"_H"
-      nl
-      cinclude "runtime"
-      mapM_ cinclude imps
-      nl
-      mapM_ declareFun funs
-      nl
-
--- declare the f_hnf functions
 declareFun :: IFunction -> CStmt
-declareFun (IFunction f _ _ _ _) = cfunDecl "void" (hnf f) [("field", "root")]
+declareFun (IFunction f _ _ _ _) = cfunDecl "void" (hnf f) [("field","root")]
 
--- declare the constants for the flywheel pattern
-declConstant :: IQName -> CStmt
-declConstant n = emit $ "extern field " ++ mangle n ++ ";\n"
+------------------------------------------------------------------------------
+-- Tags
+------------------------------------------------------------------------------
 
-
--- #define all of the tages for constructors
-makeTags :: IDataType -> CStmt
-makeTags (IDataType name constrs)
- = do comment $ "tags for "++name
-      mapM_ makeTag constrs
-      nl
+makeTagsFor :: IDataType -> [CStmt]
+makeTagsFor (IDataType _ cs) = map makeTag cs
  where makeTag (n,_) = cdefine (tag n) (getTag n + 5)
 
----------------------------------------------------------------------
--- Write out the symbol table for each constructor and function
--- The symbol for 
--- q.f :: Int -> Int -> Int
--- will look like
--- static Symbol q_f_symbol = { .tag = "FUNCTION_TAG", 
---                              .arity = 2, 
---                              .name = "q.f", 
---                              .hnf = &q_f_hnf };
---
--- The symbol for 
--- data Maybe a = Nothing | Just a
--- will look like
--- static Symbol Prelude_Nothing_symbol = { .tag = "Prelude_Nothing_TAG",
---                                          .arity = 0,
---                                          .name = "Prelude.Nothing",
---                                          .hnf = &CTR_hnf };
----------------------------------------------------------------------
-writeSymbols :: [IDataType] -> [IFunction] -> CodeGen ()
-writeSymbols types funs =
- do mapM_ conSymbol [c | t <- types, c <- cons t]
-    mapM_ funSymbol funs
-    nl
- where
-  cons (IDataType _ cs) = cs
-  conSymbol (n,a)                 = symbol n (tag n)        a "&CTR_hnf" 
-  funSymbol (IFunction n a _ _ _) = symbol n "FUNCTION_TAG" a ("&"++hnf n)
-  tag n = mangle n ++ "_TAG"
+------------------------------------------------------------------------------
+-- Symbols
+------------------------------------------------------------------------------
 
-symbol :: String -> String -> Int -> String -> String -> CStmt
-symbol name tag arity hnf 
-  = do stmt $ "static Symbol "++ (sym name) .=
-                   (carray [ ".tag" .= tag,
-                             ".arity" .= show arity,
-                             ".name" .= quote (toName name),
-                             ".hnf" .= hnf])
+--- Which `Payload` (`node.h`) a constructor's `Symbol` should carry -- see
+--- this module's own header comment. Every other constructor, and every
+--- function, gets `PAYLOAD_NONE`.
+boxPayload :: IQName -> CExpr
+boxPayload (m,n,_) = case (m,n) of
+  ("Prelude","Int")   -> text "PAYLOAD_INT"
+  ("Prelude","Char")  -> text "PAYLOAD_CHAR"
+  ("Prelude","Float") -> text "PAYLOAD_FLOAT"
+  _                   -> text "PAYLOAD_NONE"
 
---------------------------------------------------------------------
--- set_f functions
--- These overwrite the contents of the root node to match f.
--- q.f :: Int -> Int -> Int
--- will have a set_f function that looks like
--- void set_q_f(field root, field v1, field v2, int missing)
--- {
---     root.n = &q_f_symbol;
---     root.missing = missing;
---     child_at_i(root,0) = v2;
---     child_at_i(root,1) = v1;
---     child_at_i(root,2) = NULL;
--- }
---------------------------------------------------------------------
+symbolName :: IQName -> CName
+symbolName n = mangle n ++ "_symbol"
 
-set :: (IQName, Int) -> CStmt
-set (name,arity) 
- = do comment $ uninstance name
-      let args = (("field", "root") : makeArgs [1..arity] ++ [("int", "missing")])
-      hfunDefn "void" args ("set_"++mangle name) 
-         do stmt $ symbol "root" .= (symptr name)
-            stmt $ missing "root" .= "missing"
-            stmt $ makeArray True arity
-            mapM_ stmt $ [children "root" [x] .= var y)  
-                              | (x,y) <- zip [0..] (reverse [1 .. arity])]
-            mapM_ stmt $ [children "root" [x] ++ ".n" .= "NULL" | x <- [arity..2]] 
-      nl
+symbolLit :: IQName -> CExpr -> IArity -> CExpr -> CExpr -> CStmt
+symbolLit n tagExpr arity payload hnfExpr =
+  (text "static Symbol" <+> text (symbolName n)) .=
+  carray [ dinit "tag"     tagExpr
+         , dinit "arity"   (int arity)
+         , dinit "name"    (dquotes (text (toName n)))
+         , dinit "payload" payload
+         , dinit "hnf"     hnfExpr
+         ]
 
-setType :: IDataType -> CStmt
-setType (IDataType _ cons) = mapM_ set cons
+writeConSymbol :: (IQName, IArity) -> CStmt
+writeConSymbol (n,a) = symbolLit n (text (tag n)) a (boxPayload n) (text "&CTR_hnf")
 
-setFun :: IFunction -> CStmt
-setFun (IFunction name arity _ _ _) = set (name,arity)
+writeFunSymbol :: IFunction -> CStmt
+writeFunSymbol (IFunction n a _ _ _) =
+  symbolLit n (text "FUNCTION_TAG") a (text "PAYLOAD_NONE") (text ('&' : hnf n))
 
---------------------------------------------------------------------
--- make_f functions
--- These allocate memory for a new node holding either a function
--- or a constructor
--- q.f :: Int -> Int -> Int
--- will have a make_q_f function that looks like
--- field make_q_f(int missing, field v1, field v2)
--- {
---     field root;
---     root.n = alloc(3);
---     root.n->symbol = &q_f_symbol;
---     root.missing = missing;
---     child_at_i(root,0) = v2;
---     child_at_i(root,1) = v1;
---     child_at_i(root,2) = NULL;
---     return root;
--- }
---------------------------------------------------------------------
+------------------------------------------------------------------------------
+-- set_X / make_X: shared child-array plumbing
+------------------------------------------------------------------------------
 
-make :: (IQName, Int) -> Stmt
-make (name,arity) 
- = do comment $ uninstance name
-      let args = makeArgs [1..arity] ++ [("int", "missing")]
-      hfunDefn "field" ("make_"++mangle name) args 
-        do stmt "field root"
-           stmt "root.n" .= alloc_n 1
-           symbol "root" .= (symptr name)
-           stmt missing "root" .= "missing"
-           makeArray False arity
-           mapM_ stmt $ [children "root" [x] .= var y ++ ";") |
-                           (x,y) <- zip [0..] (reverse [1..arity]]
-           creturnExp "root"
-      nl
+makeArgs :: [Int] -> [(CType,CName)]
+makeArgs = map (\v -> ("field", varName v))
 
--- Constants are different because we only ever make one of them,
--- so the make function just returns the one that's already made.
--- field make_Prelude_Nothing(int missing)
--- {
---     return Prelude_Nothing;
--- }
-makeConstant :: IQName -> CStmt
-makeConstant name 
-  = do comment $ uninstance name
-       hfunDefn "field" (mangle name) [("int", "missing")]
-           do creturnExp (mangle name)
-       nl
+--- Every child beyond the first 3 lives in a separately-allocated array
+--- (`children[3].a`, `node.h`) -- always set explicitly, either to that
+--- allocation or to `NULL`, since `set_X` may be overwriting a node whose
+--- previous use left this pointer non-null.
+setChildArray :: IArity -> CStmt
+setChildArray arity
+  | arity > 3 = (root <> text ".n->children[3].a") .= alloc_f (arity - 3)
+  | otherwise = (root <> text ".n->children[3].a") .= text "NULL"
 
-makeType :: IDataType -> CStmt
-makeType (IDataType _ cons) 
-  = do mapM_ make         [(n,a) | (n,a) <- cons, a > 0]
-       mapM_ makeConstatn [n | (n,0) <- cons]
+--- Assign the constructor/function's real arguments into `root`'s child
+--- slots, in the same, direct, forward order the arguments themselves
+--- come in (child slot 0 <- argument 1, slot 1 <- argument 2, ...) --
+--- matching what `Rice.Codegen.C.ToC`'s `IVarAccess`/`INodeAssign`
+--- compilation (`children`) already assumes an index means (the external
+--- `icurry` package's own convention, confirmed empirically: forward
+--- storage gave the right value, old_rice's reversed-storage convention
+--- did not -- see this module's own file header for the incident).
+--- `apply` nodes are the one place reversed storage is real and
+--- necessary (letting `missing` alone determine which slot a partial
+--- application's next argument lands in, `archetecture.md`) -- but that's
+--- entirely `runtime.h`'s own hardcoded `set_apply*`/`make_apply*` logic,
+--- unrelated to the ordinary constructor/function nodes generated here.
+setRealChildren :: IArity -> [CStmt]
+setRealChildren arity = zipWith setChild [0 .. arity-1] [1 .. arity]
+ where setChild i v = children root [i] .= var v
 
-makeFun :: IFunction -> CStmt
-makeFun (IFunction name arity _ _ _) = make (name,arity)
+--- Any of child slots 0,1,2 *not* used by a real argument gets explicitly
+--- nulled, for the same "root may be reused, stale pointers" reason as
+--- `setChildArray`.
+setUnusedChildren :: IArity -> [CStmt]
+setUnusedChildren arity = map nullChild [arity .. 2]
+ where nullChild i = (children root [i] <> text ".n") .= text "NULL"
 
------------------------------------------------------------------------
--- functions for making and seting free variables
------------------------------------------------------------------------
+------------------------------------------------------------------------------
+-- set_X
+------------------------------------------------------------------------------
 
-setTypeFree :: IDataType -> CStmt
-setTypeFree (IDataType _ cons) = mapM_ setConFree cons
+setEntry :: IQName -> IArity -> [CStmt]
+setEntry name arity =
+  [ comment (uninstance name)
+  , hfunDefn "void" ("set_" ++ mangle name) args
+      ( [ symbol root .= (text "&" <> text (symbolName name))
+        , missing root .= text "missing"
+        , setChildArray arity
+        ] ++
+        setRealChildren arity ++
+        setUnusedChildren arity
+      )
+  , text ""
+  ]
+ where args = ("field","root") : makeArgs [1..arity] ++ [("int","missing")]
 
-setConFree :: (IQName, IArity) -> CStmt
-setConFree (n, a) 
- = do comment $ uninstance n
-      hfunDefn "void" (mangle n) [("field", "root")] body
-        do stmt $ symbol "root" .= (symptr n)
-           stmt $ nondet "root" .= "true"
-           stmt $ missing "root" .= "0"
-           makeArray True a
-           mapM_ stmt $ [children "root" [x] .= var y ++ ";") |
-                           (x,y) <- zip [0..] (reverse [1..a])]
-      nl
+setCon :: (IQName, IArity) -> [CStmt]
+setCon (n,a) = setEntry n a
 
-makeTypeFree :: IDataType -> CStmt
-makeTypeFree (IDataType _ cons) = mapM_ makeConFree cons
+setFun :: IFunction -> [CStmt]
+setFun (IFunction n a _ _ _) = setEntry n a
 
-makeConFree :: (IQName, IArity) -> CStmt
-makeConFree (n, a) 
- = do hfunDefn "field" (mangle name) []
-        do stmt "field root"
-           stmt $ "root.n" .= alloc_n 1
-           stmt $ nondet "root" .= "true"
-           stmt $ symbol "root" .= (symptr name)
-           stmt $ missing "root" .= "0"
-           makeArray False a
-           mapM_ stmt $ [children "root" [x] .= "free_var();" | x <- [0..a-1]]
-           returnExp "root"
-      nl
+------------------------------------------------------------------------------
+-- make_X
+------------------------------------------------------------------------------
 
-------------------------------------------------------------------------
--- helper functions
-------------------------------------------------------------------------
+makeEntry :: IQName -> IArity -> [CStmt]
+makeEntry name arity =
+  [ comment (uninstance name)
+  , hfunDefn "field" ("make_" ++ mangle name) args
+      ( [ text "field root" <> semi
+        , (root <> text ".n") .= alloc_n 1
+        , symbol root .= (text "&" <> text (symbolName name))
+        , missing root .= text "missing"
+        , setChildArray arity
+        ] ++
+        setRealChildren arity ++
+        [ creturnExpr root ]
+      )
+  , text ""
+  ]
+ where args = makeArgs [1..arity] ++ [("int","missing")]
 
+makeCon :: (IQName, IArity) -> [CStmt]
+makeCon (n,a) = makeEntry n a
 
--- get q_f_symbol for function f
-sym :: IQName -> String
-sym n = mangle n ++ "_symbol"
+makeFun :: IFunction -> [CStmt]
+makeFun (IFunction n a _ _ _) = makeEntry n a
 
--- get &q_f_symbol for function f
-symptr :: IQName -> String
-symptr n = "&" ++ (sym n)
+------------------------------------------------------------------------------
+-- set_X_free / make_X_free -- constructors only (narrowing a free
+-- variable always narrows it to some *constructor* shape, never a
+-- function).
+------------------------------------------------------------------------------
 
--- turn a list of args into (field v1, field v2, ...)
-makeArgs :: [Int] -> [(String, String)]
-makeArgs = map (\v -> ("field", var v))
+setChildFree :: Int -> CStmt
+setChildFree i = children root [i] .= call "free_var" []
 
--- because I use calloc for memory allocation,
--- I don't need to actually NULL out the array pointer
--- for the node that are newly allocated.
--- so anything coming from make_f is fine.
---
--- I DO need to NULL out the array pointer for any set_f function,
--- since it might have been used before and have a non-NULL array pointer.
-makeArray :: Bool -> Int -> CStmt
-makeArray nullable arity
- | arity > 3 = stmt $ "root.n->children[3].a" .= alloc_f (arity - 3)
- | nullable  = stmt $ "root.n->children[3].a" .= "NULL"
- | otherwise = return ()
+setConFree :: (IQName, IArity) -> [CStmt]
+setConFree (n,a) =
+  [ hfunDefn "void" ("set_" ++ mangle n ++ "_free") [("field","root")]
+      ( [ symbol root .= (text "&" <> text (symbolName n))
+        , nondet root .= ctrue
+        , missing root .= int 0
+        , setChildArray a
+        ] ++
+        map setChildFree [0..a-1]
+      )
+  , text ""
+  ]
+
+makeConFree :: (IQName, IArity) -> [CStmt]
+makeConFree (n,a) =
+  [ hfunDefn "field" ("make_" ++ mangle n ++ "_free") []
+      ( [ text "field root" <> semi
+        , (root <> text ".n") .= alloc_n 1
+        , nondet root .= ctrue
+        , symbol root .= (text "&" <> text (symbolName n))
+        , missing root .= int 0
+        , setChildArray a
+        ] ++
+        map setChildFree [0..a-1] ++
+        [ creturnExpr root ]
+      )
+  , text ""
+  ]
+
+------------------------------------------------------------------------------

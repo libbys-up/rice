@@ -12,6 +12,7 @@
 
 void CTR_hnf(union field root)
 {
+    (void)root; // unused when DEBUG == 0, since debug_expr expands to nothing
     debug(LOW, "HNF constructor:");
     debug_expr(LOW, root);
 }
@@ -24,22 +25,27 @@ void choice_hnf(union field root)
 }
 
 // sets a free varialbe.
+//
+// Several syntax errors fixed here while scoping/implementing Phase 0
+// (colons instead of semicolons, a missing semicolon, and children[3]
+// assigned a union field* directly instead of through its own .a member) --
+// this function couldn't have compiled as written.
 void set_free_constructor(union field n, Symbol* sym)
 {
     n.n->symbol = sym;
     n.n->missing = 0;
     n.n->nondet = true;
-    n.n->children[0].n = NULL:
-    n.n->children[1].n = NULL:
-    n.n->children[2].n = NULL:
-    n.n->children[3].a = NULL:
+    n.n->children[0].n = NULL;
+    n.n->children[1].n = NULL;
+    n.n->children[2].n = NULL;
+    n.n->children[3].a = NULL;
     if(sym->arity > 3)
     {
-        n.n->children[3] = (union field*)malloc((sym->arity - 3) * sizeof(union field));
+        n.n->children[3].a = (union field*)malloc((sym->arity - 3) * sizeof(union field));
     }
-    for(int i = 0; i < sym->arity; i++)
+    for(unsigned int i = 0; i < sym->arity; i++)
     {
-        set_child_at(n, i, free_var())
+        set_child_at(n, i, free_var());
     }
 }
 
@@ -156,29 +162,49 @@ void apply_hnf(union field root)
     // If we're fully applied, then we can evaluate root.
     if(nargs <= missing)
     {
-        debug(HIGH, "under/fully applied (%d/%d)\n", 
+        debug(HIGH, "under/fully applied (%d/%d)\n",
                     f.n->missing, nargs);
         debug_expr(HIGH, f);
         //hold the old array of children.
         //we'll need to move this to a bigger array
         set_copy(root,f);
+        // Where the *first* still-missing argument slot lives, under
+        // Rice.Codegen.C.ToH's forward child-storage (child 0 is the
+        // first argument, ..., a "missing" argument occupies one of the
+        // last `missing` slots, in the same left-to-right order the
+        // arguments themselves arrive in) -- v1 (child1 below, despite
+        // the name: see set_apply1/2/3's own reversed storage for *this*
+        // apply node's own new arguments, which the local variable names
+        // here are labeled after) fills this slot first, then each
+        // subsequent argument fills the next slot up. This used to be
+        // `missing-1`, matching old_rice's own *reversed* child storage;
+        // that stopped matching once ToH switched to forward storage
+        // (archetecture.md's "Boxed primitives" era predates that
+        // change) -- confirmed as a real, live bug by running old_rice's
+        // own benchmark suite through the finished Phase 1 compiler: any
+        // partial application of 2+ missing arguments silently overwrote
+        // an already-supplied argument instead of filling the real empty
+        // slot, leaving the true slot NULL.
+        int fillIdx = f.n->symbol->arity - missing;
         while(nargs > 2)
         {
             debug_expr(HIGH, array[nargs-3]);
-            set_child_at(root, missing-1, array[nargs-3]);
+            set_child_at(root, fillIdx, array[nargs-3]);
+            fillIdx++;
             missing--;
             nargs--;
         }
         if(nargs > 1)
         {
             debug_expr(HIGH, child2);
-            set_child_at(root,missing-1, child2);
+            set_child_at(root, fillIdx, child2);
+            fillIdx++;
             missing--;
         }
 
         // we have at least one node, or we wouldn't have an apply node.
         debug_expr(HIGH, child1);
-        set_child_at(root,missing-1, child1);
+        set_child_at(root, fillIdx, child1);
         missing--;
 
         root.n->missing = missing;
@@ -214,10 +240,17 @@ void apply_hnf(union field root)
         union field newf = copy(f);
         debug_expr(LOW, newf);
 
-        // copy arguments
+        // copy arguments -- same forward-slot fix as the under/fully-
+        // applied branch above (`fillIdx`, not `missing-1`): this loop
+        // fills newf's (f's own, forward-laid-out) still-missing slots
+        // from the earliest-supplied argument onward, so the target
+        // index must count up from the first missing slot, not down from
+        // the last one.
+        int fillIdx = newf.n->symbol->arity - missing;
         while(missing > 0)
         {
-            set_child_at(newf, missing-1, child_at_v(root, nargs));
+            set_child_at(newf, fillIdx, child_at_v(root, nargs));
+            fillIdx++;
             nargs--;
             missing--;
         }
@@ -248,7 +281,7 @@ void apply_hnf(union field root)
 }
 
 
-void forward_hnf(union field root) {}
+void forward_hnf(union field root) { (void)root; }
 
 //////////////////////////////////////////////////////////////////////////////
 // code for backtracking
@@ -331,6 +364,9 @@ void choose(union field root)
 // This is an actual failure.
 bool undo(int cutoff)
 {
+#if TEST != EARLY_BACKTRACKING
+    (void)cutoff; // only meaningful for the EARLY_BACKTRACKING build
+#endif
     if(bt_stack->size == 0)
         return false;
 
@@ -338,15 +374,27 @@ bool undo(int cutoff)
     debug_stack(HIGH);
     debug(HIGH, "undoing\n");
     FieldPair* frame;
-    do 
+    do
     {
         frame = pop(bt_stack);
         if(frame->lhs.n != NULL)
         {
-            if(frame->choice)
+            // Every popped frame gets restored, not just the final choice
+            // frame -- matching this function's own doc comment above
+            // ("we overwrite all of the node in the stack with their
+            // saved values"), which the code didn't actually do before
+            // this fix. A save_copy frame's lhs is the very node (often
+            // the top-level root) some earlier hnf call overwrote with a
+            // now-stale result; skipping its restore left that node
+            // sitting at its old value with nothing to prompt
+            // re-evaluation, so nf_all's next nf() call saw the same
+            // already-normal-form value again instead of re-exploring --
+            // confirmed directly: the first multi-step backtracking test
+            // this runtime was ever exercised with printed the same
+            // solution twice instead of two different ones.
             memcpy(frame->lhs.n, frame->rhs.n, sizeof(Node));
         }
-#if TEST == 3
+#if TEST == EARLY_BACKTRACKING
     } while(!frame->choice && size(bt_stack) > cutoff);
 #else
     } while(!frame->choice && size(bt_stack) > 0);
@@ -370,20 +418,26 @@ void print_frame(FieldPair* f)
     print_expr(f->rhs);
 }
 
+// Two real bugs fixed here while getting -Wall/-Werror clean: this ignored
+// its own `s` parameter throughout (always printed the global `bt_stack`
+// instead -- unobservable so far, since debug_stack(level) is this
+// function's only caller and always passes bt_stack itself), and the loop
+// started at `i = s->size` rather than `s->size - 1`, reading one element
+// past the end of `s->array` (valid indices are 0..size-1).
 void print_stack(Stack* s)
 {
-    printf("stacksize: %ld %ld\n", bt_stack->size, bt_stack->capacity);
-    if(bt_stack->size == 0)
+    printf("stacksize: %zu %zu\n", s->size, s->capacity);
+    if(s->size == 0)
     {
         printf("[]\n");
         return;
     }
-    for(int i = bt_stack->size; i > 0; i--)
+    for(int i = s->size - 1; i > 0; i--)
     {
-        print_frame(&bt_stack->array[i]);
+        print_frame(&s->array[i]);
         printf(", \n");
     }
-    print_frame(&bt_stack->array[0]);
+    print_frame(&s->array[0]);
     printf("\n");
 }
 
@@ -425,17 +479,17 @@ void print_expr(union field n)
     {
         printf("(");
         fflush(stdout);
-        if(child_at_i(n,1) == INT_CTR)
+        if(n.n->symbol->payload == PAYLOAD_INT)
         {
             printf("%ld", child_at_i(n,0));
             fflush(stdout);
         }
-        else if(child_at_i(n,1) == CHAR_CTR)
+        else if(n.n->symbol->payload == PAYLOAD_CHAR)
         {
             printf("%c", (char)child_at_c(n,0));
             fflush(stdout);
         }
-        else if(child_at_i(n,1) == FLOAT_CTR)
+        else if(n.n->symbol->payload == PAYLOAD_FLOAT)
         {
             printf("%lf", child_at_f(n,0));
             fflush(stdout);
@@ -562,17 +616,17 @@ void print_final(union field n)
     if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,)"))   { printf("("); print_tuple(n,13); return; }
     if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,,)"))  { printf("("); print_tuple(n,14); return; }
     if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,,,)")) { printf("("); print_tuple(n,15); return; }
-    if(child_at_i(n,1) == INT_CTR)
+    if(n.n->symbol->payload == PAYLOAD_INT)
     {
         printf("%ld", child_at_i(n,0));
         return;
     }
-    if(child_at_i(n,1) == CHAR_CTR)
+    if(n.n->symbol->payload == PAYLOAD_CHAR)
     {
         printf("%c", (char)child_at_c(n,0));
         return;
     }
-    if(child_at_i(n,1) == FLOAT_CTR)
+    if(n.n->symbol->payload == PAYLOAD_FLOAT)
     {
         printf("%lf", child_at_f(n,0));
         return;
@@ -617,8 +671,8 @@ void ground_nf(union field expr)
     debug_expr(LOW, expr);
 
     // If we're a function or choice, put ourselves in head normal form.
-    if(TAG(expr) == CHOICE_TAG || 
-       TAG(expr) == FUNCTION_TAG && expr.n->missing <= 0)
+    if(TAG(expr) == CHOICE_TAG ||
+       (TAG(expr) == FUNCTION_TAG && expr.n->missing <= 0))
     {
         HNF(expr);
     }
@@ -634,13 +688,11 @@ void ground_nf(union field expr)
     debug_expr(LOW, expr);
     // If we're a primative value, then we're already in normal form.
     // int/float/char can't hold unevaluated expressions.
-    if(child_at_i(expr,1) == INT_CTR ||
-       child_at_i(expr,1) == CHAR_CTR ||
-       child_at_i(expr,1) == FLOAT_CTR)
+    if(expr.n->symbol->payload != PAYLOAD_NONE)
     {
         return;
     }
-    
+
     // loop backwards because arguments are in reverse order.
     for(int i = expr.n->symbol->arity-1; i >= 0; i--)
     {
@@ -660,7 +712,7 @@ void nf(union field expr)
 {
     debug(LOW, "solving: ");
     debug_expr(LOW, expr);
-    // if we're a constructor, 
+    // if we're a constructor,
     // then we don't need to put ourselves in head normal form
     if(expr.n->missing <= 0)
     {
@@ -671,13 +723,11 @@ void nf(union field expr)
 
     // If we're a primative value, then we're already in normal form.
     // int/float/char can't hold unevaluated expressions.
-    if(child_at_i(expr,1) == INT_CTR ||
-       child_at_i(expr,1) == CHAR_CTR ||
-       child_at_i(expr,1) == FLOAT_CTR)
+    if(expr.n->symbol->payload != PAYLOAD_NONE)
     {
         return;
     }
-    
+
     for(int i = expr.n->symbol->arity-1; i >= 0; i--)
     {
         union field e = child_at_v(expr,i);

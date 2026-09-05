@@ -1,0 +1,14 @@
+*~
+.cpm
+.curry
+.DS_Store
+.vscode
+
+# runtime/'s Makefile build output
+runtime/*.o
+runtime/*.a
+runtime/runtime_smoke
+runtime/runtime_smoke.dSYM/
+
+# scratch build artifacts (test/test.c's own compiled binary)
+test/a.out

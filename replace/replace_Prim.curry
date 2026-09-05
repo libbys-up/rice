@@ -228,7 +228,7 @@ prim_sinFloat external
 
 cosFloat :: Float -> Float
 cosFloat x = fcase x of
-                    Float x' -> Float (prim_sinFloat x')
+                    Float x' -> Float (prim_cosFloat x')
 
 prim_cosFloat :: Float_SH -> Float_SH
 prim_cosFloat external

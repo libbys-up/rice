@@ -3,9 +3,11 @@
 
 #include <stdlib.h>
 #include "node.h"
+#include "macros.h"
 #include "stack.h"
 #include "debug.h"
 #include "memory.h"
+#include "prim.h"
 
 #define FAIL_TAG     0
 #define FUNCTION_TAG 1
@@ -13,16 +15,14 @@
 #define FORWARD_TAG  3
 #define FREE_TAG     4
 
-// tages used for primitive types
-#define _int_TAG     5
-#define _float_TAG   5
-#define _char_TAG    5
-
-
-
-#define INT_CTR      -1
-#define FLOAT_CTR    -2
-#define CHAR_CTR     -3
+// Boxed Int/Char/Float used to get their own hardcoded tag (all sharing the
+// literal value 5) and a children[1] sentinel (INT_CTR/CHAR_CTR/FLOAT_CTR)
+// to tell them apart, since a bare tag can't. That's gone -- see Symbol's
+// `payload` field in node.h and archetecture.md's "Boxed primitives, and
+// the Symbol.payload design": codegen gives the three box constructors an
+// ordinary, dynamically-assigned tag like any other constructor, and sets
+// `.payload` on their Symbol once, at the same call site that already
+// emits `.tag`/`.arity`/`.name` for every constructor.
 
 // These need to be defines because I do tricky name concatenation.
 // child_at(r,k) get the kth child of a node where k is a constant
@@ -39,9 +39,12 @@
 #define child_at_c(r, k) child_at_##k(r.n).c
 #define child_at_f(r, k) child_at_##k(r.n).f
 #define child_at_a(r, k) child_at_##k(r.n).a
-#define child_at_v(r, i) (i < 3 ? r.n->children[i] : r.n->children[3].a[i-3])
-// I don't think I need this.
-#define set_child_at(r, i, v) child_at_v(r,i) = v
+#define child_at_v(r, i) ((i) < 3 ? r.n->children[i] : r.n->children[3].a[(i)-3])
+// child_at_v(r,i) is a ternary of two `union field` *values* -- never an
+// lvalue in C (unlike C++, `?:` doesn't yield one even when both branches
+// are lvalues), so `child_at_v(r,i) = v` doesn't compile. set_child_at
+// needs its own, pointer-typed ternary to dereference and assign through.
+#define set_child_at(r, i, v) (*((i) < 3 ? &r.n->children[i] : &r.n->children[3].a[(i)-3]) = (v))
 
 
 
@@ -50,7 +53,29 @@ static inline unsigned char TAG(union field root)
 {
     return root.n->symbol->tag;
 }
-__attribute__((always_inline)) 
+// `forward_hnf` is a deliberate no-op (archetecture.md's "FORWARD_TAG
+// collapsing" design: never mutate the original reference in here, leave
+// following the chain to whoever's consuming the value, so a chain is
+// never illegally compressed mid-walk) -- so a single `.hnf` call can
+// leave `root` pointing at a FORWARD_TAG node instead of a real one.
+// Every consumer that needs the actual resolved value handles this in its
+// own loop, with its own reassignable local: a case's own dispatch loop
+// (`case FORWARD_TAG: scrutinee = child_at(scrutinee,0); break;`,
+// Rice.Codegen.C.ToC's generated code -- and, since that loop is the one
+// place the ICurry block's later `IVarAccess`/`INodeAssign` references
+// keep reading from, it also writes the fully-resolved value back into
+// the *original* scrutinee variable once resolution finishes, not just
+// its own loop-local copy -- see `writeBack` there) and apply_hnf's own
+// while loop below both already do this. HNF itself deliberately stays a
+// single, non-looping `.hnf` call: a version that resolved all the way
+// through internally and returned where it landed was tried and reverted
+// -- it broke nf_all's own backtracking loop, which depends on repeatedly
+// re-examining the *same* top-level node object undo() restores by
+// address; chasing straight through to a downstream value once loses
+// that identity, and the second exploration silently re-inspects a value
+// that's already fully reduced instead of the (undo-restored) choice
+// point.
+__attribute__((always_inline))
 static inline void HNF(union field root)
 {
     return root.n->symbol->hnf(root);
@@ -67,27 +92,40 @@ static inline void HNF(union field root)
 // TEST == 2 evaluate known functions
 // TEST == 3 early backtracking
 
+// The backtracking stack can be used pretty much anywhere, so it almost has
+// to be a global variable -- the only alternative is to pass it to every
+// single function. Declared here (moved up from further down in this file)
+// because push_node, right below, is the first of many functions in this
+// header that reference it -- an extern declared only after its first use
+// is an implicit-declaration error under -Wall/-Werror, previously unnoticed
+// simply because nothing had compiled this file with real warnings on.
+extern Stack* bt_stack;
+
+// Used to print out the total number of memory allocations (see alloc() in
+// memory.h). Same "declared before first use" reasoning as bt_stack above.
+extern unsigned long mem;
+
+// Forward declarations: push_node/fail_nf (right below) call these before
+// their real definitions appear further down in this file (copy/save_copy
+// in runtime.c; fail, static inline, further down in this file) -- without
+// a declaration in scope first, this is an implicit function declaration,
+// which -Wall/-Werror correctly rejects.
+static inline void fail(union field root);
+union field copy(union field node);
+void save_copy(union field n);
+
 #if TEST == NO_OPTS
 // push a node on the backtracking stack
-__attribute__((always_inline)) 
+__attribute__((always_inline))
 static inline void push_node(union field root, bool nondet)
 {
     root.n->nondet = nondet;
     stack_push(bt_stack, root, copy(root), false);
 }
-// when reducing a node to normal form
-// if the child is FAIL, then the root should also be fail.
-__attribute__((always_inline)) 
-static inline void fail_nf(union field child, union field root)
-{
-    root.n->nondet |= child.n->nondet;
-    save_copy(root);
-    fail(node);
-}
 #else
 // push a node ot the backtracking stack
 // if the non-det flat is set.
-__attribute__((always_inline)) 
+__attribute__((always_inline))
 static inline void push_node(union field root, bool nondet)
 {
     root.n->nondet = nondet;
@@ -97,6 +135,18 @@ static inline void push_node(union field root, bool nondet)
     }
 }
 #endif
+
+// when reducing a node to normal form, if the child is FAIL, then the root
+// should also be FAIL. Doesn't depend on which push_node variant is active
+// above, so it's defined once, for every TEST level -- previously this only
+// existed under TEST == NO_OPTS, but nf() calls it unconditionally.
+__attribute__((always_inline))
+static inline void fail_nf(union field child, union field root)
+{
+    root.n->nondet |= child.n->nondet;
+    save_copy(root);
+    fail(root);
+}
 
 
 ////////////////////////////////////////////////
@@ -201,18 +251,17 @@ static Symbol fail_symbol    = { .tag = FAIL_TAG,     .arity = 0, .name = "FAIL"
 static Symbol choice_symbol  = { .tag = CHOICE_TAG,   .arity = 2, .name = "?",       .hnf = &choice_hnf };
 static Symbol forward_symbol = { .tag = FORWARD_TAG,  .arity = 1, .name = "->",      .hnf = &forward_hnf };
 static Symbol free_symbol    = { .tag = FREE_TAG,     .arity = 0, .name = "free",    .hnf = &CTR_hnf };
-static Symbol int_symbol     = { .tag = _int_TAG,     .arity = 1, .name = "int",     .hnf = &CTR_hnf };
-static Symbol char_symbol    = { .tag = _char_TAG,    .arity = 1, .name = "char",    .hnf = &CTR_hnf };
-static Symbol float_symbol   = { .tag = _float_TAG,   .arity = 1, .name = "float",   .hnf = &CTR_hnf };
 static Symbol apply_symbol   = { .tag = FUNCTION_TAG, .arity = 0, .name = "apply",   .hnf = &apply_hnf };
+// Boxed Int/Char/Float no longer have hardcoded Symbols here -- codegen
+// generates them (Phase 1), an ordinary tag plus `.payload` set, like any
+// other constructor. See the comment near FAIL_TAG above.
 
-// the backtracking stack can be used pretty much anywhere
-// So it almost has to be a global variable.
-// The only alternative is to pass it to every single function.
-extern Stack* bt_stack;
-
-// used to print out the total number of memory allocations.
-extern unsigned long mem;
+// Placeholder for case shortcutting (archetecture.md's "Case Shortcutting
+// (RET)" section, Phase 2 -- not implemented yet). Nothing calls
+// make_restore currently, so this only needs to exist for the file to
+// compile; its actual fields don't need to be correct until Phase 2 wires
+// case shortcutting up for real.
+static Symbol backup_symbol  = { .tag = FAIL_TAG,     .arity = 0, .name = "RET",     .hnf = &CTR_hnf };
 
 // when I know I'm going to reduce an apply node, 
 // I already have the number of arguments as part of the name.
@@ -297,119 +346,15 @@ static inline union field make_choice(union field left, union field right)
 }
 
 
-__attribute__((always_inline)) 
-static inline void set_int(union field root, long i, int missing)
-{
-    root.n->missing = 0;
-    root.n->symbol = &int_symbol;
-    root.n->missing = missing;
-    child_at_i(root,0) = i;
-    child_at_i(root,1) = INT_CTR;
-    child_at_n(root,2) = NULL;
-    root.n->children[3].a = NULL;
-}
-__attribute__((always_inline)) 
-static inline void set_int_free(union field root, long i, int missing)
-{
-    set_int(root,i,missing);
-    root.n->nondet = true;
-}
+// Boxed Int/Char/Float make/set functions used to live here, hardcoded
+// against int_symbol/char_symbol/float_symbol above. Deleted -- codegen
+// (Phase 1) generates make__int/set__int/etc. against its own
+// dynamically-assigned, .payload-tagged Symbols instead (Compile.PrimOps),
+// so there's exactly one representation, not two. See the comment near
+// FAIL_TAG above and archetecture.md's "Boxed primitives, and the
+// Symbol.payload design".
 
-__attribute__((always_inline)) 
-static inline union field make_int(long i, int missing)
-{
-    union field n;
-    n.n = (Node*)alloc(sizeof(Node));
-    n.n->symbol = &int_symbol;
-    n.n->missing = missing;
-    child_at_i(n,0) = i;
-    child_at_i(n,1) = INT_CTR;
-    return n;
-}
-__attribute__((always_inline)) 
-static inline union field make_int_free(long i, int missing)
-{
-    union field n = make_int(i,missing);
-    n.n->nondet = true;
-    return n;
-}
-
-__attribute__((always_inline)) 
-static inline void set_char(union field root, long c, int missing)
-{
-    root.n->missing = 0;
-    root.n->symbol = &char_symbol;
-    root.n->missing = missing;
-    child_at_c(root,0) = c;
-    child_at_i(root,1) = CHAR_CTR;
-    child_at_n(root,2) = NULL;
-    root.n->children[3].a = NULL;
-}
-__attribute__((always_inline)) 
-static inline void set_char_free(union field root, long c, int missing)
-{
-    set_char(root,c,missing);
-    root.n->nondet = true;
-}
-
-__attribute__((always_inline)) 
-static inline union field make_char(long c, int missing)
-{
-    union field n;
-    n.n = (Node*)alloc(sizeof(Node));
-    n.n->symbol = &char_symbol;
-    n.n->missing = missing;
-    child_at_c(n,0) = c;
-    child_at_i(n,1) = CHAR_CTR;
-    return n;
-}
-__attribute__((always_inline)) 
-static inline union field make_char_free(long c, int missing)
-{
-    union field n = make_char(c,missing);
-    n.n->nondet = true;
-    return n;
-}
-
-__attribute__((always_inline)) 
-static inline void set_float(union field root, double f, int missing)
-{
-    root.n->missing = 0;
-    root.n->symbol = &float_symbol;
-    root.n->missing = missing;
-    child_at_f(root,0) = f;
-    child_at_i(root,1) = FLOAT_CTR;
-    child_at_n(root,2) = NULL;
-    root.n->children[3].a = NULL;
-}
-__attribute__((always_inline)) 
-static inline void set_float_free(union field root, long f, int missing)
-{
-    set_float(root,f,missing);
-    root.n->nondet = true;
-}
-
-__attribute__((always_inline)) 
-static inline union field make_float(double f, int missing)
-{
-    union field n;
-    n.n = (Node*)alloc(sizeof(Node));
-    n.n->symbol = &float_symbol;
-    n.n->missing = missing;
-    child_at_f(n,0) = f;
-    child_at_i(n,1) = FLOAT_CTR;
-    return n;
-}
-__attribute__((always_inline)) 
-static inline union field make_float_free(long f, int missing)
-{
-    union field n = make_float(f,missing);
-    n.n->nondet = true;
-    return n;
-}
-
-
-__attribute__((always_inline)) 
+__attribute__((always_inline))
 static inline union field free_var()
 {
     union field n;

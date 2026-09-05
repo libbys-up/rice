@@ -1,38 +1,55 @@
---- Library for writing C code
---- This include several combinators for creating fragments of C code,
---- and is meant to help with the translation from ICurry to C.
+------------------------------------------------------------------------------
+--- A small DSL for emitting C source, built on `Text.Pretty`'s `Doc` --
+--- see `src/codegen-runtime-review.md`'s case for this over old_rice's
+--- `String`-typed version: correct indentation/line-breaking falls out of
+--- `Doc` structurally (via `nest`/`$$`), instead of every helper having to
+--- hand-thread a `tab` depth and get it right. Modeled on the same idiom
+--- the external `icurry` package's own `ICurry.Pretty` already uses for a
+--- structurally similar job (blocks, statements, expressions) -- `nest`
+--- for indentation, `$$` to stack lines, `<+>`/`<>` for same-line
+--- concatenation.
 ---
---- This is a compromize between making a full IR to represent C
---- and just using strings for everything.
+--- `CStmt`/`CExpr` are both just `Doc`: a `CStmt` is one complete,
+--- semicolon-or-brace-terminated statement (possibly itself a multi-line
+--- block), and a sequence of statements is `vcat` of them, not a separate
+--- list type -- there's no `[CStmt]` vs `CStmt` distinction to keep
+--- straight the way old_rice's list-of-lines version needed.
 ---
---- @author Michael Hanus
---- @version January 2013
+--- Deliberately excluded (see `STATUS.md`'s Phase 1 scoping): every
+--- RET/case-shortcutting-specific helper old_rice's `Compile.C` had
+--- (`ret_hnf`, `backup`, `nbackup`, `make_restore`, `fwd`, `isRET`,
+--- `hasRET`) -- that machinery is Phase 2 work, and porting the helpers
+--- now with nothing to call them would just be unused code to maintain.
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
 
-module Codegen.C.C where
+module Rice.Codegen.C.C where
 
-import ICurry.Types 
-import Data.List (intercalate, isPrefixOf, splitOn, intersect)
+import Text.Pretty
+import ICurry.Types (IQName, IVarIndex)
+import Rice.Codegen.Names (mangle)
 
-import Codegen.CodeGen
-
--- Types of different pieces of C code
+--- A C type, written out verbatim (`"int"`, `"field"`, `"Node*"`, ...).
 type CType = String
+
+--- A C identifier.
 type CName = String
-type CStmt = CodeGen ()
-type CExpr = String
-type CFunction = String
 
----- tab in a line of code
---tab :: Int -> String -> String
---tab n s
--- | n == 0    = s
--- | otherwise = "  " ++ tab (n-1) s
+--- One complete C statement -- a single line (`x = y;`) or a whole nested
+--- block (an `if`, a `switch`, a function definition); either way, one
+--- `Doc` that renders as itself, no wrapping required to sequence it with
+--- others (just `vcat`/`$$`).
+type CStmt = Doc
 
--------------------------------------------------------------------
+--- A C expression.
+type CExpr = Doc
+
+------------------------------------------------------------------------------
 -- Operators
--------------------------------------------------------------------
+------------------------------------------------------------------------------
 
-infixl 8 .*, ./
+infixl 8 .*, ./, .%
 infixl 7 .+, .-
 infix  6 .==, .!=, .<, .>, .<=, .>=
 infixr 5 .&
@@ -41,315 +58,293 @@ infixr 3 .&&
 infixr 2 .||
 infixl 1 .=, .|=
 
+binop :: String -> CExpr -> CExpr -> CExpr
+binop op x y = x <+> text op <+> y
 
-(.*) :: CExpr -> CExpr -> CExpr
-x .* y = x ++ " * " ++ y
+(.*), (./), (.%), (.+), (.-) :: CExpr -> CExpr -> CExpr
+x .* y = binop "*" x y
+x ./ y = binop "/" x y
+x .% y = binop "%" x y
+x .+ y = binop "+" x y
+x .- y = binop "-" x y
 
-(./) :: CExpr -> CExpr -> CExpr
-x ./ y = x ++ " / " ++ y
+(.==), (.!=), (.<=), (.>=), (.<), (.>) :: CExpr -> CExpr -> CExpr
+x .== y = binop "==" x y
+x .!= y = binop "!=" x y
+x .<= y = binop "<=" x y
+x .>= y = binop ">=" x y
+x .<  y = binop "<"  x y
+x .>  y = binop ">"  x y
 
-(.+) :: CExpr -> CExpr -> CExpr
-x .+ y = x ++ " + " ++ y
+(.&&), (.||), (.&), (.|) :: CExpr -> CExpr -> CExpr
+x .&& y = binop "&&" x y
+x .|| y = binop "||" x y
+x .&  y = binop "&"  x y
+x .|  y = binop "|"  x y
 
-(.-) :: CExpr -> CExpr -> CExpr
-x .- y = x ++ " - " ++ y
+--- A complete, semicolon-terminated assignment statement -- unlike
+--- old_rice's `(.=)`, which returned a bare `CExpr` and left every call
+--- site to remember its own trailing `;` (a real, repeated source of bugs
+--- when ported verbatim -- see the review doc), this always finishes the
+--- statement.
+(.=) :: CExpr -> CExpr -> CStmt
+x .= e = x <+> equals <+> e <> semi
 
-(.==) :: CExpr -> CExpr -> CExpr
-x .== y = x ++ " == " ++ y
+(.|=) :: CExpr -> CExpr -> CStmt
+x .|= e = x <+> text "|=" <+> e <> semi
 
-(.!=) :: CExpr -> CExpr -> CExpr
-x .!= y = x ++ " != " ++ y
-
-(.<=) :: CExpr -> CExpr -> CExpr
-x .<= y = x ++ " <= " ++ y
-
-(.>=) :: CExpr -> CExpr -> CExpr
-x .>= y = x ++ " >= " ++ y
-
-(.<) :: CExpr -> CExpr -> CExpr
-x .< y = x ++ " < " ++ y
-
-(.>) :: CExpr -> CExpr -> CExpr
-x .> y = x ++ " > " ++ y
-
-(.&&) :: CExpr -> CExpr -> CExpr
-x .&& y = x ++ " && " ++ y
-
-(.||) :: CExpr -> CExpr -> CExpr
-x .|| y = x ++ " || " ++ y
-
-(.|=) :: CExpr -> CExpr -> CExpr
-x .|= y = x ++ " |= " ++ y
-
-(.|) :: CExpr -> CExpr -> CExpr
-x .| y = x ++ " | " ++ y
-
-(.&) :: CExpr -> CExpr -> CExpr
-x .& y = x ++ " & " ++ y
-
-(.=) :: CName -> CExpr -> CExpr
-x .= e = x ++ " = " ++ e
-
--------------------------------------------------------------------------
+------------------------------------------------------------------------------
 -- Preprocessor
--------------------------------------------------------------------------
+------------------------------------------------------------------------------
 
 cinclude :: CName -> CStmt
-cinclude file = emit $ "#include \"" ++ file ++ ".h\""
-
-ainclude :: CName -> CStmt
-ainclude file = emit $ "#include <" ++ file ++ ".h>"
+cinclude file = text "#include" <+> dquotes (text file <> text ".h")
 
 cdefine :: CName -> Int -> CStmt
-cdefine name val = emit $ "#define " ++ name ++ " " ++ show val
+cdefine name val = text "#define" <+> text name <+> int val
 
--------------------------------------------------------------------------
--- statements
--------------------------------------------------------------------------
+------------------------------------------------------------------------------
+-- Blocks and control flow
+------------------------------------------------------------------------------
 
-comment :: String -> CStmt
-comment str = emit $ "// " ++ str
+--- Indent width for a nested block -- matches `STYLE_GUIDE.md`'s C
+--- convention (4-space indent, Allman braces: opening and closing braces
+--- both at the enclosing statement's own indentation, only the body
+--- nested).
+blockIndent :: Int
+blockIndent = 4
 
-big_comment :: [String] -> CStmt
-big_comment strs = do emit "/*"
-                      lift modify ((\t,c) -> (t+1,c))
-                      mapM_ (emit . ("* "++)) strs
-                      lift modify ((\t,c) -> (t-1,c))
-                      emit " */"
+cblock :: [CStmt] -> CStmt
+cblock body = lbrace $$ nest blockIndent (vcat body) $$ rbrace
 
-stmt :: CStmt -> CStmt
-stmt s = emit (s ++ ";")
+cif :: CExpr -> [CStmt] -> CStmt
+cif c body = text "if" <> parens c $$ cblock body
 
-call :: CName -> [CExpr] -> CExpr
-call name es = name ++ cargs es
+celse :: [CStmt] -> CStmt
+celse body = text "else" $$ cblock body
 
-scall :: CName -> [CExpr] -> CStmt
-scall name es = stmt (call name es)
+cElseIf :: CExpr -> [CStmt] -> CStmt
+cElseIf c body = text "else if" <> parens c $$ cblock body
 
-alloc_n :: Int -> CExpr
-alloc_n num
- | num == 1  = "(Node*)alloc(sizeof(Node))"
- | otherwise = "(Node*)alloc("++show num++" * sizeof(Node))"
-alloc_f :: Int -> CExpr
-alloc_f num
- | num == 1  = "(field*)alloc(sizeof(field))"
- | otherwise = "(field*)alloc("++show num++" * sizeof(field))"
+cifElse :: CExpr -> [CStmt] -> [CStmt] -> CStmt
+cifElse c t f = cif c t $$ celse f
 
+--- An if/else-if/.../else chain -- one `CStmt` per condition, falling
+--- through to a final, unconditional block.
+cifCase :: [(CExpr, [CStmt])] -> [CStmt] -> CStmt
+cifCase []            fallback = cblock fallback
+cifCase ((c,b):rest) fallback =
+  cif c b $$ vcat (map (uncurry cElseIf) rest) $$ celse fallback
 
-creturn :: CStmt
-creturn = emit "return;"
-
-creturnExp :: CExp -> CStmt
-creturnExp e = emit $ "return "++e++";"
-
-retCall :: CName -> [CExpr] -> CStmt
-retCall name es = creturnExp (call name es)
-
-cbreak :: CStmt
-cbreak = emit "break;"
-
-ctrue :: CExp
-ctrue = "true"
-
-cfalse :: CExp
-cfalse = "false"
-
-cblock :: CStmt -> CStmt
-cblock stmts = do emit "{"
-                  modify (\(t,c) -> (t+2,c))
-                  stmts
-                  modify (\(t,c) -> (t-2,c))
-                  emit "}"
-
-cif :: CExpr -> CStmt -> CStmt
-cif c b = do emit ("if(" ++ c ++ ")")
-             cblock b
-
-
-cifCase :: [(CExpr, CStmt)] -> CStmt -> CStmt
-cifCase [] = return ()
-cifCase ((c,b):bs) elseBlock 
-  = do cif c b
-       mapM_ celseIf bs
-       celse elseBlock
- where celseIf (c,b) = do emit $ "else if("++c++")"
-                          cblock b
-
-cifElse :: CExpr -> CStmt -> CStmt -> CStmt
-cifElse c t f = do cif c t
-                   celse f
-
-celse :: CStmt -> CStmt
-celse b = do emit "else"
-             cblock b
-
-cwhile :: CExpr -> CStmt -> CStmt
-cwhile c b = do emit $ "while(" ++ c ++ ")"
-                cblock b
+cwhile :: CExpr -> [CStmt] -> CStmt
+cwhile c body = text "while" <> parens c $$ cblock body
 
 cswitch :: CExpr -> [CStmt] -> CStmt
-cswitch e bs = do emit $ "switch("++ e ++ ")"
-                  mapM_ cblock bs
+cswitch e cases = text "switch" <> parens e $$ cblock cases
 
-ccase :: CExpr -> CStmt -> CStmt
-ccase lbl body = do emit $ "case " ++ lbl ++ ":"
-                    cblock body
+ccase :: CExpr -> [CStmt] -> CStmt
+ccase lbl body = text "case" <+> lbl <> colon $$ cblock body
 
--------------------------------------------------------------------------
--- functions
--------------------------------------------------------------------------
+creturn :: CStmt
+creturn = text "return" <> semi
 
-sig :: CType -> CName -> [(CType,CName)] -> String
-sig ret name ps = ret ++ " " ++ name ++ cparams ps
+creturnExpr :: CExpr -> CStmt
+creturnExpr e = text "return" <+> e <> semi
 
--- function declarations are the same in both .c and .h files,
--- the definitions in .h file should always be inline.
-funDecl :: CType -> CName -> [(CType,CName)] -> CStmt
-funDecl ret name ps = emit $ sig ret name ps ++ ";"
+cbreak :: CStmt
+cbreak = text "break" <> semi
 
-cfunDefn :: CType -> CName -> [(CType,CName)] -> CStmt -> CStmt
-cfunDefn ret name ps stmts = do emit $ sig ret name ps
-                                cblock stmts
+ctrue, cfalse :: CExpr
+ctrue  = text "true"
+cfalse = text "false"
 
-hfunDefn :: CType -> CName -> [(CType,CName)] -> CStmt -> CStmt
-hfunDefn ret name ps stmts = do emit "__attribute__((always_inline)) "
-                                emit $ "static inline " ++ sig ret name ps
-                                cblock stmts
+comment :: String -> CStmt
+comment s = text "//" <+> text s
 
-field :: IVarIndex -> CType
-field v = "field " ++ (var v)
+------------------------------------------------------------------------------
+-- Calls, functions
+------------------------------------------------------------------------------
 
-list :: [CExpr] -> CExpr
-list = intercalate ", "
+call :: CName -> [CExpr] -> CExpr
+call name es = text name <> cargs es
+
+scall :: CName -> [CExpr] -> CStmt
+scall name es = call name es <> semi
+
+retCall :: CName -> [CExpr] -> CStmt
+retCall name es = text "return" <+> call name es <> semi
+
+alloc_n :: Int -> CExpr
+alloc_n n = case n of
+  1 -> text "(Node*)alloc(sizeof(Node))"
+  _ -> text "(Node*)alloc" <> parens (int n <+> text "* sizeof(Node)")
+
+alloc_f :: Int -> CExpr
+alloc_f n = case n of
+  1 -> text "(field*)alloc(sizeof(field))"
+  _ -> text "(field*)alloc" <> parens (int n <+> text "* sizeof(field)")
+
+--- A C function's signature line, no trailing `;` or body.
+sig :: CType -> CName -> [(CType,CName)] -> Doc
+sig ret name ps = text ret <+> text name <> cparams ps
+
+cfunDefn :: CType -> CName -> [(CType,CName)] -> [CStmt] -> CStmt
+cfunDefn ret name ps body = sig ret name ps $$ cblock body
+
+--- A function meant to be force-inlined -- every `make_X`/`set_X` in the
+--- generated header is one of these (matches `runtime.h`'s own
+--- `__attribute__((always_inline)) static inline` convention for exactly
+--- the same functions, hand-written there for the built-in constructors).
+hfunDefn :: CType -> CName -> [(CType,CName)] -> [CStmt] -> CStmt
+hfunDefn ret name ps body =
+  text "__attribute__((always_inline))" $$
+  text "static inline" <+> sig ret name ps $$
+  cblock body
+
+cfunDecl :: CType -> CName -> [(CType,CName)] -> CStmt
+cfunDecl ret name ps = sig ret name ps <> semi
+
+--- One entry of a designated-initializer list (`.field = value`, no
+--- trailing `;` and no trailing `,` -- `carray`'s own `punctuate comma`
+--- handles joining). Deliberately distinct from `(.=)`: that produces a
+--- complete, semicolon-terminated *statement*; this produces one
+--- comma-separated *entry* inside a `{ ... }` literal -- conflating the
+--- two was a real bug risk in old_rice's version, which used the same
+--- combinator for both and relied on every call site to manually append
+--- or omit the right punctuation.
+dinit :: String -> CExpr -> CExpr
+dinit field val = text ('.':field) <+> equals <+> val
+
+------------------------------------------------------------------------------
+-- Argument/parameter lists, literals
+------------------------------------------------------------------------------
 
 cargs :: [CExpr] -> CExpr
-cargs xs = "(" ++ list xs ++ ")"
+cargs = parens . hsep . punctuate comma
 
-cparams :: [(CType,CExpr)] -> CExpr
-cparams ps = "(" ++ list (map param ps) ++ ")"
- where param (t,x) = t ++ " " ++ x
+cparams :: [(CType,CName)] -> CExpr
+cparams ps = parens (hsep (punctuate comma (map param ps)))
+ where param (t,x) = text t <+> text x
 
 carray :: [CExpr] -> CExpr
-carray xs = "{" ++ list xs ++ "}"
+carray = braces . hsep . punctuate comma
 
----------------------------------------------------
--- RICE specific components
----------------------------------------------------
+------------------------------------------------------------------------------
+-- Boxed-value payload access
+------------------------------------------------------------------------------
 
--- see archetecture.md for a description of the runtime data structures.
--- There is also child_at_v(node,index) for when the index is not a con
+--- Which `union field` member (`node.h`) a given `CType` lives in --
+--- `"int"`/`"char"`/`"float"` are the type names used everywhere else in
+--- this DSL (matching `litType`'s convention), but the union's own member
+--- names are the single letters `.i`/`.c`/`.f`, not the full words.
+fieldMember :: CType -> String
+fieldMember t = case t of
+  "int"   -> "i"
+  "char"  -> "c"
+  "float" -> "f"
+  _       -> error ("Rice.Codegen.C.C.fieldMember: unknown type " ++ t)
 
--- Get a child Node following a path.
-children :: CName -> [Int] -> CExpr
-children n xs = foldl childAt n xs
- where childAt x y = "child_at("++x++", "++show y++")"
+--- Project a `field`-typed C expression down to one specific raw member
+--- (`.i`/`.c`/`.f`) -- used both for a primitive operation's already-`field`
+--- variable arguments (`showPrim` in `Rice.Codegen.C.PrimOps`) and for
+--- comparing a literal-case scrutinee against a branch's literal value.
+rawField :: CType -> CExpr -> CExpr
+rawField t e = e <> dot <> text (fieldMember t)
 
--- get a child converted to the appropriate type
-child_t :: CType -> CName -> CExpr
-child_t "int" n   = "child_at_i("++n++",0)"
-child_t "char" n  = "child_at_c("++n++",0)"
-child_t "float" n = "child_at_f("++n++",0)"
-
--- converte any to to int/char/float
--- This is messy, but it will work anywhere.
-conv_t :: CType -> CName -> CExpr
-conv_t "int" n   = "((field)"++n++").i"
-conv_t "char" n  = "((field)"++n++").c"
-conv_t "float" n = "((field)"++n++").f"
-
--- convert anything to a field.
+--- The reverse: wrap a raw C value up as a `field`, via the GCC/clang
+--- cast-to-union extension (`runtime.h`'s own `union field` and every
+--- `__attribute__` in it already depend on GCC/clang, so this isn't a new
+--- portability requirement). Used for a bare literal appearing directly
+--- as an expression, not as a primitive operation's argument.
 toUnion :: CType -> CExpr -> CExpr
-toUnion "int" exp   = "(field)(long)("++exp++")"
-toUnion "char" exp  = "(field)(unsigned long)("++exp++")"
-toUnion "float" exp = "(field)(double)("++exp++")"
+toUnion t e = case t of
+  "int"   -> text "(field)(long)"          <> parens e
+  "char"  -> text "(field)(unsigned long)" <> parens e
+  "float" -> text "(field)(double)"        <> parens e
+  _       -> error ("Rice.Codegen.C.C.toUnion: unknown type " ++ t)
+
+------------------------------------------------------------------------------
+-- Children access
+------------------------------------------------------------------------------
+
+--- `child_at(n, i0)`, or `child_at(child_at(n, i0), i1)` for a nested
+--- position -- `INodeAssign`'s `[Int]` position list is only ever more
+--- than one element deep when assigning into an already-nested child, so
+--- folding `child_at` is exactly the right traversal.
+children :: CExpr -> [Int] -> CExpr
+children n ixs = foldl childAt n ixs
+ where childAt x i = call "child_at" [x, int i]
+
+------------------------------------------------------------------------------
+-- Curry-specific naming and node-field access
+------------------------------------------------------------------------------
 
 hnf :: IQName -> CName
 hnf n = mangle n ++ "_hnf"
 
--- NOT USED IN THIS VERSION
--- keeping for later
--- ret_hnf :: IQName -> CName
--- ret_hnf n = mangle n ++ "_RET_hnf"
+tag :: IQName -> CName
+tag n = mangle n ++ "_TAG"
 
-tag :: IQName -> String
-tag f = mangle f ++ "_TAG"
+--- ICurry variable naming: `x0` is always the incoming node itself -- the
+--- one index `ICurry.Types` itself documents as reserved (its own
+--- `IVarDecl` note) -- so `v == 0` is the only special case here. Both
+--- reference implementations this was designed against also hardcoded
+--- `v == 1` to the name `"scrutinee"`, on the assumption a case's
+--- scrutinee variable is always numbered 1; that's not actually reserved
+--- by ICurry at all (confirmed empirically: an ordinary, unrelated
+--- variable can just as easily be numbered 1), and the collision is a
+--- real bug, not a hypothetical one -- `Rice.Codegen.C.ToC.showConsCase`'s
+--- own internal scrutinee-copy variable (`scrutinee` below) is a genuinely
+--- separate thing from whichever ICurry variable is being scrutinized,
+--- and when that variable *happened* to be numbered 1, the naming
+--- collision produced `field scrutinee = scrutinee;` -- self-referential
+--- under C's scoping rules (the RHS names the just-declared local, not
+--- any outer one), silently reading uninitialized memory. `varName` gives
+--- the bare identifier (for parameter lists and declarations, which need a
+--- plain `CName`, not an expression); `var` is the same name as a `CExpr`.
+varName :: IVarIndex -> CName
+varName v
+  | v == 0    = "root"
+  | otherwise = "v" ++ show (abs v)
 
--- variable index to a unique variable name
--- scrutinee is used for the case-shortcutting optimization
-var :: Int -> CExpr
-var v
- | v == 0    = "root"
- | v == 1    = "scrutinee"
- | otherwise = "v"++show (abs v)
+var :: IVarIndex -> CExpr
+var = text . varName
 
-node :: Int -> CExpr
-node v = var v ++ ".n"
+fieldDecl :: IVarIndex -> CStmt
+fieldDecl v = text "field" <+> var v <> semi
 
--- get the symbol for the node
-symbol :: String -> CExpr
-symbol v = v ++ ".n->symbol"
+--- `root` names the incoming node (ICurry variable 0, see `varName`).
+--- `scrutinee` is a name `Rice.Codegen.C.ToC.showConsCase` alone owns for
+--- its own internal case-walking copy -- prefixed so it can never collide
+--- with a real `"v" ++ show n` variable name (see `varName`'s note above).
+root, scrutinee :: CExpr
+root      = text "root"
+scrutinee = text "_scrutinee"
 
--- reduce variable v to head normal form.
-symhnf :: CExpr -> CExpr
-symhnf v = "HNF("++v++")"
+symbol :: CExpr -> CExpr
+symbol v = v <> text ".n->symbol"
 
-symtag :: CExpr -> CExpr
-symtag v = v ++ ".n->symbol->tag"
+symhnf :: CExpr -> CStmt
+symhnf v = text "HNF" <> parens v <> semi
 
-symname :: CExpr -> CExpr
-symname v = v ++ ".n->symbol->name"
-
-symarity :: CExpr -> CExpr
-symarity v = v ++ ".n->symbol->arity"
-
-root :: CExpr
-root = "root"
-
-------------------------------------------------------
--- Case-shortcutting specific
-------------------------------------------------------
-fwd :: Int -> CExpr
-fwd v = var v ++ if v == 0 then "" else "_forward"
-
-hasRET :: [IVarIndex] -> Bool
-hasRET = not . null . isRET
-
-isRET :: IVarIndex -> Bool
-isRET v = v < (-1)
-
-isScrutenee :: IVarIndex -> Bool
-isScrutenee v = v == 1
-
-nondet :: CExpr -> CExpr
-nondet v = v ++ ".n->nondet"
-
-missing :: CExpr -> CExpr
-missing v = v ++ ".n->missing"
+symtag, symname, symarity, symPayload, nondet, missing :: CExpr -> CExpr
+symtag     v = symbol v <> text "->tag"
+symname    v = symbol v <> text "->name"
+symarity   v = symbol v <> text "->arity"
+symPayload v = symbol v <> text "->payload"
+nondet     v = v <> text ".n->nondet"
+missing    v = v <> text ".n->missing"
 
 nullf :: CExpr
-nullf = "(field)(Node*)NULL"
+nullf = text "(field)(Node*)NULL"
 
-make_restore :: IVarIndex -> CStmt
-make_restore v = nbackup v .= scall "make_restore" [nbackup v]
+--- The two debug-trace calls every function/case leaves with, matching
+--- `archetecture.md`'s documented runtime convention (`debug`/`debug_expr`,
+--- no-ops unless built with `-DDEBUG`).
+debugLeave :: String -> [CStmt]
+debugLeave msg =
+  [ scall "debug"      [text "LOW", dquotes (text ("leaving " ++ msg ++ "\\n"))]
+  , scall "debug_expr" [text "LOW", root]
+  ]
 
--- name of the backup node for case shortcutting node.
--- So if our variable is -5, then our backup name is backup5
-backup :: IVarIndex -> CExpr
-backup v
- | v < 0 = "backup"++show (abs v)
- | otherwise = var v
-
-nbackup :: IVarIndex -> CExpr
-nbackup v = backup v ++ ".n"
-
-scrutinee :: CExpr
-scrutinee = "scrutinee"
-
--------------------------------------
--- generating debugging code
--------------------------------------
-
-debug_leave :: IQName -> CStmt
-debug_leave n = do scall "debug" ["LOW", msg]
-                   scall "debug_expr" ["LOW", root]
- where msg = "leaving " ++ toName n ++ "\\n"
+------------------------------------------------------------------------------

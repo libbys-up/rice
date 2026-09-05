@@ -14,7 +14,7 @@ union field make_Prelude_prim_USshowCharLiteral(union field c)
 {
     union field root;
     root.n = (Node *)alloc(sizeof(Node));
-    set_Prelude_prim_USshowCharLiteral(root, );
+    set_Prelude_prim_USshowCharLiteral(root, c);
     return root;
 }
 

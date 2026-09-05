@@ -27,7 +27,14 @@ void stack_push(Stack* s, union field from, union field rep, bool choice)
         FieldPair* new_array = (FieldPair*)alloc(2*size);
         memcpy(new_array, s->array, size);
         s->capacity *= 2;
+#ifdef GC
+        // GC_MALLOC'd memory is collector-managed; calling the ordinary
+        // free() on it is undefined behavior. Just drop the old array --
+        // the collector reclaims it once nothing references it, same as
+        // any other GC_MALLOC'd block that goes out of scope.
+#else
         free(s->array);
+#endif
         s->array = new_array;
     }
     s->array[s->size].choice = choice;
@@ -53,7 +60,10 @@ FieldPair* pop(Stack* s)
 // I'm not entirely sure if I need this.
 FieldPair* pop_to(Stack* s, int n)
 {
-    if(s->size <= n)
+    // n is always a previously-recorded stack size (see size(), which
+    // returns int for the same reason cutoff does in undo()), so this
+    // never actually compares against a negative n in practice.
+    if(n < 0 || s->size <= (size_t)n)
     {
         return NULL;
     }

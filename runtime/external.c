@@ -50,7 +50,7 @@ int unify(field x, field y)
         {
             return false;
         }
-        else if(FLOAT_CTR <= child_at_i(x,1) && child_at_i(x,1) <= INT_CTR)
+        else if(x.n->symbol->payload != PAYLOAD_NONE)
         {
             if(child_at_i(x,0) == child_at_i(y,0))
             {
@@ -174,19 +174,19 @@ bool lazy_unify(field s, field t)
                   return nondet << 1 | false;
                 #endif
               }
-              else if(child_at_i(scruts,1) == INT_CTR)
+              else if(scruts.n->symbol->payload == PAYLOAD_INT)
               {
-                return nondet << 1 | 
+                return nondet << 1 |
                     child_at_i(scruts,0) == child_at_i(scrutt,0);
               }
-              else if(child_at_i(scruts,1) == CHAR_CTR)
+              else if(scruts.n->symbol->payload == PAYLOAD_CHAR)
               {
-                return nondet << 1 | 
+                return nondet << 1 |
                     child_at_c(scruts,0) == child_at_c(scrutt,0);
               }
-              else if(child_at_i(scruts,1) == FLOAT_CTR)
+              else if(scruts.n->symbol->payload == PAYLOAD_FLOAT)
               {
-                return nondet << 1 | 
+                return nondet << 1 |
                     child_at_f(scruts,0) == child_at_f(scrutt,0);
               }
               else

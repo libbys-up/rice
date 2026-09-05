@@ -1,5 +1,20 @@
-module CodeGen.Names (getTag, toName, mangle, uninstance, 
+------------------------------------------------------------------------------
+--- Name mangling and small display helpers shared by `Rice.Codegen.C.*`.
+--- Ported from old_rice's `Compile.IUtil` (the naming logic itself is
+--- correct there and unchanged here) -- this file's own module header used
+--- to say `CodeGen.Names`, not matching its path (`Rice/Codegen/Names.
+--- curry`), the exact `Rice/Codegen/` naming inconsistency `STYLE_GUIDE.md`
+--- already flags; fixed here as part of the Phase 1 port.
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
+
+module Rice.Codegen.Names (getTag, toName, mangle, uninstance,
                       quote, strConst, isStrConst) where
+
+import Data.List (isPrefixOf, splitOn)
+import Data.Char (ord, isAlphaNum)
+import ICurry.Types (IQName)
 
 ----------------------------------------------------
 -- Name mangling
@@ -56,7 +71,18 @@ mangleChar c = case c of
                     '/'  -> "_FS"
                     '\\' -> "_BS"
                     '|'  -> "_OR"
-                    _    -> c
+                    _    | isAlphaNum c -> [c]
+                         -- Catch-all for anything not in the enumerated
+                         -- list above (and not already handled by '_') --
+                         -- confirmed necessary empirically, not just
+                         -- theoretical: kics2's own generated "no
+                         -- instance or default method for class
+                         -- operation `...'" placeholder names contain
+                         -- spaces and backticks, neither of which the
+                         -- original enumerated list anticipated, and
+                         -- both fatal to leave unescaped in a C
+                         -- identifier.
+                         | otherwise    -> "_X" ++ show (ord c)
 
 
 
@@ -86,8 +112,15 @@ uninstance (_,n,_)
 -- a large linked list of characters.
 -------------------------------------------------------
 
+--- Confirmed against `Rice.Transform.StrLit.condenseStrings`'s own,
+--- already-working convention (`TComb t c ("",getString f) []` -- an
+--- *empty* module string, the condensed string's own text as the name),
+--- not old_rice's assumed `m == "StringConst"`, which never actually
+--- matched anything Rice itself generates -- found empirically (a real
+--- program's `show`, which relies on exactly this path, produced
+--- `make___True` instead of a string-constant call).
 isStrConst :: IQName -> Bool
-isStrConst (m,_,_) = m == "StringConst"
+isStrConst (m,_,_) = null m
 
 quote :: String -> String
 quote str = "\"" ++ str ++ "\""
@@ -106,7 +139,6 @@ escChr c = case c of
                 '\n' -> "\\n"
                 '\r' -> "\\r"
                 '\t' -> "\\t"
-                '\r' -> "\\r"
                 '\f' -> "\\f"
                 '\v' -> "\\v"
                 _    -> if ord c > 255 then "?" else [c]
