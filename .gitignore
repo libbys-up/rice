@@ -12,3 +12,16 @@ runtime/runtime_smoke.dSYM/
 
 # scratch build artifacts (test/test.c's own compiled binary)
 test/a.out
+
+# tests/run.sh's per-test scratch dirs (.curry cache + compiled binaries);
+# tests/programs/ stays source-only
+tests/.run/
+
+# tests/bench.sh's per-config scratch dirs and results.tsv
+tests/.bench/
+
+# LaTeX build byproducts (src/*.tex compiled locally; the .pdf itself is
+# committed as the actual deliverable, these auxiliary files aren't)
+src/*.aux
+src/*.log
+src/*.out
