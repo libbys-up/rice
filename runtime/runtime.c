@@ -901,6 +901,36 @@ void ground_nf(union field expr)
         }
     }
 
+    // `settled` can come out of the chase above directly FAIL_TAG, not
+    // just one of its children (handled by the loop further down):
+    // HNF_SETTLE, just above, hands `settled` itself to arbitrary
+    // generated code as its own `root` argument, and that code is free
+    // to call fail(root) on it in place -- an incomplete case with no
+    // matching branch, reached right where a collapse point's chain of
+    // FORWARD_TAGs bottoms out (backtracking-optimizations.md's #4;
+    // src/scoped-retry-failures.tex's Figures 7-9 walk through exactly
+    // this). Without this check, that failure never reaches fail(expr):
+    // `expr` is left looking like an ordinary FORWARD chain, nf_all's own
+    // `TAG(expr) != FAIL_TAG` check (which does not chase FORWARD_TAG)
+    // reads that as a real solution, and print_final -- which *does*
+    // chase FORWARD_TAG -- prints the word "FAIL" as if it were the
+    // answer. Independent of, and found while investigating,
+    // backtracking-optimizations.md's #3 (scoped retry) -- reproduces
+    // with OPT_SCOPED_BACKTRACK=0 too.
+    //
+    // fail_nf, not a bare fail(expr): expr must be trailed (save_copy)
+    // before it's overwritten, exactly as the "a child failed" case just
+    // below already does, or nf_all's own `while(undo(0))` loop can never
+    // restore expr for the next attempt -- a first caught-here failure
+    // would silently make every later attempt see expr stuck at FAIL_TAG
+    // forever (caught by testing: without this, debug_repros/nested.curry
+    // regressed from "FAIL, 2" to "No solutions found").
+    if(TAG(settled) == FAIL_TAG)
+    {
+        fail_nf(settled, expr);
+        return;
+    }
+
     // if we're a variable, then we can't reduce to ground normal from
     if(TAG(settled) == FREE_TAG)
     {
@@ -959,6 +989,15 @@ void nf(union field expr)
         {
             HNF_SETTLE(settled);
         }
+    }
+
+    // See ground_nf's identical check, just above, for the full reasoning,
+    // including why this must be fail_nf (trails expr) and not a bare
+    // fail(expr).
+    if(TAG(settled) == FAIL_TAG)
+    {
+        fail_nf(settled, expr);
+        return;
     }
 
     debug(LOW, "HNF: ");
