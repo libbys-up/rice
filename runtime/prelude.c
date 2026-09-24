@@ -153,28 +153,21 @@ void Prelude__bindIO_hnf(field root)
     // desugars to) WHNF-reduces one step at a time, landing on a FORWARD
     // pointing at the *next* still-unrun action rather than a finished
     // value -- the same reason apply_hnf's own dispatch loop chases
-    // FORWARD_TAG itself instead of trusting a single HNF() call. This
-    // loop does the same for `m`: without it, `f` (commonly `\_ -> next`,
-    // ignoring its argument -- the ordinary shape for IO () sequencing)
-    // would receive and discard that FORWARD reference, silencing every
-    // action still pending inside it before its side effects ever ran.
-    //
-    // HNF_SETTLE, not HNF, at both calls: this loop's own condition only
-    // ever re-tests FORWARD_TAG, never FUNCTION_TAG, so under
-    // OPT_TAIL_JUMP a deferred tail call landing on `m` would fall
-    // straight through unnoticed if either call here left it pending --
-    // `f` would silently receive and apply to an unevaluated call instead
-    // of the action it actually represents. Unlike the FORWARD-chasing
-    // this loop already does, draining a deferred call is HNF_SETTLE's
-    // job, not this loop's own -- the two are orthogonal indirections
-    // (FORWARD is real graph sharing; a pending FUNCTION_TAG is just
-    // "not run yet"), so both calls need it, not just a bigger loop here.
-    HNF_SETTLE(m);
-    while(TAG(m) == FORWARD_TAG)
-    {
-        m = child_at(m, 0);
-        HNF_SETTLE(m);
-    }
+    // FORWARD_TAG itself instead of trusting a single HNF() call. Without
+    // fully settling `m`, `f` (commonly `\_ -> next`, ignoring its
+    // argument -- the ordinary shape for IO () sequencing) would receive
+    // and discard that FORWARD reference, silencing every action still
+    // pending inside it before its side effects ever ran. settle() (same
+    // fix as strictApply/cond, above) does this: chases FORWARD_TAG and
+    // redispatches with HNF_SETTLE on whatever that lands on, repeating
+    // until `m` is genuinely settled -- forward_hnf being a no-op means
+    // neither half alone is enough (a bare loop would stop cold on a
+    // freshly-reached FUNCTION_TAG/CHOICE_TAG; a bare HNF_SETTLE never
+    // even starts chasing an already-FORWARD_TAG m). No nondet tracking
+    // needed here, unlike strictApply/cond: IO actions carry no
+    // FAIL/backtracking-stack bookkeeping at all (this function's own
+    // header comment), so there's nothing to trail either way.
+    m = settle(m, NULL, HNF_SETTLE);
     set_apply1(root, f, m);
     apply_hnf(root);
 }
@@ -313,13 +306,21 @@ void Prelude__cond_hnf(field root)
 {
     field c = child_at(root, 0);
     field x = child_at(root, 1);
-    // HNF_SETTLE, not HNF: c's tag is inspected directly below (True/
-    // FAIL/else), and the FORWARD-chase loop right after doesn't itself
-    // re-dispatch anything (forward_hnf is a no-op), so this is the one
-    // place that needs to fully drain a deferred tail call.
-    HNF_SETTLE(c);
-    while(c.n->symbol->tag == FORWARD_TAG) { c = child_at(c, 0); }
-    if(c.n->nondet)
+    // settle(), not a single HNF_SETTLE + ad-hoc chase: c's tag is
+    // inspected directly below (True/FAIL/else), and the old chase loop
+    // here only ever followed FORWARD_TAG without ever redispatching what
+    // it landed on (forward_hnf is a no-op, but so is stopping cold on a
+    // freshly-reached, still-unresolved CHOICE_TAG or FUNCTION_TAG) --
+    // confirmed empirically: `cond (False ? True) 99` gave "No solutions
+    // found" instead of "SOLUTION: 99", since neither alternative of the
+    // choice ever actually got resolved via choose(), only chased past.
+    // Same fix as strictApply just above: settle() chases and re-forces
+    // until c is genuinely a value, accumulating nondet at every hop
+    // (not just c's own final flag -- see strictApply's own note on why
+    // that's not equivalent).
+    bool nondet = false;
+    c = settle(c, &nondet, HNF_SETTLE);
+    if(nondet)
     {
         save_copy(root);
     }
@@ -350,9 +351,19 @@ void Prelude__cond_hnf(field root)
 void Prelude__prim_USioError_hnf(field root)
 {
     field err = child_at(root, 0);
-    // HNF_SETTLE, not HNF: child_at(err,0) right below needs err genuinely
-    // resolved, not a still-pending tail call.
-    HNF_SETTLE(err);
+    // settle(), not a bare HNF_SETTLE: child_at(err,0) right below needs
+    // err genuinely resolved to a real IOError constructor, not a still-
+    // pending tail call or (forward_hnf being a no-op) a FORWARD_TAG left
+    // over from wherever err came from -- reading child_at(0) off a
+    // forward wrapper itself would silently pull the wrapper's own
+    // forward target, not the real IOError's message field. In practice
+    // ioError's own definition (ioError err = prim_ioError $## err)
+    // already forces err to ground normal form before this ever runs, so
+    // this is defensive rather than independently observable -- but cheap
+    // and consistent with strictApply/cond's own fix, just above. No
+    // nondet tracking needed: error() below is exit(1), never backtracked
+    // into, so there's nothing to trail.
+    err = settle(err, NULL, HNF_SETTLE);
     char* msg = toCStr(child_at(err, 0));
     error(msg, root);
 }
