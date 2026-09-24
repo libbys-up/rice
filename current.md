@@ -1,13 +1,15 @@
 # Current state
 
-## Status: suite is clean. Nine commits made, nothing pushed.
+## Status: suite is clean. Thirteen commits made, nothing pushed.
 
-`tests/run.sh --slow`: **38 pass, 9 xfail, 0 fail, 4 skip.** On branch
-`phase1-codegen-and-runtime`, commits (newest first): `08475d8`
-(regression test for the strictApply fix), `847094a` (the strictApply
-fix, below), `182c170` (a dedicated nondeterministic-permutation
-regression test for #4), `997aef7`/`cf9b51f`/`59658ef`/`3d3feee`/
-`81c26fa`/`c073eff` (scoped retry + nf/ground_nf work, see below).
+`tests/run.sh --slow`: **39 pass, 9 xfail, 0 fail, 4 skip.** On branch
+`phase1-codegen-and-runtime`, commits (newest first): `ce6f1e4`
+(regression test for the cond/prim_ioError/bindIO fix), `f0d50b2` (that
+fix, below), `08475d8` (regression test for the strictApply fix),
+`847094a` (the strictApply fix, below), `182c170` (a dedicated
+nondeterministic-permutation regression test for #4), `997aef7`/
+`cf9b51f`/`59658ef`/`3d3feee`/`81c26fa`/`c073eff` (scoped retry +
+nf/ground_nf work, see below).
 
 You (the user) are separately working on a soundness proof for scoped
 retry. Everything below is what got found and fixed while chasing why
@@ -16,7 +18,7 @@ follow-up discussion about `#4` (copy-instead-of-forward at collapse
 points) and whether `choose()` itself could copy instead of forward.
 None of it is the scoped-retry proof itself.
 
-## Fix 3 (most recent): `strictApply` silently not forcing an already-forwarded argument
+## Fix 3 (most recent): `HNF_SETTLE` callers silently not forcing an already-forwarded argument
 
 Found while chasing a laziness counter-example for the `choose()`
 question below -- kept failing to distinguish anything, and tracing why
@@ -40,20 +42,34 @@ node reached only by chasing *through* it. Fixed by accumulating
 `nondet` at every hop, exactly like a generated case-dispatch loop's
 own `nondet |= _scrutinee.n->nondet`.
 
-Verified: `debug_repros/strictapply_forward.curry` (also
-`tests/programs/regressions/`) now gives exactly `SOLUTION: 1`, not the
-bogus doubled result a scratch build reverted to the old `strictApply`
-confirms; a genuine divergence now correctly hangs where it used to
-silently terminate; an ordinary terminating `seq` is unchanged.
-`tests/run.sh --slow`: 38 pass, 9 xfail, 0 fail, 4 skip.
+Verified (`strictApply`): `debug_repros/strictapply_forward.curry`
+(also `tests/programs/regressions/`) now gives exactly `SOLUTION: 1`,
+not the bogus doubled result a scratch build reverted to the old
+`strictApply` confirms; a genuine divergence now correctly hangs where
+it used to silently terminate; an ordinary terminating `seq` is
+unchanged.
 
-**Not fixed, likely the same bug, not yet asked about:** `cond_hnf`
-(chases `FORWARD_TAG` but never re-calls `HNF_SETTLE` after each hop,
-and only checks the final node's own `nondet` -- the same gap
-`strictApply`'s first attempt had) and `prim_ioError_hnf` (doesn't
-chase `FORWARD_TAG` at all -- would read `child_at(err,0)` off the
-forward wrapper itself, not the real `IOError`'s message field, if
-`err` is ever forward-wrapped when it runs).
+`cond_hnf` had its own, worse version of the same gap: it chased
+`FORWARD_TAG` but never redispatched with `HNF_SETTLE` on whatever it
+chased *to*, so landing on a still-unresolved `CHOICE_TAG`/`FUNCTION_TAG`
+just stopped the loop there, cold. Confirmed empirically:
+`cond (False ? True) 99` gave `No solutions found` instead of
+`SOLUTION: 99` -- *neither* alternative of the choice ever got resolved
+via `choose()` at all, so `cond` fell through to its own
+`else: fail(root)` every time, including on the exploration where the
+guard is genuinely `True`. Fixed the same way, now
+`debug_repros/cond_forward.curry` (also `tests/programs/regressions/`).
+
+`prim_ioError_hnf` didn't chase `FORWARD_TAG` at all -- fixed
+defensively (its only caller, `ioError`, already forces its argument via
+`$##`'s own now-fixed `strictApply`, so this isn't independently
+observable, just cheap and consistent). `bindIO_hnf` was already
+correct (its own hand-rolled loop already redispatched properly) --
+refactored onto `settle()` anyway for consistency, behavior unchanged;
+the suite's IO-heavy tests (`tryPrint` etc.) confirm no regression.
+
+`tests/run.sh --slow`: 39 pass, 9 xfail, 0 fail, 4 skip (the extra pass
+is the new `cond_forward` regression test).
 
 ## Aside: does `choose()` copying instead of forwarding help eliminate forwarding nodes?
 
