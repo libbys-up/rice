@@ -175,6 +175,59 @@ static inline void HNF_SETTLE(union field root)
 #endif
 }
 
+// Fully settles `root` to a genuine value for the hand-written Prelude
+// primitives that need one right here (bindIO, cond, prim_ioError,
+// strictApply's $!/$!!/$## -- HNF_SETTLE's own doc comment lists all
+// four): repeatedly chases any FORWARD_TAG indirection and redispatches
+// with `force` on whatever that lands on, until settling on something
+// that's neither FORWARD_TAG, FUNCTION_TAG, nor CHOICE_TAG (a real
+// value, FAIL_TAG, or FREE_TAG). A single HNF_SETTLE call alone doesn't
+// reach this: forward_hnf is a deliberate no-op (this file's own note on
+// it, above), so an already-FORWARD_TAG root -- e.g. the result of some
+// earlier collapse point that wasn't safe to copy, which is the common
+// case, since choose() itself always produces one -- is left completely
+// untouched by force(root) alone; and even a freshly-resolved CHOICE_TAG
+// needs one more hop, and possibly further redispatch past that, before
+// it's actually a value.
+//
+// `*nondet` is OR'd into, not reset, mirroring the generated
+// case-dispatch loops' own `nondet |= _scrutinee.n->nondet` (checked
+// every iteration, before dispatching, so it picks up a choice made
+// *during* this settle -- e.g. choose() itself setting the choice node's
+// own flag -- on the very next iteration, not the one that made it) --
+// this is NOT the same thing as `root.n->nondet` read once at the end:
+// nondet lives on whichever node a choice actually touched (the choice
+// node itself, or anything save_copy'd afterward), and the node this
+// finally settles on can easily be a different one reached only by
+// chasing *through* that choice, with its own nondet flag never set at
+// all. Passing NULL skips the accumulation entirely for a caller (like
+// bindIO) that doesn't need it. Pass the same bool to more than one
+// settle call (bindIO's own m and f) to share one accumulator across
+// them, the way a single case-dispatch loop's own local already does.
+static inline field settle(union field root, bool* nondet, void (*force)(field))
+{
+    while (true)
+    {
+        if (nondet != NULL)
+        {
+            *nondet |= root.n->nondet;
+        }
+        unsigned char t = TAG(root);
+        if (t == FORWARD_TAG)
+        {
+            root = child_at(root, 0);
+        }
+        else if (t == FUNCTION_TAG || t == CHOICE_TAG)
+        {
+            force(root);
+        }
+        else
+        {
+            return root;
+        }
+    }
+}
+
 // backtracking-optimizations.md's #3, generalized from lazy_unify_step
 // (prelude.c, the original, hand-written instance of this pattern) to
 // every generated `_hnf` function: SCOPED_CUTOFF() records the trail
