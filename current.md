@@ -1,18 +1,84 @@
 # Current state
 
-## Status: this investigation is done. Suite is clean. Four commits made.
+## Status: suite is clean. Nine commits made, nothing pushed.
 
-`tests/run.sh --slow`: **37 pass, 9 xfail, 0 fail, 4 skip.** (Was 34/9/1
-before either fix below; the one failure, `cent`, is gone.) Nothing is
-pushed. On branch `phase1-codegen-and-runtime`, commits (newest first):
-`cf9b51f` (regression goldens for the nf/ground_nf fix), `59658ef` (the
-nf/ground_nf fix), `3d3feee` (the scoped-retry writeup + this file),
-`81c26fa` (scoped-retry regression tests + repros), `c073eff` (the two
-scoped-retry fixes).
+`tests/run.sh --slow`: **38 pass, 9 xfail, 0 fail, 4 skip.** On branch
+`phase1-codegen-and-runtime`, commits (newest first): `08475d8`
+(regression test for the strictApply fix), `847094a` (the strictApply
+fix, below), `182c170` (a dedicated nondeterministic-permutation
+regression test for #4), `997aef7`/`cf9b51f`/`59658ef`/`3d3feee`/
+`81c26fa`/`c073eff` (scoped retry + nf/ground_nf work, see below).
 
 You (the user) are separately working on a soundness proof for scoped
 retry. Everything below is what got found and fixed while chasing why
-`tests/run.sh` wouldn't go fully green; none of it is the proof itself.
+`tests/run.sh` wouldn't go fully green, plus what came out of a
+follow-up discussion about `#4` (copy-instead-of-forward at collapse
+points) and whether `choose()` itself could copy instead of forward.
+None of it is the scoped-retry proof itself.
+
+## Fix 3 (most recent): `strictApply` silently not forcing an already-forwarded argument
+
+Found while chasing a laziness counter-example for the `choose()`
+question below -- kept failing to distinguish anything, and tracing why
+led here. `strictApply` (`runtime/prelude.c`, backs `seq`/`$!`/`$!!`/
+`$##`) called `force(x)` once and read `x`'s tag/`nondet` directly.
+`forward_hnf` is a deliberate no-op, so if `x` was already
+`FORWARD_TAG` -- e.g. the result of some earlier collapse point that
+wasn't safe to copy, the *common* case, since `choose()` itself always
+produces one -- a single `force()` call never even reached whatever it
+pointed to: `seq` could silently fail to notice a failure, or (found
+along the way) fail to notice a divergence it should have hung on.
+
+Fix: new `settle()` helper (`runtime.h`), generalizing `bindIO`'s own
+already-correct chase-and-reforce loop (just above `strictApply` in the
+same file) to take `force` as a parameter. A first version of the fix
+chased and reforced correctly but still only checked `x`'s own final
+`nondet` flag -- caught empirically (the repro below gave "No solutions
+found" instead of "SOLUTION: 1"): `nondet` lives on whichever node a
+choice actually touched (the choice node itself), not on a different
+node reached only by chasing *through* it. Fixed by accumulating
+`nondet` at every hop, exactly like a generated case-dispatch loop's
+own `nondet |= _scrutinee.n->nondet`.
+
+Verified: `debug_repros/strictapply_forward.curry` (also
+`tests/programs/regressions/`) now gives exactly `SOLUTION: 1`, not the
+bogus doubled result a scratch build reverted to the old `strictApply`
+confirms; a genuine divergence now correctly hangs where it used to
+silently terminate; an ordinary terminating `seq` is unchanged.
+`tests/run.sh --slow`: 38 pass, 9 xfail, 0 fail, 4 skip.
+
+**Not fixed, likely the same bug, not yet asked about:** `cond_hnf`
+(chases `FORWARD_TAG` but never re-calls `HNF_SETTLE` after each hop,
+and only checks the final node's own `nondet` -- the same gap
+`strictApply`'s first attempt had) and `prim_ioError_hnf` (doesn't
+chase `FORWARD_TAG` at all -- would read `child_at(err,0)` off the
+forward wrapper itself, not the real `IOError`'s message field, if
+`err` is ever forward-wrapped when it runs).
+
+## Aside: does `choose()` copying instead of forwarding help eliminate forwarding nodes?
+
+Discussed, not implemented (no code changes from this). Short answer:
+no.
+- **Sharing**: sound, by the same argument as `#4` -- `undo()`
+  overwrites `root`'s entire content unconditionally regardless of
+  what it held before, and anything that later tries to `#4`-collapse
+  `root` itself sees `root.nondet == true` and correctly refuses.
+- **Practicality**: `choices[side]` is always still `FUNCTION_TAG` at
+  the exact instant `choose()` runs (alternatives are lazy by
+  construction), so a non-eager safety check would never fire.
+- **Laziness**: tried to show eager-forcing-first is dangerous
+  (`(loop ? True) \`seq\` False`); this is *how* the `strictApply` bug
+  above was found -- the real, buggy `choose()` "not hanging" here was
+  actually the `strictApply` bug masking the real question. Once
+  `strictApply` was fixed to fully settle, both the real (lazy) and a
+  scratch eager-copy `choose()` patch hang identically, since `seq`,
+  correctly implemented, needs the chosen alternative's own WHNF
+  anyway. No genuine consumer found that stops at "the choice
+  committed" without needing the alternative's value.
+- **Conclusion**: sound but not practically useful -- doesn't
+  eliminate forwarding, since it still falls back to forwarding
+  whenever the alternative isn't already, independently resolved --
+  the common case.
 
 ## Fix 1: two soundness defects in scoped retry (`backtracking-optimizations.md` #3, generalized)
 
