@@ -250,14 +250,32 @@ void Prelude__prim_USshowStringLiteral_hnf(field root)
 // This works like (&&)'s definition (`True && x = x`)
 //
 // failed: fails unconditionally.
-// ----------------------------------------------------------------------
-
+//
+// Was `nf(x)` followed by reading `x.n->symbol->tag` directly -- broken
+// the same way strictApply's own pre-settle() bug was: `nf` takes its
+// argument *by value* (a `field`, holding a pointer to the underlying
+// Node), and internally chases FORWARD_TAG into its own *local*
+// variable, mutating whatever it settles on in place but never writing
+// that back into the caller's own `x`. If `x`'s own node ends up
+// FORWARD_TAG (extremely common -- e.g. a dictionary-method case whose
+// own result is itself a further call, redirected via set_forward
+// rather than becoming a plain True/False constructor directly), the
+// tag check right below sees FORWARD_TAG, matching neither FAIL_TAG nor
+// Prelude__False_TAG, and silently falls through to the "must be True"
+// branch -- discarding a real False. Confirmed directly: `(1 /= 1) &
+// e` incorrectly forwarded to `e` instead of yielding False, traced via
+// `--debug=high` to `/=`'s own dictionary-dispatch chain settling on a
+// FORWARD_TAG node right where this reads its tag. `settle()` (like
+// strictApply, cond, bindIO, prim_ioError already do) is exactly this
+// fix, factored out: chase, re-force, repeat, *returning* the settled
+// value instead of relying on in-place mutation the caller can't see.
 void Prelude___AN_hnf(field root)
 {
     field x = child_at(root, 0);
     field y = child_at(root, 1);
-    nf(x);
-    if(x.n->nondet)
+    bool nondet = false;
+    x = settle(x, &nondet, HNF_SETTLE);
+    if(nondet)
     {
         save_copy(root);
     }
