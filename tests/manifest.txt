@@ -1,0 +1,79 @@
+# Per-test overrides for tests/run.sh. One entry per line:
+#
+#   <relative-path-to-.curry>  <STATUS>  <reason...>
+#
+# STATUS is one of:
+#   SKIP   never run (e.g. not meant to be compiled at all -- inspection-only
+#          source, or a program requiring a feature with no plan to support it)
+#   XFAIL  expected to fail (frontend rejects it, or compilation fails) for a
+#          documented, pre-existing reason unrelated to Rice; run.sh reports
+#          XPASS (not a hard failure, but worth noticing) if it starts
+#          succeeding, so a real fix doesn't silently stay uncredited here.
+#   SLOW   compiles and runs correctly but takes too long for a "run before
+#          every commit" pass -- skipped unless run.sh is given --slow, then
+#          run with a longer timeout.
+#   XSLOW  a large-input benchmark that's *expected* to crash or time out
+#          once actually run (not just slow) -- same "no trampoline or
+#          backtracking optimizations yet" cause as STATUS.md's Phase 1/2
+#          notes, confirmed via a real crash backtrace for at least one of
+#          these (STATUS.md's own write-up). Skipped by default like SLOW;
+#          under --slow, a compile failure/crash/timeout doesn't count as a
+#          failure (XPASS if it unexpectedly runs clean instead, same
+#          spirit as XFAIL -- worth noticing, not something to leave stale
+#          here).
+#
+# Blank lines and lines starting with # are ignored. A path with no entry
+# here uses run.sh's default timeouts and must match its own <name>.expected
+# (if present) or just exit 0 without timing out (if not).
+
+# --- old_rice/suite: not meant to be compiled/run to completion at all ---
+old_rice/suite/boxes.curry      SKIP  no `main` -- meant for inspecting codegen output directly (e.g. `rice -c`), not running
+old_rice/suite/deadCode.curry   SKIP  no `main` -- meant for inspecting the deadCode optimizer rule directly (--trace-optimize), not running
+old_rice/suite/defTest.curry    SKIP  no `main` either (aux/r are library-style helpers, nothing to run)
+old_rice/suite/inlineTest.curry SKIP  compiles fine, but `main = g (C g)` diverges by construction (case y of C h -> h y, with y = C g, recomputes g (C g) forever) -- this tests that the compiler handles a self-referential higher-order closure without crashing at *compile* time, not that running it terminates
+
+# --- old_rice/benchmarks: pre-existing 2023-era source the modern kics2
+# frontend rejects outright (not a Rice bug -- these fail identically with
+# --no-optimize, before Rice's own pipeline does anything) ---
+old_rice/benchmarks/queens.curry  XFAIL  `import Integer` / `import List` -- removed/renamed modules in modern Curry
+old_rice/benchmarks/last.curry    XFAIL  frontend: "Type signature too general" -- `last :: [a] -> a` needs `Data a =>` under the modern frontend's stricter inference for a polymorphic `free` variable (same fix as tests/programs/external/funcpattern.curry made explicit); left unfixed since this file is meant to stay a verbatim copy of old_rice's own source
+old_rice/benchmarks/lastEq.curry  XFAIL  frontend: same "Type signature too general" issue as last.curry, needs `(Eq a, Data a) =>`
+
+# --- old_rice/benchmarks: deliberately large inputs, confirmed to still
+# actually complete within --slow's 180s timeout (STATUS.md's 2026-09-11
+# write-up) ---
+old_rice/benchmarks/ndtest.curry          SLOW  unshared `?` under recursion -- solution count blows up combinatorially (fib 7 alone runs well past a 15s timeout)
+old_rice/benchmarks/reverse_builtin.curry SLOW  4M-node unary Nat list
+old_rice/benchmarks/primes.curry          SLOW  sieve out to the 4000th prime
+old_rice/benchmarks/primesort.curry       SLOW  sort over the 1000th-1003rd primes
+old_rice/benchmarks/cent.curry            SLOW  exponential generate-and-test search
+old_rice/benchmarks/perm.curry            SLOW  exponential permutation search (9 elements)
+old_rice/benchmarks/queens_det.curry      SLOW  11-queens (no nondeterminism, but a large search)
+old_rice/benchmarks/schedule.curry        SLOW  exponential generate-and-test search
+old_rice/benchmarks/sort.curry            SLOW  exponential permutation search (14 elements)
+old_rice/benchmarks/tak.curry             SLOW  classic deep-recursion benchmark (tak 33 17 8)
+
+# --- old_rice/benchmarks: same large-input category, but confirmed via a
+# real lldb backtrace to genuinely crash (not just run long) -- deep,
+# non-tail-recursive C stack growth with no trampoline yet (STATUS.md's
+# Phase 1/2 notes), not a bug tests/run.sh's own crash-detection fix
+# (STATUS.md, 2026-09-11) should keep flagging as an unexpected regression.
+old_rice/suite/bf_test.curry              XSLOW  1,000,000-element list, non-tail-recursive foldr
+old_rice/benchmarks/buildFold.curry       XSLOW  1,000,000-element list, non-tail-recursive foldr
+old_rice/benchmarks/reverse_foldr.curry   XSLOW  262,144-element list, non-tail-recursive foldr
+old_rice/benchmarks/reverse_prim.curry    XSLOW  262,144-element list, non-tail-recursive reverse
+old_rice/benchmarks/sum_square.curry      XSLOW  200,000-element list, non-tail-recursive foldr
+
+# queens_perm.curry originally enumerated all permutations of 9 elements
+# (362880, no pruning -- nf_all doesn't stop at the first solution) and
+# measured ~115GB peak RSS, a hazard to the host machine rather than a
+# cheap/contained failure like the XSLOW group above -- reduced to 6
+# elements (720 solutions, ~54MB, see the file's own comment for the
+# measurements behind that number). Runs in the default (non-SLOW) suite
+# now that it's this cheap.
+
+# --- perf/: synthetic micro-benchmarks written specifically to give
+# tests/bench.sh's OPT_* sweep a benchmark for optimizations old_rice's
+# own SLOW set doesn't exercise -- not old_rice-era source, so new ones
+# belong here rather than under old_rice/.
+perf/tailsum.curry  SLOW  10,000,000-deep genuinely tail-recursive accumulator -- specifically exercises OPT_TAIL_JUMP (backtracking-optimizations.md #2), which none of the old_rice benchmarks touch (they're combinatorial-search/large-data-structure heavy, not deep-tail-call heavy)
