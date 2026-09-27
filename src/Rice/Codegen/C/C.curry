@@ -97,11 +97,44 @@ x .|= e = x <+> text "|=" <+> e <> semi
 -- Preprocessor
 ------------------------------------------------------------------------------
 
+--- `file` is a module name, possibly hierarchical (e.g. `Test.Prop.Types`).
+--- `Rice.Build.Cache`'s `moduleBase`/`modNameToPath` lays such a module's
+--- `.c`/`.h` out in a directory tree matching its qualification
+--- (`Test/Prop/Types.h`), named only by its *last* component
+--- (`Types.h`, not `Test.Prop.Types.h`) -- `Rice.Main.buildExecutable`'s
+--- `-I` flags (one per module's own directory) are what make plain
+--- `"Types.h"` resolve correctly from anywhere it's included, so this
+--- must include just that base name, not the full dotted one. Confirmed
+--- by actually compiling a module with a hierarchical name (`Test.Prop`,
+--- `Test.Prop.Types`): using the dotted name here verbatim compiled fine
+--- for the many modules with plain (undotted) names every prior test
+--- exercised, but failed as soon as one actually had a dot in it --
+--- `clang: fatal error: 'Test.Prop.Types.h' file not found`, since no
+--- file by that literal (dotted) name exists anywhere on the include
+--- path.
 cinclude :: CName -> CStmt
-cinclude file = text "#include" <+> dquotes (text file <> text ".h")
+cinclude file = text "#include" <+> dquotes (text (baseModName file) <> text ".h")
+
+--- The last component of a (possibly hierarchical) module name --
+--- `"Test.Prop.Types"` -> `"Types"`. The identity on an already-unqualified
+--- name (`"runtime"`, `"debug"`, ...), so this is safe to apply uniformly
+--- regardless of which kind of name `cinclude` was actually given.
+baseModName :: CName -> CName
+baseModName = reverse . takeWhile (/= '.') . reverse
 
 cdefine :: CName -> Int -> CStmt
 cdefine name val = text "#define" <+> text name <+> int val
+
+--- Wrap statements in `#if COND` / `#endif` -- e.g. gating a field access
+--- behind the same build flag that determines whether the field exists at
+--- all (`Rice.Codegen.C.ToH`'s epoch stamping, `OPT_EPOCH_TRAIL`). `cond`
+--- is spliced in verbatim as a macro name, not an expression needing its
+--- own escaping -- same trust level as `cdefine`'s own `name`. `CStmt`
+--- being a plain `Doc` (this module's own header comment) is what makes
+--- this possible with no DSL extension: a `#if`/`#endif` line is just
+--- another `Doc` to stack via `$$`, not a construct needing its own type.
+cifdef :: CName -> [CStmt] -> CStmt
+cifdef cond body = (text "#if" <+> text cond) $$ vcat body $$ text "#endif"
 
 ------------------------------------------------------------------------------
 -- Blocks and control flow
@@ -317,9 +350,17 @@ fieldDecl v = text "field" <+> var v <> semi
 --- `scrutinee` is a name `Rice.Codegen.C.ToC.showConsCase` alone owns for
 --- its own internal case-walking copy -- prefixed so it can never collide
 --- with a real `"v" ++ show n` variable name (see `varName`'s note above).
-root, scrutinee :: CExpr
-root      = text "root"
-scrutinee = text "_scrutinee"
+--- `origScrutinee` is `showConsCase`'s own frozen snapshot of the
+--- scrutinee's value *before* the dispatch loop below it ever runs --
+--- distinct from `scrutinee` (which the loop reassigns as it chases
+--- FUNCTION_TAG/CHOICE_TAG/FORWARD_TAG) and from `var v` (which
+--- `showConsBranch`'s `writeBack` reassigns to the branch's own resolved
+--- value, so by the time a branch body's SCOPED_RETRY would want "the
+--- original", `var v` no longer holds it -- see `showConsCase`'s note).
+root, scrutinee, origScrutinee :: CExpr
+root          = text "root"
+scrutinee     = text "_scrutinee"
+origScrutinee = text "_orig"
 
 symbol :: CExpr -> CExpr
 symbol v = v <> text ".n->symbol"
@@ -327,13 +368,18 @@ symbol v = v <> text ".n->symbol"
 symhnf :: CExpr -> CStmt
 symhnf v = text "HNF" <> parens v <> semi
 
-symtag, symname, symarity, symPayload, nondet, missing :: CExpr -> CExpr
+symtag, symname, symarity, symPayload, nondet, missing, epoch :: CExpr -> CExpr
 symtag     v = symbol v <> text "->tag"
 symname    v = symbol v <> text "->name"
 symarity   v = symbol v <> text "->arity"
 symPayload v = symbol v <> text "->payload"
 nondet     v = v <> text ".n->nondet"
 missing    v = v <> text ".n->missing"
+--- `node.h`'s `Node.epoch` -- only actually a field under `OPT_EPOCH_TRAIL`
+--- (see its own doc comment there); every generated reference to it is
+--- correspondingly always wrapped in `cifdef "OPT_EPOCH_TRAIL"`, never used
+--- bare.
+epoch      v = v <> text ".n->epoch"
 
 nullf :: CExpr
 nullf = text "(field)(Node*)NULL"

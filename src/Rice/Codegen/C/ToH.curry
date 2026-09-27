@@ -50,8 +50,8 @@ import Rice.Codegen.Names (mangle, uninstance, toName, getTag)
 --- result to `ModuleName.h`.
 toHeader :: IProg -> Doc
 toHeader (IProg name imps types allFuns) = vcat $
-  [ text ("#ifndef " ++ name ++ "_H")
-  , text ("#define " ++ name ++ "_H")
+  [ text ("#ifndef " ++ guardName ++ "_H")
+  , text ("#define " ++ guardName ++ "_H")
   , text ""
   , cinclude "runtime"
   ] ++ map cinclude imps ++
@@ -68,8 +68,20 @@ toHeader (IProg name imps types allFuns) = vcat $
   concatMap makeFun funs ++
   concatMap setConFree cons ++
   concatMap makeConFree cons ++
-  [ text ("#endif //" ++ name ++ "_H") ]
+  [ text ("#endif //" ++ guardName ++ "_H") ]
  where
+  -- `name` is a module name, possibly hierarchical ("Test.Prop.Types"):
+  -- a `.` isn't a valid character in a C preprocessor identifier, so
+  -- `name` itself can't be used here directly (an `#ifndef`/`#define`
+  -- pair containing one is, at best, compiler-specific behavior, not
+  -- portable C). Replacing `.` with `_` keeps the guard unique per
+  -- module (unlike using just `baseModName name`, which -- fine for
+  -- `cinclude`'s file-lookup purpose -- would collide between two
+  -- different modules that happen to share a last component, e.g.
+  -- `Foo.Types` and `Bar.Types`) without needing a real identifier
+  -- sanitizer, since `mangle`/`nameMangle` (Rice.Codegen.Names) both
+  -- assume an `IQName`, not a bare module-name `String`.
+  guardName = map (\c -> if c == '.' then '_' else c) name
   -- Primitive functions (Rice.Codegen.C.PrimOps) are inlined at every call
   -- site (Rice.Codegen.C.ToC) and never actually invoked as real
   -- functions -- no declaration, no Symbol, no make/set for them at all.
@@ -167,6 +179,14 @@ setUnusedChildren :: IArity -> [CStmt]
 setUnusedChildren arity = map nullChild [arity .. 2]
  where nullChild i = (children root [i] <> text ".n") .= text "NULL"
 
+--- Stamp a freshly-allocated `root`'s birth time (backtracking-
+--- optimizations.md's #5) -- `make_X`/`make_X_free` only, never `set_X`/
+--- `set_X_free`: those overwrite an *existing* node's contents in place,
+--- so the memory's own age doesn't change (`runtime.c`'s `set_copy` has
+--- the same rule, for the same reason).
+epochStamp :: CStmt
+epochStamp = cifdef "OPT_EPOCH_TRAIL" [epoch root .= text "current_epoch"]
+
 ------------------------------------------------------------------------------
 -- set_X
 ------------------------------------------------------------------------------
@@ -202,6 +222,7 @@ makeEntry name arity =
   , hfunDefn "field" ("make_" ++ mangle name) args
       ( [ text "field root" <> semi
         , (root <> text ".n") .= alloc_n 1
+        , epochStamp
         , symbol root .= (text "&" <> text (symbolName name))
         , missing root .= text "missing"
         , setChildArray arity
@@ -246,6 +267,7 @@ makeConFree (n,a) =
   [ hfunDefn "field" ("make_" ++ mangle n ++ "_free") []
       ( [ text "field root" <> semi
         , (root <> text ".n") .= alloc_n 1
+        , epochStamp
         , nondet root .= ctrue
         , symbol root .= (text "&" <> text (symbolName n))
         , missing root .= int 0
