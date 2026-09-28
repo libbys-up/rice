@@ -1,0 +1,21 @@
+-- Rice.Optimize.Inline.caseCancel matched a case's scrutinee only when
+-- it was directly a TComb (constructor/literal) or TLit -- an
+-- explicitly type-annotated literal like `(3 :: Int)` (as opposed to a
+-- bare `3` inferred from context) compiles to `TTyped (TLit ... 3)
+-- IntType` instead, which matched neither pattern, so the case (and
+-- everything REDUCE had already inlined on top of it -- this is
+-- exactly the shape eqInt's own boxed-Int unwrapping produces) was left
+-- permanently uncancelled. That dangling, never-substituted `subGrounded`
+-- variable then surfaced much further downstream, as a flat-out C
+-- compile failure ("use of undeclared identifier") -- confirmed by
+-- minimizing until the annotation itself was the only thing left to
+-- remove: `if 3 == 4 then ...` (no annotation on either literal, both
+-- inferred from main's own return type) compiled and ran fine, `if (3
+-- :: Int) == 4 then ...` didn't compile at all.
+--
+-- Fixed by having caseCancel strip any TTyped wrapper off the scrutinee
+-- before matching (Rice.Optimize.Inline.stripTyped) -- a type
+-- annotation never changes an expression's own shape, only what
+-- type-level fact is attached to it.
+main :: Int
+main = if (3 :: Int) == 4 then 1 else 0

@@ -76,18 +76,55 @@ inline _ expr = case expr of
 --
 --   case (C e1..en) of { ...; C x1..xn -> e; ... }  ==>  e[xi -> ei]
 --   case <lit> of { ...; <lit> -> e; ... }           ==>  e
+--
+-- Matches through any TTyped wrapping the scrutinee first (stripTyped),
+-- not just a bare TComb/TLit -- an explicitly type-annotated literal
+-- (`(3 :: Int)`, as opposed to a bare `3` inferred from context) compiles
+-- to exactly that: `TTyped (TLit ... 3) IntType`, which the two patterns
+-- below didn't match at all before this, falling through to `_ ->
+-- Nothing` and leaving the whole case (and everything inlined on top of
+-- it -- this is exactly the shape REDUCE's own inlining produces for
+-- `eqInt`'s boxed-Int unwrapping) permanently uncancelled. Confirmed via
+-- a minimal repro: `if (3 :: Int) == 4 then 1 else 0` failed to compile
+-- outright ("use of undeclared identifier") because the un-cancelled
+-- `fcase` left a variable substitution (subGrounded, elsewhere in this
+-- module) that never happened, while codegen downstream still expected
+-- it to have; `if 3 == 4 then ...` (no annotation on either literal,
+-- both inferred from `main`'s own return type) compiled and ran
+-- correctly, isolating the annotation itself as the trigger.
 caseCancel :: TExprTransformationDet
 caseCancel _ expr = case expr of
-  TCase _ (TComb _ ct n es) bs
-    | isCombTypeConsCall ct
-    -> case findConsBranch n bs of
-         Nothing      -> Nothing
-         Just (vs, e) -> Just (subGrounded e vs es, "CASE_CANCEL_CONS", 0)
-  TCase _ (TLit _ l) bs
-    -> case findLitBranch l bs of
-         Nothing -> Nothing
-         Just e  -> Just (e, "CASE_CANCEL_LIT", 0)
+  TCase _ scrutinee bs -> case stripTyped scrutinee of
+    TComb _ ct n es
+      | isCombTypeConsCall ct
+      -> case findConsBranch n bs of
+           Nothing      -> Nothing
+           Just (vs, e) -> Just (subGrounded e vs es, "CASE_CANCEL_CONS", 0)
+    TLit _ l
+      -> case findLitBranch l bs of
+           Nothing -> Nothing
+           Just e  -> Just (e, "CASE_CANCEL_LIT", 0)
+    _ -> Nothing
   _ -> Nothing
+
+--- Strip any number of `TTyped` wrappers down to the expression
+--- underneath -- a type annotation never changes an expression's own
+--- shape, only what type-level fact is attached to it, so this is safe
+--- to do unconditionally before pattern-matching on that shape.
+---
+--- Written with a `case` (rather than two top-level equations) for the
+--- same reason isIOType (elsewhere in this module) already is: the
+--- compiler can't prove `TTyped e _` and a bare-variable catch-all are
+--- mutually exclusive, so two equations here compile to a genuinely
+--- nondeterministic Or instead of deterministic dispatch -- confirmed
+--- directly, not just by analogy: caught by the *exact* "List data with
+--- no ground term" symptom this session's isIOType fix was for,
+--- reintroduced by writing this function the same wrong way the first
+--- time round.
+stripTyped :: TExpr -> TExpr
+stripTyped e = case e of
+  TTyped e' _ -> stripTyped e'
+  _           -> e
 
 findConsBranch :: QName -> [TBranchExpr] -> Maybe ([VarIndex], TExpr)
 findConsBranch n bs = case filter isMatch bs of
