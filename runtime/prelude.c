@@ -229,17 +229,63 @@ void Prelude__prim_USshowFloatLiteral_hnf(field root)
     memcpy(root.n, toCurryString(buf).n, sizeof(Node));
 }
 
+// Appends c's *derived-Show* escaped spelling to buf (which must have
+// room for at least 4 more bytes: the longest single-character
+// expansion, a decimal escape like "\127", is 4 bytes) and returns the
+// new write position. `quote` is whichever of '\'' or '"' is the
+// enclosing literal's own delimiter -- the one character that needs
+// escaping in one context but not the other (a bare '"' is fine inside
+// 'x', a bare '\'' is fine inside "..."; confirmed against real kics2's
+// own `show` output for exactly this case). Named escapes match GHC's
+// derived Show (\a\b\f\n\r\t\v, plus \\ and the delimiter itself);
+// anything else non-printable (code < 32, or >= 127 for a plain 7-bit
+// char) falls back to a decimal escape, same convention.
+char* appendEscaped(char* buf, char c, char quote)
+{
+    if (c == '\\')       { *buf++ = '\\'; *buf++ = '\\'; }
+    else if (c == quote) { *buf++ = '\\'; *buf++ = quote; }
+    else if (c == '\a')  { *buf++ = '\\'; *buf++ = 'a'; }
+    else if (c == '\b')  { *buf++ = '\\'; *buf++ = 'b'; }
+    else if (c == '\f')  { *buf++ = '\\'; *buf++ = 'f'; }
+    else if (c == '\n')  { *buf++ = '\\'; *buf++ = 'n'; }
+    else if (c == '\r')  { *buf++ = '\\'; *buf++ = 'r'; }
+    else if (c == '\t')  { *buf++ = '\\'; *buf++ = 't'; }
+    else if (c == '\v')  { *buf++ = '\\'; *buf++ = 'v'; }
+    else if (c < 32 || c >= 127)
+    {
+        buf += sprintf(buf, "\\%d", (int)(unsigned char)c);
+    }
+    else { *buf++ = c; }
+    return buf;
+}
+
 void Prelude__prim_USshowCharLiteral_hnf(field root)
 {
-    char buf[2] = { (char)child_at_c(root, 0), '\0' };
+    char c = (char)child_at_c(root, 0);
+    char buf[8];
+    char* p = buf;
+    *p++ = '\'';
+    p = appendEscaped(p, c, '\'');
+    *p++ = '\'';
+    *p = '\0';
     memcpy(root.n, toCurryString(buf).n, sizeof(Node));
 }
 
 void Prelude__prim_USshowStringLiteral_hnf(field root)
 {
     char* s = toCStr(child_at(root, 0));
-    memcpy(root.n, toCurryString(s).n, sizeof(Node));
+    size_t len = strlen(s);
+    // Worst case every byte expands to a 4-byte decimal escape, plus the
+    // two surrounding quotes and the terminator.
+    char* buf = (char*)malloc(4 * len + 3);
+    char* p = buf;
+    *p++ = '"';
+    for (size_t i = 0; i < len; i++) { p = appendEscaped(p, s[i], '"'); }
+    *p++ = '"';
+    *p = '\0';
+    memcpy(root.n, toCurryString(buf).n, sizeof(Node));
     free(s);
+    free(buf);
 }
 
 // ----------------------------------------------------------------------

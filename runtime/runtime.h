@@ -456,6 +456,15 @@ union field toCurryString(char* str);
 void setCurryString(union field root, char* str);
 char* toCStr(union field string);
 
+// Derived-Show-style escaping for a single Char/String-element byte
+// (prelude.c's own doc comment on the definition has the full
+// rationale/escape table) -- shared with runtime.c's print_string/
+// print_final, which need the exact same escaping for nf_all's
+// top-level "found a solution" display, not just prim_showCharLiteral/
+// prim_showStringLiteral (called only when a Curry program invokes
+// `show` itself).
+char* appendEscaped(char* buf, char c, char quote);
+
 
 static Symbol fail_symbol    = { .tag = FAIL_TAG,     .arity = 0, .name = "FAIL",    .hnf = &CTR_hnf };
 static Symbol choice_symbol  = { .tag = CHOICE_TAG,   .arity = 2, .name = "?",       .hnf = &choice_hnf };

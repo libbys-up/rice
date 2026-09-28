@@ -714,12 +714,26 @@ void print_tuple(union field n, int i)
 // printed a list or string as `main`'s own top-level result (`putStr`'s
 // own string handling, toCStr/toCurryString in prelude.c, was already
 // correct and unaffected, since those never went through here).
+// Derived-Show output, same convention as prim_showStringLiteral
+// (prelude.c) -- this is nf_all's own top-level "print a found
+// solution" path, a separate printer from show*Literal (only reached
+// when a Curry program calls `show` itself), so it needs the exact
+// same escaping independently: previously this just wrote each raw
+// byte between quotes, so e.g. a string containing an actual newline
+// or a literal backslash printed unescaped instead of as `\n`/`\\`.
+static void printEscapedChar(char c, char quote)
+{
+    char buf[5];
+    *appendEscaped(buf, c, quote) = '\0';
+    printf("%s", buf);
+}
+
 void print_string(union field n)
 {
     union field h = child_at(n,0);
     union field t = child_at(n,1);
     printf("\"");
-    printf("%c", (char)h.n->children[0].c);
+    printEscapedChar((char)h.n->children[0].c, '"');
     while(strcmp(t.n->symbol->name, "[]"))
     {
         if(TAG(t) == FORWARD_TAG)
@@ -730,7 +744,7 @@ void print_string(union field n)
         {
             h = child_at(t,0);
             t = child_at(t,1);
-            printf("%c", (char)h.n->children[0].c);
+            printEscapedChar((char)h.n->children[0].c, '"');
         }
     }
     printf("\"");
@@ -805,7 +819,13 @@ void print_final(union field n)
     }
     if(n.n->symbol->payload == PAYLOAD_CHAR)
     {
-        printf("%c", (char)child_at_c(n,0));
+        // Same derived-Show convention as print_string/showCharLiteral:
+        // a bare Char (not part of a String) shows as 'x', escaped and
+        // single-quoted -- previously printed as the bare byte alone,
+        // with no quoting at all.
+        printf("'");
+        printEscapedChar((char)child_at_c(n,0), '\'');
+        printf("'");
         return;
     }
     if(n.n->symbol->payload == PAYLOAD_FLOAT)
