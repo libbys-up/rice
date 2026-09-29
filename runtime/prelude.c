@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "runtime.h"
 #include "Prelude.h"
 
@@ -698,16 +699,130 @@ void Prelude__nonstrictEq_hnf(field root)
 }
 
 // ----------------------------------------------------------------------
+// ensureNotFree :: a -> a -- real kics2 (Prelude.kics2.hs's own
+// external_d_C_ensureNotFree) chases through Choice/Guard nodes and,
+// on a genuinely unbound Free variable, *narrows* it (commits it to one
+// of its type's constructors) before returning. That narrowing needs to
+// know the variable's type -- which constructors to even try -- and
+// this function, called generically as `Prelude__ensureNotFree_hnf`
+// for every type alike, is never given one: unlike an ordinary
+// FREE_TAG case-dispatch branch (runtime.c's generated pattern,
+// `set_X_free`), which the *caller* generates once per concrete type it
+// actually matches against, there is no single `set_X_free` this could
+// call without knowing X. So this is a genuine architectural gap, not
+// just an unwritten function -- but it's also very rarely hit in
+// practice: `$#`/`ensureNotFree` don't appear anywhere in Rice's own
+// replace_Prelude.curry/replace_Prim.curry, nor in the actual
+// __KICS2__-branch Prelude.curry Rice's frontend compiles (only in that
+// file's *other* CPP branches, for other backends) -- reachable here
+// only if a Curry program calls `$#`/`ensureNotFree`/`ensureSpine`
+// itself, not from anything Rice's own pipeline generates.
+//
+// Handles everything real kics2 does *except* the Free case: chases
+// FORWARD_TAG and redispatches through FUNCTION_TAG/CHOICE_TAG via
+// settle() (same as strictApply/cond/bindIO/prim_ioError), which
+// covers Choice and Guard's own role here (both eventually resolve to
+// a real tag through the ordinary CHOICE_TAG/FUNCTION_TAG dispatch a
+// generated case ordinarily forces anyway). A settled FREE_TAG is
+// passed through unchanged rather than narrowed -- correct whenever the
+// caller only needed "some value to force", wrong if it specifically
+// needed the result guaranteed non-free; no way to tell which from
+// here.
+void Prelude__ensureNotFree_hnf(field root)
+{
+    field x = child_at(root, 0);
+    x = settle(x, NULL, HNF_SETTLE);
+    set_forward(root, x);
+}
+
+// ----------------------------------------------------------------------
+// File I/O. Reads/writes the whole file in one call (no streaming/lazy
+// I/O -- readFile's own Curry-level laziness is a bigger, separate
+// design question, same category as exceptions below). A failure
+// (nonexistent file, permission denied, ...) is fatal -- real Curry
+// signals this as a catchable IOError, but real exception handling
+// isn't designed yet (see catch's own stub just below), so this can
+// only ever be the uncatchable, whole-program-ending kind of failure
+// for now.
+// ----------------------------------------------------------------------
+
+// Reads the whole file at `path` into a fresh, NUL-terminated buffer
+// the caller must free -- same NUL-terminated-C-string convention
+// toCurryString/toCStr already assume throughout this file, so (as
+// elsewhere here) an embedded NUL byte in the file's own content would
+// truncate the Curry string built from it early. `mode` is fopen's own
+// ("r" or "a+"/"w"/...) -- only ever called here with "r", but kept as
+// a parameter rather than hardcoded since the caller already has to
+// pick a fatal-error message either way.
+static char* readWholeFile(const char* path, const char* what)
+{
+    FILE* f = fopen(path, "r");
+    if(f == NULL)
+    {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "%s: %s: %s", what, path, strerror(errno));
+        error(msg, make_Prelude___LP_RP(0));
+    }
+    size_t cap = 4096, len = 0;
+    char* buf = (char*)malloc(cap);
+    size_t n;
+    while((n = fread(buf + len, 1, cap - len, f)) > 0)
+    {
+        len += n;
+        if(len == cap)
+        {
+            cap *= 2;
+            buf = (char*)realloc(buf, cap);
+        }
+    }
+    fclose(f);
+    buf[len] = '\0';
+    return buf;
+}
+
+void Prelude__prim_USreadFile_hnf(field root)
+{
+    char* path = toCStr(child_at(root, 0));
+    char* content = readWholeFile(path, "readFile");
+    free(path);
+    memcpy(root.n, toCurryString(content).n, sizeof(Node));
+    free(content);
+}
+
+// Shared by writeFile ("w", truncate) and appendFile ("a", append) --
+// same fopen mode letter fwrite/fopen themselves use.
+static void writeToFile(field root, char mode)
+{
+    char* path = toCStr(child_at(root, 0));
+    char* content = toCStr(child_at(root, 1));
+    char fmode[2] = { mode, '\0' };
+    FILE* f = fopen(path, fmode);
+    if(f == NULL)
+    {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "%s: %s: %s",
+                 mode == 'w' ? "writeFile" : "appendFile", path, strerror(errno));
+        free(path);
+        free(content);
+        error(msg, root);
+    }
+    fputs(content, f);
+    fclose(f);
+    free(path);
+    free(content);
+    set_Prelude___LP_RP(root, 0);
+}
+
+void Prelude__prim_USwriteFile_hnf(field root)  { writeToFile(root, 'w'); }
+void Prelude__prim_USappendFile_hnf(field root) { writeToFile(root, 'a'); }
+
+// ----------------------------------------------------------------------
 // Deferred stubs: crash the program rather than silently fail.
-// error handling, the parsing direction of literal show/read, and file I/O.
+// Real exception handling, and the parsing direction of literal show/read.
 // ----------------------------------------------------------------------
 
 void Prelude__catch_hnf(field root)          { error("catch not implemented yet", root); }
-void Prelude__ensureNotFree_hnf(field root)  { error("ensureNotFree not implemented yet", root); }
 void Prelude__prim_USreadCharLiteral_hnf(field root)   { error("read*Literal not implemented yet", root); }
 void Prelude__prim_USreadStringLiteral_hnf(field root) { error("read*Literal not implemented yet", root); }
 void Prelude__prim_USreadNatLiteral_hnf(field root)    { error("read*Literal not implemented yet", root); }
 void Prelude__prim_USreadFloatLiteral_hnf(field root)  { error("read*Literal not implemented yet", root); }
-void Prelude__prim_USreadFile_hnf(field root)   { error("file I/O not implemented yet", root); }
-void Prelude__prim_USwriteFile_hnf(field root)  { error("file I/O not implemented yet", root); }
-void Prelude__prim_USappendFile_hnf(field root) { error("file I/O not implemented yet", root); }
