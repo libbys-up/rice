@@ -82,12 +82,14 @@ perf/tailsum.curry  SLOW  10,000,000-deep genuinely tail-recursive accumulator -
 # primitives directly (replace_Prim.curry/replace_Prelude.curry's own
 # replacements, plus runtime/prelude.c's hand-written _hnf functions).
 # Everything without an entry here is a real, working implementation,
-# verified byte-for-byte against real kics2. The three below are
-# runtime/prelude.c's own documented, not-yet-implemented stubs (each
-# just `error("... not implemented yet", root)`) -- XFAIL until that
-# changes, same "report it if it starts working" spirit as every other
-# XFAIL here. `catch` (real exception handling) deliberately has no
-# test here at all yet -- still being designed, not just unimplemented.
-prelude_prims/stub_ensure_not_free.curry  XFAIL  ensureNotFree -- Prelude__ensureNotFree_hnf is still just an error() stub
-prelude_prims/stub_file_io.curry          XFAIL  readFile/writeFile/appendFile -- all three are still error() stubs
+# verified byte-for-byte against real kics2. stub_read_literal.curry is
+# runtime/prelude.c's one remaining documented, not-yet-implemented
+# stub (`error("read*Literal not implemented yet", root)`) -- XFAIL
+# until that changes, same "report it if it starts working" spirit as
+# every other XFAIL here. `catch` (real exception handling)
+# deliberately has no test here at all yet -- still being designed,
+# not just unimplemented; file_io.curry's own comment covers what that
+# leaves unexercised (a failed read/write is still fatal, not a
+# catchable IOError) even though readFile/writeFile/appendFile
+# themselves are real implementations now, not stubs.
 prelude_prims/stub_read_literal.curry     XFAIL  read/reads on a primitive type -- prim_read{Char,String,Nat,Float}Literal are still error() stubs
