@@ -57,25 +57,64 @@ void setCurryString(field root, char* str)
 // argument slots use, runtime.h's own note on that) -- this used to read
 // them backwards, the same bug (and likely just as untested until now)
 // as runtime.c's print_string/print_list/print_tuple.
+// Settles `s` and, if it's a cons cell, its own head too (settle()
+// alone only reaches WHNF, i.e. cons-vs-nil -- toCStr also needs the
+// character payload itself resolved before reading it). Returns the
+// settled list node and, via `*c`, its head's char value (undefined if
+// the list turned out to be empty -- callers only read it after
+// checking for that).
+static field settleStringNode(field s, char* c)
+{
+    field node = settle(s, NULL, HNF_SETTLE);
+    if(node.n->symbol->tag != Prelude___LB_RB_TAG)
+    {
+        // `head` is a *reference to the boxed Char node* (child_at(node,0)
+        // returns a Node reference, same as any other constructor's own
+        // child), not the raw character value itself -- the actual value
+        // is one level further in, at that node's own child 0
+        // (child_at_c, same as the rest of this file reads a Char's
+        // payload). Originally read as `head.n->children[0].c` (this
+        // file's very first version, before settle() was added here);
+        // rewriting to add settle() briefly regressed this to `head.c`
+        // directly (reading the Node* itself reinterpreted as a raw
+        // char), caught by an actual `read` round-trip test producing
+        // garbage/truncated output instead of a real parse.
+        field head = settle(child_at(node, 0), NULL, HNF_SETTLE);
+        *c = (char)child_at_c(head, 0);
+    }
+    return node;
+}
+
+// Every prior caller of this (prim_error, prim_writeFile/appendFile
+// with string-literal arguments, prim_showStringLiteral) happened to
+// only ever receive an already-fully-forced string, so this got away
+// with reading node/character tags directly with no forcing of its own
+// -- until read*Literal's own callers (readsPrec's real, lazy `lexDigits`/
+// `span`-built strings, not literals) turned out to need it and
+// segfaulted walking an unforced spine. settle() (runtime.h) is used at
+// every spine step and on each character, same "chase FORWARD_TAG,
+// redispatch through FUNCTION_TAG/CHOICE_TAG" fix as strictApply/cond/
+// bindIO/(&)/ensureNotFree -- a no-op, and therefore still safe, for
+// the already-forced strings every other caller passes.
 char* toCStr(field string)
 {
-    field node = string;
+    char c;
+    field node = settleStringNode(string, &c);
     int len = 0;
     while(node.n->symbol->tag != Prelude___LB_RB_TAG)
     {
-        node = child_at(node, 1); // tail
+        node = settleStringNode(child_at(node, 1), &c);
         len++;
     }
 
     char* cstr = (char*)malloc(len + 1);
     cstr[len] = '\0';
 
-    node = string;
+    node = settleStringNode(string, &c);
     for(int i = 0; i < len; i++)
     {
-        field head = child_at(node, 0);
-        cstr[i] = (char)head.n->children[0].c;
-        node = child_at(node, 1);
+        cstr[i] = c;
+        node = settleStringNode(child_at(node, 1), &c);
     }
     return cstr;
 }
@@ -821,8 +860,186 @@ void Prelude__prim_USappendFile_hnf(field root) { writeToFile(root, 'a'); }
 // Real exception handling, and the parsing direction of literal show/read.
 // ----------------------------------------------------------------------
 
-void Prelude__catch_hnf(field root)          { error("catch not implemented yet", root); }
-void Prelude__prim_USreadCharLiteral_hnf(field root)   { error("read*Literal not implemented yet", root); }
-void Prelude__prim_USreadStringLiteral_hnf(field root) { error("read*Literal not implemented yet", root); }
-void Prelude__prim_USreadNatLiteral_hnf(field root)    { error("read*Literal not implemented yet", root); }
-void Prelude__prim_USreadFloatLiteral_hnf(field root)  { error("read*Literal not implemented yet", root); }
+void Prelude__catch_hnf(field root) { error("catch not implemented yet", root); }
+
+// ----------------------------------------------------------------------
+// read*Literal: the inverse of show*Literal above -- each is a `ReadS a`
+// (`String -> [(a, String)]`, the standard Haskell-style "parse a
+// *prefix*, return what's left" convention: `[]` means no parse, one
+// (value, rest) pair means the literal was found at the very start of
+// the input). Every caller in the real Prelude (readsPrec's Char/Int/
+// Float instances) already hands these a string `lex`/`lexDigits` cut
+// down to exactly one token and only keeps a result whose own `rest` is
+// empty, so a real prefix parser (rather than assuming the whole input
+// is one bare literal) is correct for both that internal use and any
+// direct external call.
+//
+// Escaping is the exact inverse of appendEscaped's own table (prelude.c,
+// above show*Literal): same named escapes, same decimal \NNN fallback.
+// ----------------------------------------------------------------------
+
+static bool isAsciiDigit(char c) { return c >= '0' && c <= '9'; }
+
+// Decodes the escape starting right after the backslash at `p` (not
+// included), writes the decoded byte to `*out`, and returns how many
+// bytes of `p` it consumed -- 0 means unrecognized/malformed.
+static int parseEscape(const char* p, char* out)
+{
+    switch (*p)
+    {
+        case '\\': *out = '\\'; return 1;
+        case '\'': *out = '\''; return 1;
+        case '"':  *out = '"';  return 1;
+        case 'a':  *out = '\a'; return 1;
+        case 'b':  *out = '\b'; return 1;
+        case 'f':  *out = '\f'; return 1;
+        case 'n':  *out = '\n'; return 1;
+        case 'r':  *out = '\r'; return 1;
+        case 't':  *out = '\t'; return 1;
+        case 'v':  *out = '\v'; return 1;
+        default:
+            if (isAsciiDigit(*p))
+            {
+                int val = 0, n = 0;
+                while (n < 3 && isAsciiDigit(p[n])) { val = val * 10 + (p[n] - '0'); n++; }
+                *out = (char)val;
+                return n;
+            }
+            return 0;
+    }
+}
+
+typedef struct { bool ok; char value; const char* rest; } CharParse;
+
+static CharParse tryParseCharLiteral(const char* s)
+{
+    if (s[0] != '\'') return (CharParse){ false, 0, s };
+    const char* p = s + 1;
+    char c;
+    if (*p == '\\')
+    {
+        int n = parseEscape(p + 1, &c);
+        if (n == 0) return (CharParse){ false, 0, s };
+        p += 1 + n;
+    }
+    else if (*p == '\0' || *p == '\'')
+    {
+        return (CharParse){ false, 0, s }; // empty '' or unterminated
+    }
+    else
+    {
+        c = *p;
+        p += 1;
+    }
+    if (*p != '\'') return (CharParse){ false, 0, s };
+    return (CharParse){ true, c, p + 1 };
+}
+
+typedef struct { bool ok; char* value; const char* rest; } StringParse;
+
+// On success, `value` is a fresh malloc'd, NUL-terminated C string the
+// caller must free.
+static StringParse tryParseStringLiteral(const char* s)
+{
+    if (s[0] != '"') return (StringParse){ false, NULL, s };
+    const char* p = s + 1;
+    size_t cap = 64, len = 0;
+    char* buf = (char*)malloc(cap);
+    while (*p != '"')
+    {
+        if (*p == '\0') { free(buf); return (StringParse){ false, NULL, s }; }
+        char c;
+        if (*p == '\\')
+        {
+            int n = parseEscape(p + 1, &c);
+            if (n == 0) { free(buf); return (StringParse){ false, NULL, s }; }
+            p += 1 + n;
+        }
+        else
+        {
+            c = *p;
+            p += 1;
+        }
+        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+        buf[len++] = c;
+    }
+    buf[len] = '\0';
+    return (StringParse){ true, buf, p + 1 };
+}
+
+typedef struct { bool ok; double value; const char* rest; } FloatParse;
+
+static FloatParse tryParseFloatLiteral(const char* s)
+{
+    // Curry Float literal syntax always starts with a digit (the sign,
+    // if any, is handled by readSigned, a layer up) -- checked
+    // explicitly rather than just handing `s` to strtod, which would
+    // also accept a leading sign/"nan"/"inf" text that isn't valid here.
+    if (!isAsciiDigit(s[0])) return (FloatParse){ false, 0, s };
+    char* end;
+    double v = strtod(s, &end);
+    if (end == s) return (FloatParse){ false, 0, s };
+    return (FloatParse){ true, v, end };
+}
+
+// Every read*Literal _hnf below shares this shape: parse, then either
+// `[]` (make_Prelude___LB_RB) or a one-element list holding the
+// (value, rest) pair.
+static field noParse(void) { return make_Prelude___LB_RB(0); }
+
+static field oneParse(field value, const char* rest)
+{
+    field pair = make_Prelude___LP_CM_RP(value, toCurryString((char*)rest), 0);
+    return make_Prelude___CO(pair, make_Prelude___LB_RB(0), 0);
+}
+
+void Prelude__prim_USreadNatLiteral_hnf(field root)
+{
+    char* s = toCStr(child_at(root, 0));
+    field result;
+    if (!isAsciiDigit(s[0]))
+    {
+        result = noParse();
+    }
+    else
+    {
+        char* p = s;
+        long value = 0;
+        while (isAsciiDigit(*p)) { value = value * 10 + (*p - '0'); p++; }
+        result = oneParse(make_Prelude__Int((field)(long)value, 0), p);
+    }
+    memcpy(root.n, result.n, sizeof(Node));
+    free(s);
+}
+
+void Prelude__prim_USreadCharLiteral_hnf(field root)
+{
+    char* s = toCStr(child_at(root, 0));
+    CharParse r = tryParseCharLiteral(s);
+    field result = r.ok
+      ? oneParse(make_Prelude__Char((field)(unsigned long)(unsigned char)r.value, 0), r.rest)
+      : noParse();
+    memcpy(root.n, result.n, sizeof(Node));
+    free(s);
+}
+
+void Prelude__prim_USreadStringLiteral_hnf(field root)
+{
+    char* s = toCStr(child_at(root, 0));
+    StringParse r = tryParseStringLiteral(s);
+    field result = r.ok ? oneParse(toCurryString(r.value), r.rest) : noParse();
+    memcpy(root.n, result.n, sizeof(Node));
+    if (r.ok) { free(r.value); }
+    free(s);
+}
+
+void Prelude__prim_USreadFloatLiteral_hnf(field root)
+{
+    char* s = toCStr(child_at(root, 0));
+    FloatParse r = tryParseFloatLiteral(s);
+    field result = r.ok
+      ? oneParse(make_Prelude__Float((field)(double)r.value, 0), r.rest)
+      : noParse();
+    memcpy(root.n, result.n, sizeof(Node));
+    free(s);
+}
