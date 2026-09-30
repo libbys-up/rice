@@ -63,7 +63,7 @@
 --- @author Steven Libby
 ------------------------------------------------------------------------------
 
-module Rice.Codegen.C.ToC (toSource, writeMain, StackSize (..)) where
+module Rice.Codegen.C.ToC (toSource, writeMain, StackSize (..), MainMode (..)) where
 
 import Data.Maybe (isJust)
 import Data.Char (ord)
@@ -108,14 +108,43 @@ stackSizeStmt Nothing                = []
 stackSizeStmt (Just StackSizeMax)    = [scall "set_stack_size_max" []]
 stackSizeStmt (Just (StackSizeMB n)) = [scall "set_stack_size" [int (n * 1024 * 1024)]]
 
+--- Which top-level driver generated `main()` should run the root module's
+--- `main` through -- see `writeMain`, and `Rice.Main`'s `--interactive`
+--- flag that produces this.
+---
+--- `Standalone` (the default) is what an ordinary compiled Curry program
+--- wants: `main :: IO _`, run exactly once via `run_io` (runtime.c) --
+--- no retry-on-backtracking loop, and no printing of a "result" (an IO
+--- action's output is whatever side effects it already performed).
+---
+--- `Interactive` keeps this compiler's original, and still useful,
+--- behavior: `nf_all` (runtime.c) evaluates the root `main` -- which
+--- need not be `IO`-typed at all -- and prints *every* solution it can
+--- backtrack its way into, exactly the "evaluate an arbitrary goal
+--- expression, show every answer" behavior a REPL-style front end (e.g.
+--- the `curry-repl` package's generated main-expression modules) needs
+--- when it compiles a user's typed-in expression. Most of this
+--- compiler's own `old_rice`-derived regression/benchmark corpus is
+--- itself written in this older, bare-goal style (`main :: [Int]`, not
+--- `IO ()`) rather than as real standalone programs, so `tests/run.sh`
+--- passes this for those, not because it's the right default for
+--- `rice` itself.
+data MainMode = Standalone | Interactive
+ deriving (Show, Eq)
+
+mainDriverCall :: MainMode -> CStmt
+mainDriverCall Standalone  = scall "run_io" [root]
+mainDriverCall Interactive = scall "nf_all" [root]
+
 --- The generated `main.c` for the root module: sets up the runtime's two
---- globals, evaluates the root module's `main` to normal form, and prints
---- every solution found (`nf_all`, `runtime.c`). No constant/flyweight
---- preallocation (old_rice's/fast_backtrack's `writeMain`'s `Num[256]`/
---- `makeCrap`, needing a whole-program `DataTable` this pass doesn't
---- build) -- Phase 1 deliberately excludes it, see `STATUS.md`.
-writeMain :: String -> Maybe StackSize -> Doc
-writeMain rootModule stackSize = vcat
+--- globals, evaluates the root module's `main` to normal form, and runs
+--- it through whichever top-level driver `mode` selects (see `MainMode`).
+--- No constant/flyweight preallocation (old_rice's/fast_backtrack's
+--- `writeMain`'s `Num[256]`/`makeCrap`, needing a whole-program
+--- `DataTable` this pass doesn't build) -- Phase 1 deliberately excludes
+--- it, see `STATUS.md`.
+writeMain :: String -> Maybe StackSize -> MainMode -> Doc
+writeMain rootModule stackSize mode = vcat
   [ text "#include <stdio.h>"
   , cinclude "node"
   , cinclude "stack"
@@ -136,7 +165,7 @@ writeMain rootModule stackSize = vcat
       , scall "memory_init" []
       , text "field root" <+> equals <+>
           call ("make_" ++ mangle (rootModule,"main",0)) [int 0] <> semi
-      , scall "nf_all" [root]
+      , mainDriverCall mode
       , creturnExpr (int 0)
       ]
   ]

@@ -441,6 +441,7 @@ void print_list(union field n);
 
 void nf(union field expr);
 void ground_nf(union field expr);
+void run_io(union field expr);
 void nf_all(union field expr);
 
 void error(char* msg, union field expr);

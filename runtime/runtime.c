@@ -1045,6 +1045,26 @@ void nf(union field expr)
     }
 }
 
+// Runs `expr` (a standalone program's `main`, always `IO _`) to normal
+// form exactly once: no "try another solution" backtracking loop, and no
+// printing of the result itself -- an IO action's output is whatever side
+// effects it already performed (putStrLn, etc.), not a value to show.
+// This is what an ordinary compiled executable's C `main()` should do;
+// `nf_all` below (compiled in when `rice --interactive` is given, e.g. by
+// a curry-repl-style front end evaluating an arbitrary, possibly
+// non-`IO`, possibly nondeterministic goal expression) is a different,
+// heavier driver, not the right default for a plain `curry foo.curry`
+// program. See Rice.Codegen.C.ToC.writeMain / Rice.Main's --interactive.
+void run_io(union field expr)
+{
+    nf(expr);
+    if(TAG(expr) == FAIL_TAG)
+    {
+        fprintf(stderr, "Program failed.\n");
+        exit(1);
+    }
+}
+
 // computer expr to a normal form, and print all solutions by backtracking.
 void nf_all(union field expr)
 {
