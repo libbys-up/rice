@@ -42,16 +42,20 @@ old_rice/benchmarks/lastEq.curry  XFAIL  frontend: same "Type signature too gene
 # --- old_rice/benchmarks: deliberately large inputs, confirmed to still
 # actually complete within --slow's 180s timeout (STATUS.md's 2026-09-11
 # write-up) ---
-old_rice/benchmarks/ndtest.curry          SLOW  unshared `?` under recursion -- solution count blows up combinatorially (fib 7 alone runs well past a 15s timeout)
 old_rice/benchmarks/reverse_builtin.curry SLOW  4M-node unary Nat list
 old_rice/benchmarks/primes.curry          SLOW  sieve out to the 4000th prime
 old_rice/benchmarks/primesort.curry       SLOW  sort over the 1000th-1003rd primes
 old_rice/benchmarks/cent.curry            SLOW  exponential generate-and-test search
-old_rice/benchmarks/perm.curry            SLOW  exponential permutation search (9 elements)
 old_rice/benchmarks/queens_det.curry      SLOW  11-queens (no nondeterminism, but a large search)
-old_rice/benchmarks/schedule.curry        SLOW  exponential generate-and-test search
 old_rice/benchmarks/sort.curry            SLOW  exponential permutation search (14 elements)
 old_rice/benchmarks/tak.curry             SLOW  classic deep-recursion benchmark (tak 33 17 8)
+
+# ndtest.curry/perm.curry/schedule.curry originally enumerated enough
+# solutions (2097152 / 362880 / 72288) that their goldens alone were
+# 25MB/13MB/12MB -- a repo-bloat hazard, not a cheap/contained SLOW
+# cost -- and were reduced (see each file's own comment for the exact
+# measurements) to sizes that run in well under a second and no longer
+# need the SLOW tag at all.
 
 # --- old_rice/benchmarks: same large-input category, but confirmed via a
 # real lldb backtrace to genuinely crash (not just run long) -- deep,
