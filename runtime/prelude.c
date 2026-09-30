@@ -187,6 +187,25 @@ void Prelude__bindIO_hnf(field root)
     // child 1.
     field m = child_at(root, 0);
     field f = child_at(root, 1);
+    // IO never backtracks: settling `m` (below) can dispatch a CHOICE_TAG
+    // node reached along the way (e.g. `m` itself is `x ? y`, or forcing
+    // one of its own arguments hits a choice somewhere inside), which
+    // pushes a real frame onto bt_stack via choose(). But apply_hnf below
+    // then overwrites `root` in place with f's result, permanently
+    // orphaning that choice from the reachable graph -- nothing will ever
+    // point back at it again. Left alone, the frame just sits on
+    // bt_stack, and a later top-level `undo(0)` (nf_all's "try another
+    // solution" loop) finds it, restores it, and re-runs nf() on a graph
+    // that never actually changed -- observed directly as a spurious
+    // second "SOLUTION: ()" for a plain `do`-block containing a `?`
+    // (see the regression test this fix adds). Recording the cutoff
+    // before doing any work and discarding (not restoring -- pop_to,
+    // unlike undo, never writes rhs back into lhs) everything above it
+    // once this call's whole dispatch (including running `f`, via
+    // apply_hnf) is done commits every choice made along the way, so
+    // nothing pushed during *this* bindIO call is ever visible to undo()
+    // again. This is also the soundness bar `catch`'s planned cutoff-based
+    // design needs bt_stack to actually meet.
     // A single HNF() call is deliberately non-looping (see runtime.h),
     // but an action built from further nested bindIO/`*>` calls (as any
     // multi-statement `do`-block, or `putStr` recursing over a string,
@@ -207,9 +226,11 @@ void Prelude__bindIO_hnf(field root)
     // needed here, unlike strictApply/cond: IO actions carry no
     // FAIL/backtracking-stack bookkeeping at all (this function's own
     // header comment), so there's nothing to trail either way.
+    int cutoff = size(bt_stack);
     m = settle(m, NULL, HNF_SETTLE);
     set_apply1(root, f, m);
     apply_hnf(root);
+    pop_to(bt_stack, cutoff);
 }
 
 void Prelude__returnIO_hnf(field root)
