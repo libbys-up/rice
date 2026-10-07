@@ -8,6 +8,7 @@
 #include "debug.h"
 #include "memory.h"
 #include "prim.h"
+#include "machine.h"
 
 #define FAIL_TAG     0
 #define FUNCTION_TAG 1
@@ -65,6 +66,10 @@ static inline int filled_arity(union field n)
 #endif
 void check_layout(union field n, bool allow_null, const char* where);
 
+// Prints a field of the given rep: a raw value as a literal, a pointer as
+// an expression (print_expr).
+void print_field(union field v, FieldRep r);
+
 // If s is one of the primitive boxes (Prelude's Int/Char/Float: a
 // constructor whose one child is raw), which primitive it holds; R_PTR for
 // every other symbol. The constructor-tag check keeps a function with one
@@ -106,7 +111,7 @@ static inline unsigned char TAG(union field root)
 __attribute__((always_inline))
 static inline void HNF(union field root)
 {
-    return root.n->symbol->hnf(root);
+    eval_hnf(root);
 }
 
 
@@ -170,7 +175,7 @@ static inline void HNF(union field root)
 #if OPT_TAIL_JUMP
 #define TAIL_DISPATCH(hnf_fn, root) ((void)0)
 #else
-#define TAIL_DISPATCH(hnf_fn, root) hnf_fn(root)
+#define TAIL_DISPATCH(hnf_fn, root) (rice_root = (root), hnf_fn())
 #endif
 
 // Same idea as TAIL_DISPATCH, for the two spots (apply_hnf, runtime.c)
@@ -181,7 +186,7 @@ static inline void HNF(union field root)
 #if OPT_TAIL_JUMP
 #define TAIL_DISPATCH_PTR(root) ((void)0)
 #else
-#define TAIL_DISPATCH_PTR(root) (root.n->symbol->hnf(root))
+#define TAIL_DISPATCH_PTR(root) (rice_root = (root), (root).n->symbol->hnf())
 #endif
 
 // The other half of #2: a genuine trampoline *consumer*, for the places
@@ -214,10 +219,10 @@ static inline void HNF_SETTLE(union field root)
 #if OPT_TAIL_JUMP
     do
     {
-        root.n->symbol->hnf(root);
+        eval_hnf(root);
     } while (TAG(root) == FUNCTION_TAG);
 #else
-    root.n->symbol->hnf(root);
+    eval_hnf(root);
 #endif
 }
 
@@ -489,10 +494,10 @@ void set3(union field root, Symbol* sym, union field v0, union field v1, union f
 /// hnf/symbol definitions
 /////////////////////////////////////////////////
 
-void CTR_hnf(union field root);
-void choice_hnf(union field root);
-void apply_hnf(union field root);
-void forward_hnf(union field root);
+RICE_CC void CTR_hnf(void);
+RICE_CC void choice_hnf(void);
+RICE_CC void apply_hnf(void);
+RICE_CC void forward_hnf(void);
 
 // set a free variable (I think)
 // TODO: figure out if I'm right about this.
@@ -565,11 +570,11 @@ static Symbol backup_symbol  = { .tag = FAIL_TAG,     .arity = 0, .name = "RET",
 // So, I just want these to pass through to apply_hnf.
 // This is actually a potential chance for optimization in the future.
 __attribute__((always_inline)) 
-static inline void apply1_hnf(union field root) {apply_hnf(root);}
+static inline RICE_CC void apply1_hnf(void) {apply_hnf();}
 __attribute__((always_inline)) 
-static inline void apply2_hnf(union field root) {apply_hnf(root);}
+static inline RICE_CC void apply2_hnf(void) {apply_hnf();}
 __attribute__((always_inline)) 
-static inline void apply3_hnf(union field root) {apply_hnf(root);}
+static inline RICE_CC void apply3_hnf(void) {apply_hnf();}
 
 
 __attribute__((always_inline)) 

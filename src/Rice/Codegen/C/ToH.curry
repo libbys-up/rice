@@ -99,7 +99,7 @@ toHeader reps (IProg name imps types allFuns) = vcat $
 ------------------------------------------------------------------------------
 
 declareFun :: IFunction -> CStmt
-declareFun (IFunction f _ _ _ _) = cfunDecl "void" (hnf f) [("field","root")]
+declareFun (IFunction f _ _ _ _) = cfunDecl hnfRet (hnf f) []
 
 ------------------------------------------------------------------------------
 -- Tags

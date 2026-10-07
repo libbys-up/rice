@@ -87,17 +87,19 @@ static union field mk2(Symbol* sym, union field v0, union field v1)
 // codegen will reuse it across unrelated types -- nothing in this test ever
 // needs a bare tag to disambiguate a type on its own, only symbol identity
 // (print_final's name lookup) or, for the boxed value, its Symbol's
-// .payload -- exactly the design this checks.
+// .reps (box_rep) -- exactly the design this checks.
 static Symbol true_symbol      = { .tag = 5, .arity = 0, .name = "True",  .hnf = &CTR_hnf };
 static Symbol false_symbol     = { .tag = 6, .arity = 0, .name = "False", .hnf = &CTR_hnf };
 static Symbol pair_symbol      = { .tag = 5, .arity = 2, .name = "Pair",  .hnf = &CTR_hnf };
+static const unsigned char boxed_int_reps[] = { R_INT };
 static Symbol boxed_int_symbol = { .tag = 5, .arity = 1, .name = "Int",
-                                    .payload = PAYLOAD_INT, .hnf = &CTR_hnf };
+                                    .reps = boxed_int_reps, .hnf = &CTR_hnf };
 
 int main(void)
 {
     bt_stack = new_stack();
     memory_init();
+    machine_init();
 
     // Capture everything printed to stdout by the runtime calls below, so
     // the checks can be automated (grep the captured text) instead of
@@ -159,6 +161,35 @@ int main(void)
           "choose/undo/nf_all: Choice(True, False) finds both solutions");
     check(strstr(buf, "pair-after-nf-tag: 0 (expect 0)") != NULL,
           "fail_nf: a FAIL child collapses its Pair parent to FAIL");
+
+    // The evaluation stack: enough frames to force several machine_grow
+    // calls, each slot tagged with its frame's index, all checked after
+    // the moves, then popped back to empty.
+    {
+        static const unsigned char test_reps[] = { R_INT, R_PTR };
+        static const FrameInfo test_info =
+            { .code = NULL, .size = 2, .reps = test_reps, .name = "test" };
+        ptrdiff_t base = machine_depth();
+        const long N = 100000;
+        for(long i = 0; i < N; i++)
+        {
+            Frame* f = frame_push(&test_info);
+            f->slots[0].i = i;
+        }
+        int intact = machine_depth() - base == N * 3;
+        Frame* f = rice_sp;
+        for(long i = N - 1; i >= 0 && intact; i--)
+        {
+            intact = f->info == &test_info && f->slots[0].i == i && f->slots[1].n == NULL;
+            f = (Frame*)((union field*)f + 3);
+        }
+        check(intact, "machine: 100000 frames survive stack growth intact");
+        for(long i = 0; i < N; i++)
+        {
+            frame_pop();
+        }
+        check(machine_depth() == base, "machine: popping every frame returns to the start");
+    }
 
     printf("\n%s\n", failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
     return failures == 0 ? 0 : 1;

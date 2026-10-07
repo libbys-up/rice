@@ -40,13 +40,31 @@ typedef enum
     R_FLOAT     // raw double (union field .f)
 } FieldRep;
 
+// Calling convention for machine code. preserve_none (clang 19+) makes a
+// tail jump cost no callee-saved register traffic; elsewhere it's left
+// out, which is still correct, just slower.
+#if defined(__has_attribute)
+#  if __has_attribute(preserve_none)
+#    define RICE_CC __attribute__((preserve_none))
+#  endif
+#endif
+#ifndef RICE_CC
+#  define RICE_CC
+#endif
+
+// A piece of machine code (machine.h): a `_hnf` function, a case block, or
+// a runtime routine. Its input is the machine's registers (rice_root, the
+// top frame), never C arguments, so every piece has this one signature --
+// which is what lets any of them tail-call any other.
+typedef RICE_CC void (*Code)(void);
+
 typedef struct
 {
     const unsigned char tag;
     const unsigned int arity;
     const char* name;
     const unsigned char* reps; // FieldRep per child, or NULL for all pointers
-    void (*hnf)(union field);
+    Code hnf;  // reduces rice_root to head normal form
     struct Node* (*hnf_RET)(struct Node*);
 } Symbol;
 

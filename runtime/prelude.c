@@ -168,7 +168,8 @@ static void strictApply(field root, void (*force)(field))
     else
     {
         set_apply1(root, f, x);
-        apply_hnf(root);
+        rice_root = root;
+        apply_hnf();
     }
 }
 
@@ -177,9 +178,9 @@ static void strictApply(field root, void (*force)(field))
 // the way here, not just one hop -- same reasoning as nf/ground_nf
 // (runtime.c), which is also why those two are safe to pass as `force`
 // for $!!/$## below without any change of their own.
-void Prelude___DL_EX_hnf(field root)    { strictApply(root, HNF_SETTLE); }
-void Prelude___DL_EX_EX_hnf(field root) { strictApply(root, nf); }
-void Prelude___DL_HT_HT_hnf(field root) { strictApply(root, ground_nf); }
+RICE_CC void Prelude___DL_EX_hnf(void)    { field root = rice_root; strictApply(root, HNF_SETTLE); }
+RICE_CC void Prelude___DL_EX_EX_hnf(void) { field root = rice_root; strictApply(root, nf); }
+RICE_CC void Prelude___DL_HT_HT_hnf(void) { field root = rice_root; strictApply(root, ground_nf); }
 
 // ----------------------------------------------------------------------
 // IO plumbing: Rice's execution model has no separate IO-monad
@@ -191,8 +192,9 @@ void Prelude___DL_HT_HT_hnf(field root) { strictApply(root, ground_nf); }
 // build here).
 // ----------------------------------------------------------------------
 
-void Prelude__bindIO_hnf(field root)
+RICE_CC void Prelude__bindIO_hnf(void)
 {
+    field root = rice_root;
     // bindIO :: IO a -> (a -> IO b) -> IO b -- m is the first parameter,
     // f the second, so (matching every other node here, and the "forward
     // storage" convention documented in runtime.h) m is child 0 and f is
@@ -241,17 +243,20 @@ void Prelude__bindIO_hnf(field root)
     int cutoff = size(bt_stack);
     m = settle(m, NULL, HNF_SETTLE);
     set_apply1(root, f, m);
-    apply_hnf(root);
+    rice_root = root;
+    apply_hnf();
     pop_to(bt_stack, cutoff);
 }
 
-void Prelude__returnIO_hnf(field root)
+RICE_CC void Prelude__returnIO_hnf(void)
 {
+    field root = rice_root;
     set_forward(root, child_at(root, 0));
 }
 
-void Prelude__getChar_hnf(field root)
+RICE_CC void Prelude__getChar_hnf(void)
 {
+    field root = rice_root;
     int c = getchar();
     set_Prelude__Char(root, (field)(unsigned long)c, 0);
 }
@@ -265,8 +270,9 @@ void Prelude__getChar_hnf(field root)
 // above) has to control the order of. Argument is the raw (unboxed)
 // char replace_Prim.curry's own `putChar` already unwrapped via a
 // `Char c'` case match before ever calling this.
-void Prelude__prim_USputChar_hnf(field root)
+RICE_CC void Prelude__prim_USputChar_hnf(void)
 {
+    field root = rice_root;
     putchar((int)child_at_c(root, 0));
     set_Prelude___LP_RP(root, 0);
 }
@@ -277,8 +283,9 @@ void Prelude__prim_USputChar_hnf(field root)
 // helper directly rather than a raw exit().
 // ----------------------------------------------------------------------
 
-void Prelude__prim_USerror_hnf(field root)
+RICE_CC void Prelude__prim_USerror_hnf(void)
 {
+    field root = rice_root;
     char* msg = toCStr(child_at(root, 0));
     error(msg, root);
 }
@@ -288,22 +295,25 @@ void Prelude__prim_USerror_hnf(field root)
 // (the inverse direction) is not implemented yet.
 // ----------------------------------------------------------------------
 
-void Prelude__prim_USshowIntLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USshowIntLiteral_hnf(void)
 {
+    field root = rice_root;
     char buf[32];
     snprintf(buf, sizeof(buf), "%ld", child_at_i(root, 0));
     overwrite_root(root, toCurryString(buf));
 }
 
-void Prelude__prim_USshowFloatLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(void)
 {
+    field root = rice_root;
     char buf[64];
     snprintf(buf, sizeof(buf), "%f", child_at_f(root, 0));
     overwrite_root(root, toCurryString(buf));
 }
 
-void Prelude__prim_USshowCharLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USshowCharLiteral_hnf(void)
 {
+    field root = rice_root;
     char c = (char)child_at_c(root, 0);
     char buf[8];
     char* p = buf;
@@ -314,8 +324,9 @@ void Prelude__prim_USshowCharLiteral_hnf(field root)
     overwrite_root(root, toCurryString(buf));
 }
 
-void Prelude__prim_USshowStringLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USshowStringLiteral_hnf(void)
 {
+    field root = rice_root;
     char* s = toCStr(child_at(root, 0));
     size_t len = strlen(s);
     // Worst case every byte expands to a 4-byte decimal escape, plus the
@@ -358,8 +369,9 @@ void Prelude__prim_USshowStringLiteral_hnf(field root)
 // strictApply, cond, bindIO, prim_ioError already do) is exactly this
 // fix, factored out: chase, re-force, repeat, *returning* the settled
 // value instead of relying on in-place mutation the caller can't see.
-void Prelude___AN_hnf(field root)
+RICE_CC void Prelude___AN_hnf(void)
 {
+    field root = rice_root;
     field x = child_at(root, 0);
     field y = child_at(root, 1);
     bool nondet = false;
@@ -379,8 +391,9 @@ void Prelude___AN_hnf(field root)
     }
 }
 
-void Prelude__failed_hnf(field root)
+RICE_CC void Prelude__failed_hnf(void)
 {
+    field root = rice_root;
     trail_node(root, false);
     fail(root);
 }
@@ -399,16 +412,19 @@ void Prelude__failed_hnf(field root)
 // (&) above, just returning y instead of a boolean.
 // ----------------------------------------------------------------------
 
-void Prelude__apply_hnf(field root)
+RICE_CC void Prelude__apply_hnf(void)
 {
+    field root = rice_root;
     field f = child_at(root, 0);
     field x = child_at(root, 1);
     set_apply1(root, f, x);
-    apply_hnf(root);
+    rice_root = root;
+    apply_hnf();
 }
 
-void Prelude__cond_hnf(field root)
+RICE_CC void Prelude__cond_hnf(void)
 {
+    field root = rice_root;
     field c = child_at(root, 0);
     field x = child_at(root, 1);
     // settle(), not a single HNF_SETTLE + ad-hoc chase: c's tag is
@@ -450,8 +466,9 @@ void Prelude__cond_hnf(field root)
 // raw message.
 // ----------------------------------------------------------------------
 
-void Prelude__prim_USioError_hnf(field root)
+RICE_CC void Prelude__prim_USioError_hnf(void)
 {
+    field root = rice_root;
     field err = child_at(root, 0);
     // settle(), not a bare HNF_SETTLE: child_at(err,0) right below needs
     // err genuinely resolved to a real IOError constructor, not a still-
@@ -557,8 +574,9 @@ static bool unify_step(field x, field y, bool* nondet)
     return true;
 }
 
-void Prelude__constrEq_hnf(field root)
+RICE_CC void Prelude__constrEq_hnf(void)
 {
+    field root = rice_root;
     field x = child_at(root, 0);
     field y = child_at(root, 1);
     nf(x);
@@ -729,8 +747,9 @@ static LazyResult lazy_unify_step(field s, field t)
     return (LazyResult){ true, nondet };
 }
 
-void Prelude__nonstrictEq_hnf(field root)
+RICE_CC void Prelude__nonstrictEq_hnf(void)
 {
+    field root = rice_root;
     field x = child_at(root, 0);
     field y = child_at(root, 1);
     LazyResult r = lazy_unify_step(x, y);
@@ -775,8 +794,9 @@ void Prelude__nonstrictEq_hnf(field root)
 // caller only needed "some value to force", wrong if it specifically
 // needed the result guaranteed non-free; no way to tell which from
 // here.
-void Prelude__ensureNotFree_hnf(field root)
+RICE_CC void Prelude__ensureNotFree_hnf(void)
 {
+    field root = rice_root;
     field x = child_at(root, 0);
     x = settle(x, NULL, HNF_SETTLE);
     trail_node(root, false);
@@ -828,8 +848,9 @@ static char* readWholeFile(const char* path, const char* what)
     return buf;
 }
 
-void Prelude__prim_USreadFile_hnf(field root)
+RICE_CC void Prelude__prim_USreadFile_hnf(void)
 {
+    field root = rice_root;
     char* path = toCStr(child_at(root, 0));
     char* content = readWholeFile(path, "readFile");
     free(path);
@@ -861,15 +882,15 @@ static void writeToFile(field root, char mode)
     set_Prelude___LP_RP(root, 0);
 }
 
-void Prelude__prim_USwriteFile_hnf(field root)  { writeToFile(root, 'w'); }
-void Prelude__prim_USappendFile_hnf(field root) { writeToFile(root, 'a'); }
+RICE_CC void Prelude__prim_USwriteFile_hnf(void)  { field root = rice_root; writeToFile(root, 'w'); }
+RICE_CC void Prelude__prim_USappendFile_hnf(void) { field root = rice_root; writeToFile(root, 'a'); }
 
 // ----------------------------------------------------------------------
 // Deferred stubs: crash the program rather than silently fail.
 // Real exception handling, and the parsing direction of literal show/read.
 // ----------------------------------------------------------------------
 
-void Prelude__catch_hnf(field root) { error("catch not implemented yet", root); }
+RICE_CC void Prelude__catch_hnf(void) { field root = rice_root; error("catch not implemented yet", root); }
 
 // ----------------------------------------------------------------------
 // read*Literal: the inverse of show*Literal above -- each is a `ReadS a`
@@ -1002,8 +1023,9 @@ static field oneParse(field value, const char* rest)
     return make_Prelude___CO(pair, make_Prelude___LB_RB(0), 0);
 }
 
-void Prelude__prim_USreadNatLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USreadNatLiteral_hnf(void)
 {
+    field root = rice_root;
     char* s = toCStr(child_at(root, 0));
     field result;
     if (!isAsciiDigit(s[0]))
@@ -1021,8 +1043,9 @@ void Prelude__prim_USreadNatLiteral_hnf(field root)
     free(s);
 }
 
-void Prelude__prim_USreadCharLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USreadCharLiteral_hnf(void)
 {
+    field root = rice_root;
     char* s = toCStr(child_at(root, 0));
     CharParse r = tryParseCharLiteral(s);
     field result = r.ok
@@ -1032,8 +1055,9 @@ void Prelude__prim_USreadCharLiteral_hnf(field root)
     free(s);
 }
 
-void Prelude__prim_USreadStringLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USreadStringLiteral_hnf(void)
 {
+    field root = rice_root;
     char* s = toCStr(child_at(root, 0));
     StringParse r = tryParseStringLiteral(s);
     field result = r.ok ? oneParse(toCurryString(r.value), r.rest) : noParse();
@@ -1042,8 +1066,9 @@ void Prelude__prim_USreadStringLiteral_hnf(field root)
     free(s);
 }
 
-void Prelude__prim_USreadFloatLiteral_hnf(field root)
+RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(void)
 {
+    field root = rice_root;
     char* s = toCStr(child_at(root, 0));
     FloatParse r = tryParseFloatLiteral(s);
     field result = r.ok

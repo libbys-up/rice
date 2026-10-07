@@ -84,15 +84,17 @@ void set_stack_size_max(void)
 }
 
 
-void CTR_hnf(union field root)
+RICE_CC void CTR_hnf(void)
 {
+    field root = rice_root;
     (void)root; // unused when DEBUG == 0, since debug_expr expands to nothing
     debug(LOW, "HNF constructor:");
     debug_expr(LOW, root);
 }
 
-void choice_hnf(union field root)
+RICE_CC void choice_hnf(void)
 {
+    field root = rice_root;
     debug(LOW, "HNF choice:");
     debug_expr(LOW, root);
     choose(root);
@@ -232,8 +234,9 @@ static inline void check_fill_ptrs(Symbol* sym, int from, int count)
 }
 
 // reduce a node rooted by apply(PART(f,y1,y2...yn), x1, x2 ... xn)
-void apply_hnf(union field root)
+RICE_CC void apply_hnf(void)
 {
+    field root = rice_root;
     debug(LOW, "HNF apply: \n");
     debug_expr(LOW, root);
 
@@ -449,7 +452,8 @@ void apply_hnf(union field root)
         debug_expr(HIGH, root);
 
         // We're still overapplied so try again
-        apply_hnf(root);
+        rice_root = root;
+        apply_hnf();
         debug(HIGH, "leaving apply\n");
         debug_expr(HIGH, root);
         return;
@@ -457,7 +461,7 @@ void apply_hnf(union field root)
 }
 
 
-void forward_hnf(union field root) { (void)root; }
+RICE_CC void forward_hnf(void) { field root = rice_root; (void)root; }
 
 //////////////////////////////////////////////////////////////////////////////
 // code for backtracking
@@ -813,6 +817,14 @@ static void print_raw(union field v, FieldRep r)
             printf("<ptr %p>", (void*)v.n);
             break;
     }
+}
+
+void print_field(union field v, FieldRep r)
+{
+    if(r == R_PTR)
+        print_expr(v);
+    else
+        print_raw(v, r);
 }
 
 static void printEscapedChar(char c, char quote)

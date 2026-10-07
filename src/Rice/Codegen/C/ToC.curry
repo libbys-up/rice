@@ -163,6 +163,7 @@ writeMain rootModule stackSize mode = vcat
       stackSizeStmt stackSize ++
       [ text "bt_stack" <+> equals <+> call "new_stack" [] <> semi
       , scall "memory_init" []
+      , scall "machine_init" []
       , text "field root" <+> equals <+>
           call ("make_" ++ mangle (rootModule,"main",0)) [int 0] <> semi
       , mainDriverCall mode
@@ -179,7 +180,9 @@ funSource (IFunction name _ _ _ body) = case body of
   IExternal _     -> []  -- hand-written in external.c/Prelude_external.c
   IFuncBody block ->
     [ comment (uninstance name)
-    , cfunDefn "void" (hnf name) [("field","root")] (showBody (toName name) block)
+    , cfunDefn hnfRet (hnf name) []
+        ((text "field" <+> root <+> equals <+> text "rice_root" <> semi)
+         : showBody (toName name) block)
     , text ""
     ]
 
@@ -464,7 +467,7 @@ missingArgs es m = map showExpr es ++ replicate m nullf ++ [int m]
 --- call, so there's nothing for backtracking-optimizations.md's #2 to
 --- defer here; see `tailDispatch` for the two cases that do.
 hnfCall :: CName -> CStmt
-hnfCall name = scall (name ++ "_hnf") [root]
+hnfCall name = (text "rice_root" .= root) <+> scall (name ++ "_hnf") []
 
 --- The tail-call/`apply` counterpart of `hnfCall`, for the two `setExpr`
 --- cases that build a genuine tail call: a real `_hnf`/`apply_hnf`

@@ -338,6 +338,27 @@ fix). It enumerates forever by design, so no finite goal reaches it.
 
 ### 7. Then: bring back worker/wrapper
 
+**Deferred (2026-10-07)** until a strictness analysis is chosen. It isn't a
+prerequisite for the explicit stack or the GC: raw values already appear
+without it (boxes, primitive thunks, ICurry-lifted functions with raw
+parameters), and steps 1–6 cover them. Two findings from looking into it
+first:
+
+- Strictness has to cross modules. `fac n acc = case n of 0 -> acc; _ ->
+  ...` compiles to `case (_impl#==#...Int# n 0) of True -> ...; False ->
+  ...`, so `n`'s strictness depends on a Prelude function's. That means a
+  strictness table threaded through the driver like `FunTable`.
+- Open question: whether a case counts toward strictness through its
+  branches only when it's complete. Treating failure as bottom, as GHC
+  does, lets the wrapper evaluate an argument that a failing path would
+  never touch. That can turn a failing alternative into a diverging one
+  under search (`f loop B ? 3` loses its `3`), which kics2 never does.
+
+For the explicit stack: the lint currently forbids raw results, so every
+continuation receives a pointer. GHC-style workers often return unboxed
+values, so the stack design should give each continuation a rep for its
+incoming value instead of assuming a pointer.
+
 Port old_rice's `Optimize/Strictness.curry` (`fixStrict`/`splitWorker`)
 onto `TExpr`. Two differences from old_rice:
 

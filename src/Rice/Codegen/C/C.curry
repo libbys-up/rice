@@ -255,8 +255,13 @@ dinit field val = text ('.':field) <+> equals <+> val
 cargs :: [CExpr] -> CExpr
 cargs = parens . hsep . punctuate comma
 
+--- An empty list prints as `(void)`: in C, `()` declares a function with
+--- unspecified parameters, not none. (One rule with a `case`: two
+--- overlapping rules would make `[]` print both ways, nondeterministically.)
 cparams :: [(CType,CName)] -> CExpr
-cparams ps = parens (hsep (punctuate comma (map param ps)))
+cparams ps = case ps of
+  [] -> text "(void)"
+  _  -> parens (hsep (punctuate comma (map param ps)))
  where param (t,x) = text t <+> text x
 
 carray :: [CExpr] -> CExpr
@@ -314,6 +319,11 @@ children n ixs = foldl childAt n ixs
 
 hnf :: IQName -> CName
 hnf n = mangle n ++ "_hnf"
+
+--- The return type of every `_hnf` function: machine code
+--- (`runtime/machine.h`) takes no C arguments and reads `rice_root`.
+hnfRet :: CType
+hnfRet = "RICE_CC void"
 
 tag :: IQName -> CName
 tag n = mangle n ++ "_TAG"
