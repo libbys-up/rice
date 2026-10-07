@@ -11,25 +11,25 @@ removeFunTypes (TFunc name arity vis typ rule) =
                 Func name arity vis typ (removeRuleTypes rule)
 
 removeRuleTypes :: TRule -> Rule
-removeRuleTypes (TRule tvs te) = Rule (map fst tvs) (removeExprTypes te)
+removeRuleTypes (TRule tvs te)    = Rule (map fst tvs) (removeExprTypes te)
 removeRuleTypes (TExternal t ext) = External ext
 
 removeExprTypes :: TExpr -> Expr
-removeExprTypes (TVarE  t v) = Var v
-removeExprTypes (TLit   t l) = Lit l
-removeExprTypes (TComb  t ct n es) = Comb ct n (map removeExprTypes es)
-removeExprTypes (TLet   vs e) = Let (map fixLet vs) (removeExprTypes e)
+removeExprTypes (TVarE  _ v)       = Var v
+removeExprTypes (TLit   _ l)       = Lit l
+removeExprTypes (TComb  _ ct n es) = Comb ct n (map removeExprTypes es)
+removeExprTypes (TLet   vs e)      = Let (map fixLet vs) (removeExprTypes e)
  where fixLet ((v,t),e) = (v,t,removeExprTypes e)
-removeExprTypes (TFree  vs e) = Free vs (removeExprTypes e)
-removeExprTypes (TOr    e1 e2) = Or (removeExprTypes e1) (removeExprTypes e2)
-removeExprTypes (TCase  ct e bs) = Case ct (removeExprTypes e) (map removeBranchTypes bs)
-removeExprTypes (TTyped e t) = Typed (removeExprTypes e) t
+removeExprTypes (TFree  vs e)      = Free vs (removeExprTypes e)
+removeExprTypes (TOr    e1 e2)     = Or (removeExprTypes e1) (removeExprTypes e2)
+removeExprTypes (TCase  ct e bs)   = Case ct (removeExprTypes e) (map removeBranchTypes bs)
+removeExprTypes (TTyped e t)       = Typed (removeExprTypes e) t
 
 removeBranchTypes :: TBranchExpr -> BranchExpr
 removeBranchTypes (TBranch pat e) = Branch (removePatternTypes pat) (removeExprTypes e)
 
 removePatternTypes :: TPattern -> Pattern
-removePatternTypes (TPattern  t name vs) = Pattern name (map fst vs)
-removePatternTypes (TLPattern t l) = LPattern l
+removePatternTypes (TPattern  _ name vs) = Pattern name (map fst vs)
+removePatternTypes (TLPattern _ l)       = LPattern l
 
 

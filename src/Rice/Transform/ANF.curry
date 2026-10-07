@@ -50,22 +50,6 @@ anf :: TExpr -> (TExpr -> VState TExpr) -> VState TExpr
 anf v@(TVarE _ _)     k = k v
 anf l@(TLit _ _)      k = k l
 anf (TFree vs e)      k = TFree vs <$> (anf e k)
--- Not `flip TTyped t <$> (anf e k)` (the shape TFree just above uses,
--- correctly, since a free variable's own scope genuinely needs to
--- extend over everything downstream -- including any Lets ANF inserts
--- around *this* expression's own subexpressions). A type annotation
--- carries no such scope: it's a fact about `e`'s own value alone, so
--- wrapping the *entire* rest of the computation (anf's CPS `k`
--- includes whatever comes after, not just e's own result) in `TTyped`
--- was wrong -- confirmed directly, not just by inspection: caught this
--- via a genuinely dangling C variable reference several stages further
--- downstream (an explicitly-annotated literal argument like `(3 ::
--- Int)` to a *primitive* call like `constrEq`, which -- unlike a case
--- scrutinee, Rice.Optimize.Inline.caseCancel's own TTyped fix just
--- above -- ANF itself needs to outline into a fresh Let, and this bug
--- silently mis-scoped that Let around code that never used it). Correct
--- shape: normalize `e`, wrap only its own resulting value in `TTyped`,
--- *then* hand that to `k`.
 anf (TTyped e t)      k = anf e (\v -> k (TTyped v t))
 anf (TOr e1 e2)       k = anfName e1 (\v1 -> anfName e2 (k . TOr v1))
 anf (TLet ls e)       k = do ls' <- mapM anfLet ls

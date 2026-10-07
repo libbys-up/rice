@@ -1,7 +1,7 @@
 # Rice Project Status
 
 A working/incomplete/not-started/broken breakdown of every component, organized
-by pipeline stage. This is a snapshot as of 2026-09-04, meant as a backlog for
+by pipeline stage. This is a snapshot as of 2026-09-09, meant as a backlog for
 planning next work — it doesn't prioritize or sequence anything, just records
 what's true right now. The 2026-08-29 snapshot below this line covered the
 compiler pipeline through ICurry generation for a single file; everything in
@@ -29,7 +29,18 @@ updated for `ToH`'s forward-storage change, silently corrupting any
 partial application with 2+ arguments still missing — the same bug behind
 `[a..b]` range syntax hanging outright) plus two missing `Prelude`
 externals and a missing `-O2` that was silently limiting how deep a
-tail-recursive Curry function could actually recurse.
+tail-recursive Curry function could actually recurse. **Then on 2026-09-09:
+the first freshly-authored (not old_rice-benchmark) test program —
+`putStrLn "Hello world!"` — surfaced four more real bugs** (a `bindIO`
+argument swap that hung the runtime outright, a related missing-`default`
+gap in `apply_hnf` that turned that hang silent, `bindIO` not chasing
+`FORWARD_TAG` chains so only a string's first character ever printed, and
+two independent causes of the trailing newline printing *before* the
+string it belonged after — an eagerly-inlined `prim_putChar` primitive and
+a separately-unsound `deadCode` optimizer rule for `IO`-typed `Let`s) —
+see this file's own dated section below for the full account, plus a new
+`--debug=LEVEL` flag on the `rice` CLI (`runtime/debug.h`'s LOW/MED/HIGH,
+or a number) that made finding them tractable.
 
 Legend: 🟢 Working · 🟡 Incomplete · ⚪ Not started · 🔴 Broken
 
@@ -68,11 +79,12 @@ ICurry (IProg)
    ▼
 C source  ──(Rice.Main shells out to gcc/clang)──►  linked against
                                         runtime/'s buildable core (🟢) +
-                                        runtime/prelude_min.c (🟡, new) ──►
+                                        runtime/prelude.c (🟢) ──►
                                         a real executable, run and checked
                                         against kics2's own output  🟢
-                                        (external.c/Prelude_external.*
-                                        still 🔴/Phase 2)
+                                        (still-stubbed: catch,
+                                        ensureNotFree, file I/O,
+                                        read*Literal)
 ```
 
 `Rice.Main.curry` is the real multi-module driver now (not a single-file
@@ -91,11 +103,11 @@ downstream of ICurry is wired up, same as before.
 |---|---|---|
 | `FlatCurry.Transform.Typed.Types`/`Utils`/`Goodies`/`ExecDet` | 🟢 | A deterministic `TExpr` rewrite engine — the typed counterpart of the (now real, `>= 0.0.2` in `package.json`) `flatcurry-transform` dependency's own `Types`/`Utils`/`ExecDet`, plus a `Goodies` module (`ground`/`sub`/`rename`/`strict`/`hasVar`/`uses`/`freeVarsOf`/etc.) covering what that package's `Utils` used to before an upstream refactor trimmed it down. Deliberately deterministic (`Maybe`-based `TExprTransformationDet`, not `?`/`Control.Findall`) — kics2 has real overhead for nondeterminism even on code that's deterministic in practice, so this was a design constraint, not an afterthought. Lives under `FlatCurry/Transform/Typed/` (mirroring `flatcurry-typed`'s own naming relative to `flatcurry`) specifically so it can migrate into the `flatcurry-transform` package directly if it works out. One correctness fix made while porting from old_rice: `recursive`'s `Case` clause used `&&` where every other clause is `any`/`\|\|`-shaped — looked like a transcription bug, fixed to `\|\|`. `ground` is deliberately *not* the same thing as `FlatCurry.Typed.Goodies.isGround` (that one excludes bare variables; this one needs them included, since substituting a variable reference can't duplicate anything) — documented in the code so nobody "fixes" it into the wrong function later. |
 | `Rice.Optimize.FunTable` | 🟢 | Per-function facts (size, params, body, loop-breaker status) the optimizer consults, ported from old_rice's `Optimize/FunTable.curry` onto `TFuncDecl`/`TExpr`. `inlinable`/`simple` are the two gates (not external, not a loop breaker, under a 35-node size cap; `simple` additionally requires no internal `Case` and a smaller cap, for very cheap functions like `id`). |
-| `Rice.Optimize.Inline` | 🟢 | The actual inliner: `inline` (cancels the constructor/literal/`Case` `Let`-bindings `normalizeLimited` was meant to leave inline — see the gap noted below), `caseCancel` (case-of-known-constructor/literal), `deadCode`, `reduce` (inlines any fully-saturated call to an `inlinable` function). `subGrounded`/`inlineCall` are the load-bearing correctness mechanism: a ground argument (variable, literal, or ground constructor application) substitutes directly, everything else gets exactly one `Let`, so nothing shared or non-deterministic is ever duplicated — this is what makes inlining safe regardless of what ANF stage the expression is in. |
+| `Rice.Optimize.Inline` | 🟢 | The actual inliner: `inline` (cancels the constructor/literal/`Case` `Let`-bindings `normalizeLimited` was meant to leave inline — see the gap noted below), `caseCancel` (case-of-known-constructor/literal), `deadCode`, `reduce` (inlines any fully-saturated call to an `inlinable` function). `subGrounded`/`inlineCall` are the load-bearing correctness mechanism: a ground argument (variable, literal, or ground constructor application) substitutes directly, everything else gets exactly one `Let`, so nothing shared or non-deterministic is ever duplicated — this is what makes inlining safe regardless of what ANF stage the expression is in. **Real bug fixed 2026-09-09:** `deadCode` dropped *any* unused `Let`-bound expression, including one of type `Prelude.IO a` — correct for pure Curry (referentially transparent) but not for `IO`, where a discarded action's *effect* must still happen (exactly the shape a non-final `do`-statement ANF-normalizes to). Now special-cased via `isIOType` to skip such bindings; caught because it silently dropped a `putChar '\n'` call whose result went unused. |
 | `Rice.Transform.Order` | 🟢 | `orderFuns`/`sccSort`/`inlineScore`: real per-cycle loop-breaker selection, ported from old_rice's `Optimize/LoopBreakers.curry`. Repeatedly removes the highest-`inlineScore` (priciest) member of each recursive group and recomputes SCCs on what's left, so only that one function per cycle is excluded from inlining rather than the whole group. Still has `loops`/`edges`/`calls` for `--printloops`. Known, narrow, pre-existing limitation carried over from before this session: `calls`'s call-graph edges are built from unqualified names only, so two same-named functions in different modules could theoretically get conflated — noted, not fixed. |
 | `Rice.Build.Deps` | 🟢 | `buildModuleGraph`/`topoSort`: walks `tProgImports` from a root module (via `readTypedFlatCurry`, so module resolution and `.tfcy` freshness are already handled) and orders the result via `Data.SCC.scc` — empirically confirmed dependency-first before relying on it. `Left` on a cyclic import (Curry doesn't allow them; always a hard error). |
 | `Rice.Build.Cache` | 🟢 | `needsRecompile`/`readCachedOpt`/`writeOptIfChanged`: mtime staleness for Rice's own persisted, optimized `TProg`, matching kics2's `CurryBuilder.smake` — stale if missing, older than the module's own `.tfcy`, or older than any import's cache (propagates transitively the same way kics2's does, since an import's cache mtime only advances when its content actually changed). Cache lives at `.curry/rice-1.0.0/`, deliberately *not* through `System.CurryPath.inCurrySubdir` directly (that reports whichever compiler is actually running Rice — kics2 — not Rice's own identity; using it directly silently dumped Rice's cache into kics2's own cache namespace, a real bug caught by checking where files actually landed after a run, not by re-reading the code). Verified through real edit → recompile → re-run cycles, which also caught a second real bug: `writeOptIfChanged`'s lazy `readFile` compared with `==` (which short-circuits at the first difference) left a read handle open, causing `withFile: resource busy` on the immediately-following write — fixed by forcing full evaluation first. Honest caveat: doesn't touch the frontend-level `.tfcy` parse or ICurry-generation cost, which dominate wall-clock time; the optimize stage it actually caches was already sub-millisecond per function under kics2, so there's no dramatic visible speedup yet — this is infrastructure for when the optimizer grows more expensive, not a performance fix today. |
-| `Rice.Main` (driver, CLI options) | 🟢 | See pipeline overview above. CLI flags for C output (`-c`, `-e`/`--external`, `-x`/`--gcc`) still exist but nothing implements them yet. |
+| `Rice.Main` (driver, CLI options) | 🟢 | See pipeline overview above. CLI flags for C output (`-c`, `-e`/`--external`, `-x`/`--gcc`) still exist but nothing implements them yet. `--debug=LEVEL` (new 2026-09-09; `low`/`med`/`high` or a plain number, matching `runtime/debug.h`'s `LOW`/`MED`/`HIGH`) passes `-DDEBUG=N` through to the build command — what made tracking down that day's runtime bugs (below) tractable instead of requiring a hand-edited build command. |
 
 **Validated end-to-end**, not just compiled: the real Prelude (1268 functions after typeclass-dictionary desugaring) runs through the whole pipeline correctly under kics2 — read, 141 loop breakers computed, every function optimized, ICurry generated, in a few seconds. A second (non-Prelude) module compiling alongside it also works — this surfaced and fixed a real, previously-unexercised gap: `flatCurry2ICurry` (which always passes `impprogs = []`) re-reads an imported module's *original* frontend-generated interface from disk, which has no idea about Rice's own in-memory-only boxed-type declarations for `Prelude.Int`/`Char`/`Float` (added by `unbox`, only when compiling Prelude itself) — switched to `flatCurry2ICurryWithProgs`, threading each already-compiled module's `Prog` forward through the driver's fold, the same pattern already used for `FunTable`.
 
@@ -119,7 +131,7 @@ downstream of ICurry is wired up, same as before.
 | `ICurry.Transforms` | 🟢 | Domain-specific ICurry helpers (boxed-literal case helpers, `varsInStmt`/`varsInExpr`/`varsInBlock`, etc.); `ToC.curry`/`ToH.curry` import this. |
 | `Rice.Data.Functional.DList` | ⚪ | Plausible small `newtype` difference-list; still not referenced by anything in the working pipeline. |
 | `Rice.Data.Logic.DList` | 🔴 | Variable-shadowing bugs in `(<:)`/`(++>)`; also unused. |
-| `Rice.Codegen.C.{C,ToC,ToH}`, `Rice.Codegen.C.PrimOps` | 🟢 | Phase 1 (below): a working ICurry→C codegen, wired into `Rice.Main`, verified by actually compiling and running real programs. |
+| `Rice.Codegen.C.{C,ToC,ToH}`, `Rice.Codegen.C.PrimOps` | 🟢 | Phase 1 (below): a working ICurry→C codegen, wired into `Rice.Main`, verified by actually compiling and running real programs. **Real bug fixed 2026-09-09:** `PrimOps`' `prim_putChar` entry compiled to a plain C expression evaluated eagerly, at `Let`-binding *construction* time — fine for the pure arithmetic/comparison primitives sharing that table (unobservable when they actually run), wrong for a side effect: it ran `putchar()` before `bindIO`'s sequencing ever got to it. Removed from the inlined-primitive table entirely; `prim_putChar` is now a genuine, lazily-dispatched `_hnf` in `runtime/prelude.c` (same pattern as `getChar`). |
 | `Rice.Codegen.Names` | 🟢 | Module header fixed to match its own path (was `CodeGen.Names`); `isStrConst`/`mangleChar` bugs fixed (Phase 1, below). |
 | `Rice.Codegen.CodeGen`/`Options` | 🔴 (dead) | Turned out unneeded — Phase 1's port didn't reference either. Still present, still don't compile, still not part of the build; candidates for deletion, not fixing. |
 | Root-level `Untype.curry` (untracked, outside `src/`) | 🔴 (dead) | Older, buggier draft of `Rice.Transform.Untype`; not part of the build; should be deleted. |
@@ -144,8 +156,9 @@ to survive the rest of the pipeline unmodified.
 | Equality/ordering, literal show, arithmetic, transcendental functions, `ord`/`putChar` | 🟢 | Correct (`replace_Prim.curry`). |
 | `chr` | 🟡 | Present, but the reference's range-clamping is asserted (comment only) to now happen inside the C primitive `prim_chr` — unconfirmed. |
 | `read*Literal` | ⚪ | No overrides exist at all, unlike their `show*Literal` counterparts. |
-| `(=:=)`, `(=:<=)`, `constrEq`, `nonstrictEq`, `ioError` | 🟢 | Match the reference's own `__PAKCS__` branch. |
-| `(=:<<=)` | ⚪ (by design) | Verbatim copy of the reference's own unsupported fallback. |
+| `constrEq`, `nonstrictEq`, `ioError` | 🟢 | Match the reference's own `__PAKCS__` branch. |
+| `(=:=)`, `(=:<=)` | 🟢 (fixed 2026-09-09) | Used to *also* match the `__PAKCS__` branch (`Data a => a -> a -> Bool`) -- wrong, since kics2 (the frontend Rice's `rice` binary actually uses) declares both **without** that constraint, so real call sites already compile them as plain 2-argument calls; the extra constraint gave Rice's own dictionary-passing a real, always-unused 3rd parameter nothing supplied, corrupting every call whose two arguments happened to coincide (own section in the Phase 2 write-up above has the full account). Now matches kics2's own unconstrained signature. |
+| `(=:<<=)` | ⚪ (by design) | Verbatim copy of the reference's own unsupported fallback -- correctly keeps `Data a =>` here, since kics2's own signature for this one (unlike `(=:=)`/`(=:<=)`) has the constraint outside the PAKCS branch too. |
 | `aValueInt`/`aValueNat` | 🟢 | Simplified narrowing value-generators. |
 | `aValueFloat`/`aValuePosFloat` | ⚪ | A draft replacement exists but is commented out — abandoned mid-attempt. |
 
@@ -155,11 +168,73 @@ done and correct, with two remaining gaps (`read*Literal`,
 
 ## `test/`
 
-Unchanged since 2026-08-29 — still no test framework, no CurryCheck/EasyCheck,
-no regression coverage for anything. `test/anfTest.curry` is two manually-
-inspected example expressions; `test/test.c`/`test/a.out` is a scratch C
-program for `div`/`mod`/`quot`/`rem` sign semantics, not a test of Rice
-itself.
+Unchanged since 2026-08-29. `test/anfTest.curry` is two manually-inspected
+example expressions; `test/test.c`/`test/a.out` is a scratch C program for
+`div`/`mod`/`quot`/`rem` sign semantics; `test/runtime_smoke.c` is Phase 0's
+own hand-built smoke test (its own section above). None of these are a
+general regression suite — see `tests/` (plural), new 2026-09-10, for that.
+
+## `tests/` — the compile-and-run regression bench (new 2026-09-10)
+
+`tests/run.sh` compiles every `.curry` program under `tests/programs/` with
+`rice`, runs it, and checks its output against a golden `<name>.expected`
+file where one's been recorded — meant to run before committing, not a
+property-based framework (`tests/README.md` has the full design: layout,
+`manifest.txt`'s `SKIP`/`XFAIL`/`SLOW` per-test overrides, why the
+`total memory allocations: N` trailer is stripped before comparing).
+Sources: old_rice's own 34 programs (`~/curry/old_rice/benchmarks/` +
+`test.zip`, verbatim, minus one file that turned out to be a design note,
+not valid Curry), this project's own regression tests (`tryPrint.curry`,
+`nondet.curry`, and the `(=:=)`/`(=:<=)` tests from Phase 2 item 2's bug
+hunt), and a handful of hand-written programs adapting ideas from kics2's
+own testsuite (`Test.Prop`-based, so not directly importable) into plain
+`main`-based ones.
+
+**First real run, 2026-09-10**: found the same manifest-authoring mistakes
+any new test suite surfaces on its first real execution, not Rice bugs —
+two path typos, `ndtest.curry`'s unshared `?` blowing up combinatorially
+under recursion (not previously flagged as large-input), two old_rice
+`suite/` files with no runnable `main` at all (`defTest.curry`, a pure
+library-helper file, and `inlineTest.curry`, which compiles fine but
+diverges *by construction* — `main = g (C g)` recomputes itself forever,
+testing the compiler doesn't choke on a self-referential closure at
+compile time, not that running it terminates), and two more old_rice
+`benchmarks/` files (`last.curry`/`lastEq.curry`) that turn out to hit the
+same modern-frontend "type signature too general" issue `queens.curry`'s
+`import` already did — 2023-era `free`-variable code needing an explicit
+`Data a =>` the frontend no longer infers silently (same fix as
+`tests/programs/external/funcpattern.curry` made explicit; left unfixed
+in the old_rice copies since those are meant to stay verbatim) — all now
+correctly `SKIP`/`XFAIL`/`SLOW`-flagged in `manifest.txt`. Currently: full
+green, both passes — 20/20 fast-path programs pass against a recorded
+golden, 3 expected frontend failures, 4 skipped (no-`main`/diverges-by-
+design), 0 unexpected failures in either the default fast pass or a full
+`--slow` run (which also confirms none of the 16 deliberately-large
+benchmarks excluded from the default pass actually time out at 180s —
+worth another look once the backtracking optimizations (Phase 2 item 2)
+progress further, since some may no longer need to be excluded at all).
+
+**`tests/bench.sh` (new 2026-09-12)**: a sibling script, deliberately
+separate from `run.sh` rather than a flag on it — a benchmark run takes
+much longer and shouldn't gate every commit the way the correctness pass
+does. Builds and times the manifest's `SLOW`-tagged programs (the only
+ones both compute-heavy enough for wall-clock time to mean something and
+confirmed to actually finish) under several `OPT_*` combos, reporting
+per-program minimum wall-clock time (over `--runs`, default 3, to be
+robust against scheduler noise) and total allocation count (exact and
+config-deterministic, read straight from `nf_all`'s own trailer line, so
+one sample suffices unlike wall-clock). `tests/run.sh`/`tests/bench.sh`'s
+small amount of shared logic (`$RICEHOME`/`rice` resolution, manifest
+lookup, substring filtering) was factored into a new `tests/lib.sh` they
+both source, rather than duplicated a second time — doing that surfaced a
+real bug in the *original* copy: `matches_filter`'s own `for f in
+"${FILTERS[@]}"` loop wasn't `local`-scoped (bash doesn't scope `for`
+variables to the function at all), so it silently clobbered a same-named
+`f` in a caller's enclosing `while read ... f` loop; harmless in
+`run.sh`'s own structure (that outer `f` gets freshly re-read next
+iteration regardless), but a real bug in `bench.sh`'s equivalent loop,
+where the clobbered `f` was still needed *after* the `matches_filter`
+call returned. Fixed by renaming the shared function's loop variable.
 
 ## `runtime/` and Codegen — scoped for 2026-09-02
 
@@ -362,7 +437,7 @@ Still excluded, for the reasons already scoped:
 | Primitive-operation table | `Rice.Codegen.C.PrimOps` (new) | Keyed by `(module, name)`, deliberately *not* the full `IQName` (its third component is icurry's own per-module numbering, not something this table can predict). `PrimEntry`'s three shapes (`PrimArith`/`PrimCmp`/`PrimPutChar`) each derive both their expression form (`primMake`) and statement form (`primSet`) from one description, instead of ~15 independently hand-written `make`/`set` pairs. `div`/`mod`/`round` needed real, sign-correct implementations (`runtime/prim.h`, new) — validated against `test/test.c`'s own already-worked sign-combination examples, not reinvented; `quot`/`rem` are exactly C's native `/`/`%`, no helper needed. |
 | ICurry → C header | `Rice.Codegen.C.ToH` (new) | Every constructor/function gets a tag `#define`, a `Symbol` (with `.payload` set for the three box types, per the resolved design above), and `make_X`/`set_X` (`_free` variants for constructors). `setRealChildren` originally stored arguments in *reverse* order, copying old_rice's own convention uncritically — that was old_rice's own ICurry generator's internal agreement with itself, not a general ICurry property; the external `icurry` package indexes `IVarAccess`/`INodeAssign` in plain forward order, and the mismatch was invisible in every arity-1 test until a real arity-2 case (`True ? False`) silently swapped its own two arguments. Fixed to forward storage — `apply` nodes still need reversed storage for their own `missing`-driven slot trick, but that's entirely `runtime.h`'s own hardcoded `set_apply*`/`make_apply*`, unrelated to what this file generates. |
 | ICurry → C source | `Rice.Codegen.C.ToC` (new) | The core translation — `showExpr`/`setExpr`/`showConsCase`/`showLitCase`. `setExpr`'s function/choice/apply cases eagerly call `X_hnf(root)` after building the node (matching both references) — an `_hnf` function's own contract requires it, not just an optional scheduling optimization: `nf`'s single, non-looping `HNF(expr)` call assumes its argument is already stable, and a `return v` (`set_forward`) left pointing at a fresh, still-unevaluated call broke that silently (a `Node*` reinterpreted as a raw `long`, printing as a huge garbage-looking integer) until this was added. A second, deeper instance of the same shape was the real bug behind `sumList`'s wrong answers: a case's dispatch loop resolves `FUNCTION_TAG`/`CHOICE_TAG`/`FORWARD_TAG` on its own reassignable local (`_scrutinee`), but the ICurry block's own later `IVarAccess`/`INodeAssign` references keep reading the *original* scrutinee variable, which the loop never updated — fixed by writing the resolved value back into the original variable (`writeBack`) at the start of every matched branch, skipped only when the scrutinee is `x0`/`root` itself (reassigning that would silently discard the function's entire result, since the caller's own copy of `root` is untouched by a callee's local reassignment). Free-variable narrowing for a *literal* case's scrutinee is the one deliberately unimplemented gap — see below. |
-| Driver wiring | `Rice.Main` | `run` now writes `ModuleName.h`/`.c` (`Rice.Codegen.C.{ToH,ToC}`, `pPrint`ed) into the same per-module cache directory as the optimized-TProg cache (`Rice.Build.Cache`'s new `cPaths`), unconditionally on every compile. `main` generates a `main.c` for the root module (`writeMain`) and shells out to `clang`/`gcc` (`-x`/`--gcc` selects which) linking against `runtime/`'s buildable core plus a new minimal Prelude-primitives file (below) — assumes it's run from Rice's own project root (`runtime/` resolves relatively); a real "where is my runtime" resolution mechanism is a known Phase 1 gap, not solved here. |
+| Driver wiring | `Rice.Main` | `run` now writes `ModuleName.h`/`.c` (`Rice.Codegen.C.{ToH,ToC}`, `pPrint`ed) into the same per-module cache directory as the optimized-TProg cache (`Rice.Build.Cache`'s new `cPaths`), unconditionally on every compile. `main` generates a `main.c` for the root module (`writeMain`) and shells out to `clang`/`gcc` (`-x`/`--gcc` selects which) linking against `runtime/`'s buildable core plus a new minimal Prelude-primitives file (below) — ~~assumes it's run from Rice's own project root (`runtime/` resolves relatively); a real "where is my runtime" resolution mechanism is a known Phase 1 gap, not solved here~~ — resolved 2026-09-09: `buildExecutable` now resolves `runtime/` via `$RICEHOME` (`getEnv`), the same convention `Rice.Files.Replace` already used for `$RICEHOME/replace/` — `rice` now runs correctly from any directory, not just the project root. |
 | Minimal Prelude primitives | `runtime/prelude_min.c` (new) | A real, if incomplete, blocker found only by actually linking: every constructor/function `Symbol` in a generated header takes its `.hnf`'s *address* unconditionally, whether or not a given program ever calls it — so linking needs every external Prelude primitive to exist, not just the ones actually used. `external.c`/`Prelude_external.c` are the intended home but don't compile yet (Phase 2, below); rather than block Phase 1's verification on that rewrite, this is a small, independently-correct, deliberately-scoped-down file: real implementations for what's simple to get right now (`toCurryString`/`toCStr`/`setCurryString`, the strict-application operators `$!`/`$!!`/`$##`, `bindIO`/`returnIO`/`getChar`, `error` routed through the existing `error()` helper, `show*Literal`), honest `error(...)` stubs for the rest (`catch`, structural equality, file I/O, `read*Literal`) — deferred to Phase 2 exactly as before, just not silently absorbed. |
 
 **Bugs found by actually compiling and running, not by reading** (the
@@ -465,41 +540,90 @@ wall quickly with a very large trace, consistent with that explanation
 rather than a distinct bug, though not exhaustively confirmed the way the
 fixed issues above were.
 
-### Phase 2 — deferred, but scoped now so it isn't lost
+### Phase 2, item 1 — 🟢 done (2026-09-04): `runtime/prelude.c` supersedes `external.c`/`Prelude_external.{c,h}`
 
-- **`runtime/external.c` needs a rewrite, not a patch.** Read directly this
-  pass, not just re-cited from the prior list. Confirmed bugs beyond what was
-  previously documented: `lazy_unify` is declared to return `bool` but bit-packs
-  two values into its return (`nondet << 1 | succeed`, matching `unify`'s own,
-  correctly-`int`-typed pattern) — as written, that packed value silently
-  truncates to a plain `bool` on return, losing the `nondet` bit entirely.
-  One of `lazy_unify`'s four `#if TEST == EARLY_BACKTRACKING` guards is typo'd
-  `EARLY_BACKTRACK` (no "ING") — since that's not a defined macro, `#if`
-  treats it as `0`, so that one branch's early-backtracking path silently
-  activates under `NO_OPTS` instead, inconsistent with the other three correctly-spelled
-  occurrences. `set_curry_String`/`Prelude_prim_USreadFile_hnf` call a
-  function named `toCurryString`, but the function actually defined in this
-  file is `make_curry_String` — a name that doesn't exist, not just a typo of
-  one that does. `make_curry_String` itself has a missing semicolon
-  (`{end++}` — not valid C, needs `{end++;}`). `Prelude_prim_USreadFloatLiteral`
-  calls `set_Prelude_Int` where it should call `set_Prelude_Float` — a
-  copy-paste bug of the same shape as the `cosFloat`/`sinFloat` one already
-  fixed in `replace_Prim.curry`. Plus everything previously listed:
-  `unify()`'s self-recursion with the wrong arity referencing undeclared
-  `s`/`t`, `FUN_TAG`→`FUNCTION_TAG`, `set_free_constuctor` typo, stray
-  semicolons after `if(...)` silently defeating guards (at least 3 separate
-  occurrences), the `make_cstr` duplication with `Prelude_external.c`. Not
-  needed for a first working program (`=:=`/`=:<=` specifically) — defer the
-  rewrite, but don't patch around it piecemeal given how many of these bugs
-  interact. Two more from the 2026-09-03 review to fold into that rewrite:
-  route `Prelude_ensureNotFree_hnf`'s and `Prelude_prim_USerror_hnf`'s raw
-  `printf`/`fprintf`+`exit()` through the existing `error(msg, expr)` helper
-  `STYLE_GUIDE.md` already mandates for every fatal path; and add
-  `DEBUG`-only tagged-union discipline checks for `union field` accesses
-  (a shadow-tag or `assert`-based check at the `child_at_i`/`_c`/`_f`/`_n`
-  access points, zero cost in release builds via the same pattern `debug.h`
-  already uses) — this file's `unify`/`lazy_unify` are exactly where a wrong
-  `field` variant read would do the most damage silently.
+Rather than patch `external.c` (old_rice's, riddled with the bugs the prior
+pass into this file cataloged below), started from the actual, current
+scope: cross-referenced a freshly generated `Prelude.h`/`Prelude.c` (`comm
+-23` between every declared `_hnf` prototype and every one that has a real
+definition — ground truth, not a source-level `grep "external$"`, which
+turned out to overcount: it can't see which `#ifdef` branch the frontend's
+actual flags select) against `Rice.Codegen.C.PrimOps`'s inlining table.
+Two things fell out of that: most of `Prelude_external.h`'s original 66
+declared functions (arithmetic, comparisons, `putChar`) are dead under
+Rice's current design — `PrimOps` inlines them at every call site, so they
+never need a declared `_hnf` at all — and the real remaining surface is
+much smaller than either `external.c` or `Prelude_external.h` assumed.
+
+`external.c`, `Prelude_external.c`, and `Prelude_external.h` are deleted —
+all three were written against old_rice's single-underscore mangling
+(`Prelude_apply_hnf`), predate `Rice.Codegen.Names`' double-underscore
+convention, and were never actually reachable from a Rice build (excluded
+from `runtime/Makefile`, not on `Rice.Main`'s link line). `runtime/
+prelude_min.c` is renamed `runtime/prelude.c` and is now the single,
+complete answer: every genuinely-external primitive either has a real
+implementation or an honest `error(...)` stub, verified by compiling
+against a real generated `Prelude.h` with `-Wall -Wextra -Werror` and
+by running real programs (see below) — no more two-competing-definitions
+risk between it and a not-yet-rewritten `external.c`.
+
+Newly implemented (real, not stubs):
+- **`apply`** — the general fallback for `Prelude.apply` used as a value
+  rather than called directly (`Rice.Codegen.C.ToC`'s `isApply` special-cases
+  every direct call site into `set_apply1`+`apply_hnf`, skipping this, but
+  `apply`'s own `Symbol` is still unconditionally addressable — e.g. `map
+  apply fs` — so it still needs a real body). Converts the ordinary,
+  forward-laid-out 2-child node it arrives as into the reversed apply-node
+  shape `apply_hnf` expects, then defers to it — same shape as `Prelude.
+  ___DL_EX_hnf`'s `$!`.
+- **`cond`** — FlatCurry's representation of a guarded rule (`f x | c = e`
+  compiles to `f x = cond c e`): succeeds with `e` if `c` reduces to `True`,
+  fails otherwise. Same nondet/`FAIL` bookkeeping shape as `(&)`.
+- **`prim_ioError`** (`ioError`'s primitive) — reports the `IOError`'s
+  wrapped message through `error()`. Doesn't replicate `Show IOError`'s
+  per-constructor `"i/o error: "`/`"user error: "`/etc. prefix (no `catch`
+  exists yet to make the distinction matter) — an honesty-over-completeness
+  tradeoff in the same spirit as `prim_round`'s round-half-to-even
+  approximation, noted in the code rather than silently assumed.
+- **`constrEq`** (`(=:=)`'s actual primitive — confirmed by tracing which
+  `Prelude.h`/`.c` symbol the real `Prelude.curry`'s `(=:=)` compiles down
+  to under Rice's frontend flags, not by name-guessing) — strict structural
+  unification: both sides are `nf()`'d fully first, so any free variable
+  either side still contains is a genuine, never-bound logic variable,
+  bound directly to whatever's on the other side (`set_forward` +
+  `save_copy`, so `undo()` can restore it) — no narrowing needed. Never
+  returns `False`; a mismatch fails the whole computation (`fail(root)`),
+  which is what lets `f x | x =:= y = ...` skip an equation via
+  backtracking instead of needing an `if`/`else`.
+- **`nonstrictEq`** (`(=:<=)`'s actual primitive) — lazy unification per
+  "Declarative Programming with Function Patterns": `s` is evaluated only
+  as far as its own head constructor; a free variable on `t`'s side is
+  *narrowed* to match `s`'s already-known shape (`set_free_constructor`,
+  one fresh free variable per child) rather than requiring a full choice
+  over every constructor of the type — narrowing to an *unknown* shape is
+  the still-deferred "literal-case free-variable narrowing" item below,
+  not needed here since the target shape is already known from `s`. Ported
+  from old_rice's `lazy_unify` (structurally reasonable, but syntactically
+  invalid C, and returning `nondet << 1 | succeed` packed into a
+  plain-`bool`-declared function, silently truncating away the `nondet`
+  bit) — rewritten with a small `{bool ok; bool nondet;}` struct return
+  instead of the bit-packing, fixing that truncation as a side effect
+  rather than papering over it.
+
+Verified: compiles standalone against a freshly generated `Prelude.h` with
+`-Wall -Wextra -Werror`; `1 =:= 1`, `[1,2,3] =:= [1,2,3]`, `apply (+1) 41`,
+and `cond True 99` all produce the right answers running for real.
+
+Left as honest `error(...)` stubs, same as before the rewrite — genuinely
+unimplemented, not yet re-scoped: `catch`, `ensureNotFree`,
+`read{Char,String,Nat,Float}Literal`, `readFile`/`writeFile`/`appendFile`.
+`ifVar` and `unifEqLinear` turned out not to be needed at all — they're
+declared `external` only under `Prelude.curry`'s `__PAKCS__` branch, which
+Rice's frontend flags don't select (confirmed by the same `Prelude.h`
+cross-reference: neither appears as a declared external).
+
+The rest of Phase 2 remains as scoped below.
+
 - **Case shortcutting** — no dead-but-present codegen exists to build on
   this time (Phase 1 confirmed the real ICurry has nothing to hang a RET
   marker on and didn't attempt it) — needs the marking analysis, an
@@ -509,16 +633,6 @@ fixed issues above were.
 - **Constant/flyweight preallocation** — needs a `DataTable`-equivalent
   (whole-program constructor/type info — the same gap flagged when the
   multi-module driver was originally scoped) before it's buildable at all.
-- **`external.c`/`Prelude_external.c`** still need their rewrite exactly as
-  scoped above — **and now need reconciling with `runtime/prelude_min.c`**
-  (Phase 1, new): several `_hnf`s (`$!`/`$!!`/`$##`, `bindIO`, `returnIO`,
-  `getChar`, `error`, `show*Literal`, the string-conversion helpers) now
-  have real, working implementations there, verified by the programs
-  Phase 1 actually ran — the Phase 2 rewrite should absorb/supersede
-  `prelude_min.c` (whichever remaining stubs it doesn't cover: `catch`,
-  structural equality, file I/O, `read*Literal`, plus the real
-  `(=:=)`/`(=:<=)` this file was originally scoped around), not duplicate
-  it or leave two competing definitions of the same functions.
 - **Literal-case free-variable narrowing** (Phase 1, new, `Rice.Codegen.
   C.ToC`'s own header comment has the full account): `ICaseLit`'s
   scrutinee is assumed always already forced to a concrete literal by the
@@ -536,36 +650,310 @@ fixed issues above were.
   real dispatch on unverified) — resolving that is real design work, not
   a quick patch.
 - **The five (six, with caching) backtracking optimizations** in
-  `backtracking-optimizations.md` — explicitly next after this, not before.
+  `backtracking-optimizations.md` — started 2026-09-09 (see "Phase 2, item 2"
+  below), no longer purely future work.
+
+**2026-09-14 addendum to the literal-case free-variable narrowing gap —
+residuation explored and deliberately deferred:** the representational
+blocker above governs *narrowing* a literal-type free variable, but real
+Curry semantics doesn't narrow one at all (no finite constructor set to
+try) — it *residuates* (suspends, matching kics2's real Prelude: `(&) ::
+Bool -> Bool -> Bool`, "an expression like `(c1 & c2)` is evaluated by
+evaluating `c1` and `c2` in a concurrent manner"). A design was worked
+through for encoding this cheaply: reuse `FAIL_TAG` with a non-`NULL`
+`child[0]` marking "residuation, stuck on this `FREE_TAG` node" (ordinary
+`FAIL_TAG` consumers need no changes at all — a residuation reaching
+anything that doesn't know to retry it correctly behaves like a plain
+failure), with `&` implemented as a hand-written `runtime/prelude.c`
+primitive (`Prelude___AN_hnf`, `&`'s own mangled name) that retries the
+residuated side after running the other one.
+
+That retry is where it broke down under scrutiny. Rice has no
+continuations and no trampoline (the same still-missing piece
+`backtracking-optimizations.md`'s #2 flags) — a `FAIL_TAG` node's `.hnf`
+is `CTR_hnf`, a genuine no-op, so simply calling `HNF` again on an
+already-residuated node re-derives nothing at all, not even wastefully;
+it has to be `undo()`-restored to its pre-call form first, reusing the
+existing nondet-trailing machinery (`#1`) by making literal-case
+residuation participate in it the same way `freeCaseBlock`'s constructor-
+case narrowing already does. But `bt_stack` is one global LIFO: undoing
+`a`'s own (failed) attempt *after* running `b` unavoidably also undoes
+whatever `b` bound in the meantime, since `b`'s frames sit above `a`'s on
+the same stack with no way to remove only the older ones. Reordering
+(undo `a` immediately on its own residuation, strictly *before* `b` ever
+runs, using a fresh mark for each retry) avoids that specific bug, but is
+only provably correct under a real restriction: `a` must make no variable
+bindings of its own before reaching its residuation point, or `undo` would
+discard those too, not just dead-end structure. That restriction isn't
+enforced by anything in the language generally — it happens to hold for
+the simplest motivating case (`p x & (x =:= 0)`, where the residuating
+case is the first thing `p x` does) but not for a more general `a`.
+
+The reason real systems don't hit this: PAKCS (compiling to Prolog) and
+KiCS2 (compiling to Haskell) both implement `&` on top of their host's
+*genuine* suspend/resume primitives (Prolog's native coroutining --
+`freeze`/`when`/attributed variables -- for PAKCS; real host-language
+concurrency, by recollection not re-verified against KiCS2's source this
+session, for KiCS2) rather than any redo strategy. The formal semantics
+this implements (Hanus's unified computation model) defines residuation
+as an actual frozen computation attached to a variable, woken on binding
+via one global, shared binding store every concurrent goal reads and
+writes directly -- nothing is ever redone, so there is no "which side
+effects survive a retry" question to answer. A redo/undo approximation
+has to independently solve that question, which is close in kind to
+building genuine suspension in the first place, not a shortcut around it.
+
+**Decision: paused, not pursued further for now.** Residuation without
+genuine concurrent evaluation isn't worth building -- it would only be
+correct under the restriction above, silently wrong outside it. Revisit
+if/when a trampoline or comparable suspend/resume mechanism exists for
+other reasons (#2's own long-deferred need); building one for *this*
+alone isn't currently in scope.
+
+### Verification pass (2026-09-09): `tryPrint.curry`, and a `--debug` flag
+
+Everything verified through Phase 2 item 1 above was either old_rice's own
+benchmark suite or hand-built small programs exercising a specific
+mechanism (recursion, `map`/`apply`, `=:=`). Nothing until now had run a
+plain, single-`IO`-statement program written from scratch —
+`main = putStrLn "Hello world!"` (`tryPrint.curry`, repo root). It hung
+outright. Diagnosed with a new `runtime/debug.h`-driven `--debug=LEVEL`
+flag on `rice` (`low`/`med`/`high` or a plain number, `-DDEBUG=N` on the
+build command — previously only reachable by hand-editing the build
+command), which found four real, independent bugs, not one:
+
+- **`Prelude__bindIO_hnf` (`runtime/prelude.c`) had its two children
+  swapped.** `bindIO m f` stores `m` (the action) at child 0 and `f` (the
+  continuation) at child 1 — matching `f $! x`'s own convention right
+  above it in the same file, and the "forward storage" layout `Rice.
+  Codegen.C.ToH` uses everywhere else — but the code read
+  `f = child_at(root,0)` / `m = child_at(root,1)`, backwards. This
+  silently "worked" only because a `\_ -> y`-shaped continuation (the
+  ordinary desugaring of `>>`/`*>`/`do`-sequencing) ignores its argument,
+  so forcing the wrong thing first never crashed by itself — but the
+  resulting `apply(action : forwarded-continuation)` node then forced the
+  *action* as if it were the function being applied. **This is the actual
+  hang**: once the action reduced to a plain constructor, `apply_hnf`'s
+  own dispatch `switch` (next bug) had no case for it and no `default`,
+  so its `while(f.n->missing <= 0)` loop just spun forever with the same
+  unchanged `f` — no crash, no further debug output, nothing to grep for.
+  Fixed by swapping which child is read as which.
+- **`apply_hnf`'s dispatch `switch` (`runtime.c`) had no `default`
+  case.** Its five cases (`FAIL`/`FUNCTION`/`CHOICE`/`FORWARD`/`FREE`
+  tags) don't cover a plain constructor tag, which should never legally
+  reach this switch in a correct program — but when something upstream
+  *is* wrong (as above), falling through with `f` unchanged turns a bug
+  that should crash loudly into a silent infinite loop instead. Added
+  `default: error("apply: not a function", f);` so the next instance of
+  this shape fails immediately with a message, not a hang.
+- **`bindIO_hnf` needs to chase `FORWARD_TAG` after `HNF(m)`, not call it
+  once.** `HNF()` is deliberately non-looping (documented on `HNF` itself,
+  `runtime.h`) — correct for most callers, but a nested action (`putStr`
+  recursing character-by-character via its own `*>`/`bindIO` calls)
+  WHNF-reduces one layer at a time, landing on a `FORWARD` pointing at the
+  *next* still-unrun action, not a finished value. Without chasing that
+  chain, the (again, ordinarily argument-ignoring) continuation discards
+  the `FORWARD` and every action still pending inside it before those
+  side effects ever ran. This is why, even after the swap fix above,
+  `putStr` on a string longer than one character only ever printed its
+  first character. Fixed by looping `HNF`+chase in `bindIO_hnf` until a
+  non-`FORWARD` result is reached.
+- **`Rice.Codegen.C.PrimOps`'s `prim_putChar` entry ran `putchar()`
+  eagerly, at `Let`-binding *construction* time**, and **`Rice.Optimize.
+  Inline`'s `deadCode` was separately unsound for `IO`-typed `Let`s** —
+  see those two components' own table entries above for the full account
+  of each. Together (independently confirmed via `--no-optimize`, which
+  bypasses the second but not the first) these are why `putStrLn "Hello
+  world!"`'s trailing `'\n'` printed *before* `"Hello world!"` itself
+  rather than after it, or not at all — confirmed at the byte level with
+  `od -c`, not just by eyeballing terminal output, since a leading `\n`
+  is easy to misread as a merely-missing one.
+
+All four fixed and verified together: `tryPrint` now prints
+`Hello world!\n` in the correct order (confirmed via `od -c`), `--debug=high`
+still produces the full leveled trace used to find these, and `runtime/`'s
+existing `make test` smoke suite still passes unchanged.
+
+Separately, the same session's user testing found `rice` only worked when
+run from the project's own root: `buildExecutable` (`Rice.Main`) hardcoded
+`"runtime"` as a path relative to the current directory, unlike
+`Rice.Files.Replace`, which already resolves `$RICEHOME/replace/` via
+`getEnv "RICEHOME"`. Fixed by having `buildExecutable` resolve `runtime/`
+the same way. Verified by compiling `tryPrint.curry` from an unrelated
+directory outright.
+
+### Phase 2, item 2 — 🟡 in progress (2026-09-09): backtracking-optimizations toggle infrastructure
+
+Started on `src/backtracking-optimizations.md`'s five (six, with caching)
+optimizations, per its own "Toggle architecture" section: independent
+compile-time `OPT_*` flags (each a plain 0/1 `#define`, overridable via
+`-D` on the build command) replacing the old ordinal `TEST`/`NO_OPTS`/
+`PUSH_NONDET`/`EVAL_KNOWN_CALLS`/`EARLY_BACKTRACKING` progression, which
+couldn't express the independent combinations these need. `rice` itself
+gained a `--cflags=FLAGS` passthrough option (repeatable, space-separated)
+so any of these can be flipped for benchmarking without editing
+`runtime.h`.
+
+**A real finding, not just refactoring:** `Rice.Main`'s build command has
+never passed `-DTEST=...` at all, at any point since it was written — so
+`#1`'s nondet-gated trailing (`push_node` in `runtime.h`), despite
+`backtracking-optimizations.md` describing it as "already implemented,"
+was dead code in every `rice`-built binary anyone has actually run: the
+preprocessor's default for an undefined `TEST` makes `TEST == NO_OPTS`
+true, meaning every build to date used the *unconditional*-push path. The
+new `OPT_NONDET_TRAIL` flag defaults to on, so this is now genuinely
+active by default for the first time.
+
+**#1 (nondet-gated trailing)** and **#3 (scoped early backtracking)** are
+now wired to independent flags (`OPT_NONDET_TRAIL`, `OPT_SCOPED_BACKTRACK`
+— both default on, both already validated sound in the design doc) rather
+than the old single ordinal level. `runtime.c`'s `undo(cutoff)` — which
+used to special-case its stopping condition on `TEST == EARLY_BACKTRACKING`
+— turned out not to need a flag at all: respecting `cutoff` unconditionally
+is identical behavior to the old default path for every *existing* caller
+(`nf_all`'s own retry loop always passes `cutoff = 0`, which behaves the
+same as "search to the bottom" either way), so it's simplified to always do
+that; only `prelude.c`'s `lazy_unify_step` (`(=:<=)`'s implementation, the
+one caller that actually passes a nonzero cutoff) is gated on
+`OPT_SCOPED_BACKTRACK`, matching the doc's revised validity argument that
+this is sound generally, not just for `(=:=)`-shaped code.
+
+**#2 (eager tail dispatch)** stays undocumented-as-a-flag deliberately:
+it's `apply_hnf`'s unconditional current behavior already, but making it
+independently toggleable needs a genuine alternative dispatch path (a
+real trampoline), not a branch — noted in `runtime.h` rather than given a
+flag that would do nothing.
+
+**#4 (copy-collapse) and #5 (epoch-trail)** are declared (`OPT_COPY_COLLAPSE`,
+`OPT_EPOCH_TRAIL`, both default off) but not implemented yet — next up,
+per the doc's suggested build order (#5 before #4, since #4 depends on
+#1's `nondet` flag but is otherwise independent of #5).
+
+**Verified:** `runtime/`'s `make test` passes under both the new defaults
+and `-DOPT_NONDET_TRAIL=0 -DOPT_SCOPED_BACKTRACK=0`; `tryPrint.curry` and a
+new differential nondeterminism test (`tests/nondet.curry`: `coin = 1 ? 2`,
+`main = coin + coin`) both compile and produce the identical, correct
+4-solution set (`2, 3, 3, 4`) under `rice`'s new defaults and under
+`--cflags="-DOPT_NONDET_TRAIL=0 -DOPT_SCOPED_BACKTRACK=0"`.
+
+**A separate, real bug found and fixed while trying to also differentially
+verify `OPT_SCOPED_BACKTRACK` against real `(=:<=)`/`nonstrictEq` behavior
+(not just compilation):** `(=:<=)` (and, it turned out, `(=:=)` too — both
+had apparently never been exercised end-to-end through a compiled program
+with a *duplicated* argument before, e.g. `True =:= True`) failed two
+different ways depending on optimization: with it on, generated code
+referenced an undeclared variable; with `--no-optimize`, a call supplied
+too few arguments for its own declared constructor. Both traced (via a new
+`-o`/`--optimize` flag printing FlatCurry right after optimize/before ANF,
+and a new `--trace-optimize` flag printing every optimizer rewrite step)
+to the same root cause, present immediately after a single `reduce` step,
+well before ANF: `replace/replace_Prelude.curry` declared `(=:=)`/`(=:<=)`
+as `Data a => a -> a -> Bool`, copying PAKCS's branch of the real
+`Prelude.curry` per its own comment ("make sure these are all the PAKCS
+versions") — but kics2 (the actual frontend Rice's `rice` binary uses)
+declares both *without* that constraint, so every real call site already
+compiles them as plain 2-argument calls. The replacement's extra
+constraint gave Rice's dictionary-passing a real (always-unused) 3rd
+parameter nothing ever supplied; `Rice.Optimize.Inline.subGrounded`
+(`reduce`'s inliner) `zip`s a callee's parameters against a call's actual
+arguments and silently truncated to the shorter list instead of erroring,
+leaving the parameter position no argument reached as a dangling reference
+nothing binds — invisible until codegen (or, with optimization off,
+`icurry`'s own arity check) hit it downstream. Fixed by matching
+`replace_Prelude.curry`'s signatures to kics2's real, unconstrained ones
+(`(=:<<=)` was already correct — kics2's own signature for it, unlike
+`(=:=)`/`(=:<=)`, keeps the `Data a =>` constraint even outside the PAKCS
+branch); hardened `subGrounded` itself to `error` loudly on any future
+parameter/argument count mismatch instead of truncating silently, since
+that's what actually made this take real tracing to find. Verified:
+`tests/eqtest.curry` (`True =:= True`) and `tests/lazyunify.curry`
+(`[1,2,3] =:<= [1,2,3]`) both compile and correctly print `SOLUTION: True`
+now, under both `OPT_SCOPED_BACKTRACK` settings.
+
+### Phase 2, item 2 continued (2026-09-11): #5 (epoch-stamped trailing), and a real, previously-undetected printing bug it led to
+
+**#5 implemented**, behind `OPT_EPOCH_TRAIL` (still off by default -- not yet benchmarked, per the doc's own "measure it" goal). Mechanism, matching `backtracking-optimizations.md`'s own description: a global `current_epoch` counter (`runtime.c`, always defined, only ever advanced under the flag) incremented once per choice point (`choose()`/`push_choice()`, both in `runtime.c`); every genuinely-fresh node allocation stamps `Node.epoch` (new field, `node.h`, conditional on the flag so a build that doesn't enable this pays nothing for it) with the counter's current value; `push_node` (`runtime.h`) skips trailing a nondet node whose stamp isn't older than the active choice point's. Getting real benefit (not just correctness) out of this needed finding *every* place a `Node` gets freshly allocated, not just the codegen'd ones: `Rice.Codegen.C.ToH`'s `make_X`/`make_X_free` templates (one `cifdef` guarded line each, new `Rice.Codegen.C.C` helper -- `CStmt` being a plain `Doc`, per that module's own header comment, is what makes emitting a raw `#if`/`#endif` line possible with no DSL extension), plus `runtime.h`'s own hand-written `make_forward`/`make_choice`/`free_var`/`make_apply{1,2,3}`, plus `runtime.c`'s `copy()`/`set_copy_free()`. `set_copy()` (used both for genuine fresh copies *and* for overwriting an existing, older node's contents in place, e.g. `apply_hnf`'s own use of it) needed the opposite treatment -- preserve the *destination's* pre-existing epoch across the memcpy rather than inheriting the source's, since epoch describes when a piece of memory was born, not its current contents (same reasoning `Rice.Codegen.C.ToH`'s `set_X` templates already follow by never touching epoch at all). `FieldPair` (`stack.h`) gained an unconditional `epoch` field, snapshotted on every `stack_push` and restored on every `pop`/`pop_to` (`stack.c`) regardless of the flag -- harmless when it never moves from 0, and this way `choose()`/`push_choice()` are the *only* two places that need to know the flag exists at all for the stack-bookkeeping half of this.
+
+**A real, previously-undetected bug surfaced while verifying #5 against the large permutation-search benchmarks it's actually meant to help** (`perm.curry`, `queens_perm.curry`, `sort.curry`) — all three segfaulted, identically, whether `OPT_EPOCH_TRAIL` was on or off, which was the first sign this had nothing to do with #5 itself. Root cause, found via `lldb` (not guesswork): **`runtime.c`'s `print_list`/`print_string`/`print_tuple`, and `runtime/prelude.c`'s `toCStr`, all still read `(:)`'s two children in the *reversed* order** -- the same old_rice-inherited convention `Rice.Codegen.C.ToH`'s own `setRealChildren` was already fixed off of during Phase 1 (this file's own account of that fix, above) -- because none of these four hand-written functions were ever updated to match. The reason this stayed invisible through every verification pass so far: **nothing before now had ever actually printed a list, string, or tuple as `main`'s own top-level result** -- every program tried printed an `Int`/`Bool`/`Peano`/user ADT, or used `putStr` (whose own string handling, `toCurryString`/`setCurryString` in `prelude.c`, was already correct and is a completely separate code path from `toCStr`, used by `error`/`ioError`/`show*Literal` instead). `print_tuple` had a second, independent bug on top of the reversed indexing: it printed components in descending index order (`i` counting down from `arity-1` to `0`, printing-then-recursing), which -- once the indexing itself is fixed to mean what it should -- prints a tuple backwards; fixed by switching to recurse-then-print (so index 0 prints first) and moving the closing paren out to each of `print_final`'s 14 arity-specific call sites (`print_tuple` itself no longer prints either paren). Minimal repro that found this: `main = [1,2,3]` segfaulted outright; `main = (1,2,3)` printed `(3, 2, 1)`. All four functions fixed; see `tests/programs/regressions/printlist.curry`/`printstring.curry`/`printtuple.curry`, all now passing.
+
+**This is also why the crash was never caught by `tests/run.sh` itself**, which is the real reason it took an explicit epoch-trail regression check to surface at all: its exit-code handling only ever treated a *timeout* as a failure, so a program that crashed (segfault, exit 139) without timing out fell straight through to the golden-comparison/record logic and got reported as an ordinary `PASS` whenever it had no golden yet -- which every large `old_rice/benchmarks/` program did, having only ever been spot-checked by eye before. Fixed: any non-zero exit now fails the test. Re-running the full `--slow` suite under the fixed script surfaced six programs that genuinely do crash or time out on their full-size input (`buildFold.curry`, `reverse_foldr.curry`, `reverse_prim.curry`, `sum_square.curry`, `bf_test.curry` -- all deep, non-tail-recursive folds over 200k-1M elements; `queens_perm.curry` -- times out enumerating a large solution set rather than stopping at the first one) -- consistent with, not a new instance of, the already-documented "no trampoline yet" limitation (STATUS.md's Phase 1 verification pass). Since expecting a crash/timeout is a real, distinct manifest state from "expected to fail to compile" (`XFAIL`) or "just slow" (`SLOW`), `tests/run.sh`/`manifest.txt` gained a fourth status, `XSLOW`, for exactly this; all six reclassified. The other ten `SLOW`-marked large benchmarks (`perm`, `sort`, `cent`, `tak`, `primes`, `primesort`, `schedule`, `queens_det`, `ndtest`, `reverse_builtin`) all genuinely complete within `--slow`'s 180s timeout, confirmed the same run.
+
+**Verified**: full `tests/run.sh --slow` is clean (0 unexpected failures) after both fixes.
+
+### Phase 2, item 2 continued (2026-09-12): #4 (copy-instead-of-forward at collapse points)
+
+**#4 implemented**, behind `OPT_COPY_COLLAPSE` (still off by default, same "measure it later" status as #5). The two `Rice.Codegen.C.ToC` codegen sites that emit a function body's final assignment when it's just an already-existing value (`IVar`/`IVarAccess` in `setExpr` -- e.g. `id x = x`, or a case branch returning one of its own bound sub-values unchanged) now call a new `collapse` (`runtime.h`) instead of `set_forward` directly; `collapse` is `set_forward` unconditionally when the flag is off, and, when it's on, upgrades to an eager `set_copy` specifically when the target is `collapse_safe`: already in real HNF (not `FUNCTION_TAG`), not a live `CHOICE_TAG` or `FREE_TAG` placeholder, and not `nondet` (#1's flag -- a target some live choice could still narrow further isn't safe to alias away from).
+
+**Two real bugs found verifying this against `tests/run.sh --slow`, not just the fast suite** -- both invisible in the 23-test default run, only surfacing once the search-heavy `old_rice/benchmarks/` programs actually ran:
+
+1. `collapse_safe`'s first draft excluded `FUNCTION_TAG`/`CHOICE_TAG`/`nondet` but not `FREE_TAG`. An untouched free variable can have `nondet == false` (nothing has reduced it yet to set the flag) while still being a placeholder, not a value -- unification binds it later by mutating that node's own address in place, which a `root` that already copied its content away wouldn't see. Fixed by excluding `FREE_TAG` explicitly.
+
+2. Excluding `FREE_TAG` alone didn't fix `cent.curry`/`schedule.curry` (both generate-and-test searches over free variables) still silently losing solutions. Root cause: `showConsBranch`'s existing `save_copy(root)` call (right before the branch body, hence right before `collapse` runs) sets `root.n->nondet = true` to mark that root's *own* pre-mutation content was just pushed to the trail -- a fact about root's identity, unrelated to whatever value is being copied in. `set_copy`'s `memcpy` overwrites `root`'s entire `Node` from `target`'s, including `nondet`, silently clobbering that just-set `true` back to `target`'s (always `false`, per `collapse_safe`) value -- the same class of bug #5 already had to guard against for `epoch` (a destination-owned property `set_copy` must not let the source overwrite), just never noticed for `nondet` because #4 is `set_copy`'s only caller where the destination can already have `nondet` freshly set to something meaningful *immediately* before the call. Fixed by having `collapse` itself save and restore `root.n->nondet` around the `set_copy`, the same pattern `set_copy` already uses internally for `epoch`.
+
+**Verified**: `tests/run.sh --slow` (both with a clean cache and via `--no-clean` reruns) passes all 33 non-skipped tests under `OPT_COPY_COLLAPSE=0` (unchanged behavior) and, after both fixes above, under `RICE_CFLAGS=-DOPT_COPY_COLLAPSE=1` as well -- including `cent.curry`/`schedule.curry`'s full solution sets matching their goldens exactly. `tests/run.sh` itself gained a `RICE_CFLAGS` passthrough env var (`--cflags=...` to the `rice` invocation) specifically so a toggle like this can be verified against the whole suite without a second copy of the script.
+
+### Phase 2, item 2 continued (2026-09-12): actually measuring #1/#3/#4/#5, via the new `tests/bench.sh`
+
+Every optimization above this point had only ever been verified *correct*, never actually measured -- each one's own section says so explicitly ("not yet benchmarked for actual performance benefit"). `tests/bench.sh` (own section above, under `tests/`) exists to close that gap. First real run, against all 10 `SLOW`-tagged `old_rice/benchmarks/` programs, `--runs=3`, on this one development machine (a single-machine, single-run-of-the-suite sample -- real noise, not a rigorous multi-machine benchmark; read the percentages below as "which direction, roughly how big," not as precise figures):
+
+**`naive` (`#1`/`#3` both off, the pre-2026-09-09 unconditional-trail behavior) confirms the value already claimed for #1/#3, concretely**: two programs (`primes.curry`, `queens_det.curry`) segfault outright under it that run fine under every other config, and every program that *does* complete is slower -- `reverse_builtin.curry` +82%, `schedule.curry` +25%, `sort.curry` +17%, `cent.curry` +6%, `primesort.curry` +3447% (30.7s vs 0.87s) -- and shows dramatically more total allocations everywhere (e.g. `primesort.curry`: 1.57B vs 108M, a 14.5x reduction from #1/#3 alone). None of this is new information, but it's the first time it's been an actual number instead of an assertion.
+
+**`+copy-collapse` (#4 on top of the shipped defaults) is a wash on this suite**: most programs land within ±2% of `default` (noise), with `tak.curry` (-4.9%) and `perm.curry`/`primes.curry` (-2.1 to -2.3%) the only ones clearing that band, all in the *faster* direction, none slower. Allocation counts are **bit-for-bit identical** to `default` on every single program -- not a bug (confirmed: the `--cflags` did reach the compiler, checked directly in the build logs), but expected once you trace through what #4 actually changes: `collapse`'s `set_copy` path doesn't allocate anything `set_forward` wouldn't have either -- both just overwrite the fields of `root`, a `Node` the caller already owns. #4's payoff is a shallower dispatch chain for whoever reads through `root` *afterward* (no `FORWARD_TAG` hop to chase), which shows up as wall-clock savings if at all, never as fewer allocations by construction -- worth noting so a future benchmark run doesn't mistake identical allocation counts here for the flag not doing anything. `tak.curry`'s own small win is notable for being *the one program in this suite with zero nondeterminism at all* (no `?`, no free variables) -- meaning #4's benefit (when it shows up here) comes from ordinary deterministic case/accessor-style code hitting collapse points, not specifically from backtracking-heavy code, consistent with the mechanism above.
+
+**`+epoch-trail` (#5 on top of the shipped defaults) is a consistent, if modest, *regression* on this suite: +3% to +15% slower than `default` on every single program that completes**, worse still combined with #4 in `all-on` (+6% to +26%). Allocation counts, again, are bit-for-bit identical to `default` throughout -- meaning `push_node`'s epoch-skip condition (`nondet && root.n->epoch < current_epoch`) never actually fires once on any program in this suite: not one of these ten benchmarks ever allocates a fresh, later-marked-`nondet` node strictly *after* the choice point that would end up governing it, which is exactly the pattern #5 is designed to detect and skip trailing for. Without that pattern, #5 is pure overhead -- stamping and comparing an epoch on every allocation and trail push, for a skip that's never taken. This is a real, useful negative result, not a failed feature: `OPT_EPOCH_TRAIL` already defaults off, and this is the concrete reason to leave it there rather than "not benchmarked yet" -- turning it on needs a workload where a choice's own branch does substantial fresh, nondet-tainted allocation *after* that choice starts (deep search over freshly-constructed structures within a single branch, rather than these programs' shallower generate-and-test shape) before it can pay for itself, and this suite doesn't happen to contain one.
+
+**Practical upshot**: no change to the shipped defaults (`OPT_NONDET_TRAIL=1 OPT_SCOPED_BACKTRACK=1 OPT_COPY_COLLAPSE=0 OPT_EPOCH_TRAIL=0` remains the right call for this benchmark set) -- #4 looks safe to flip on by default whenever its small, consistent-direction win is judged worth it, #5 should stay off until a workload actually exercising its skip condition exists to justify it. Raw numbers (wall-clock table, allocation table, and the CSV `tests/bench.sh --csv=...` can produce) aren't committed to the repo -- they're a snapshot of one machine on one day, not a golden to regress against the way `tests/run.sh`'s `.expected` files are; re-run `tests/bench.sh` directly for current numbers.
 
 ## Summary counts
 
-- 🟢 Working: **the whole compiler pipeline, source to running executable.**
-  The multi-module driver (optimizer, typed rewrite engine, staleness
-  cache), `runtime/`'s buildable core (Phase 0, `-Wall -Wextra -Werror`
-  clean, `test/runtime_smoke.c` passing) — **plus, new as of 2026-09-04:
-  `Rice.Codegen.C.{C,ToC,ToH,PrimOps}`, `Rice.Codegen.Names`, and
-  `runtime/prelude_min.c`** (Phase 1) — verified by actually compiling and
-  running three programs (a real, kics2-cross-checked nondeterministic
-  one, a recursive one, and one exercising `map`/partial application/
-  `apply` together — all three correct), not just by reading generated C.
-  Plus everything already working as of 2026-08-29 (`Rice.Util`,
-  `Rice.Files.*`, `PrettyFixed`, `ICurry.Goodies`, `ICurry.Transforms`, all
-  of `replace/`'s targeted primitive set, `debug.h`).
-- 🟡 Incomplete: `chr` clamp; `runtime/prelude_min.c` (real but
-  deliberately narrow — `catch`/structural-equality/file-I/O/`read*Literal`
-  are honest stubs, Phase 2); the known literal-case free-variable-
-  narrowing gap (Phase 2, above); no case shortcutting or constant/
-  flyweight preallocation (Phase 2, by design for Phase 1).
-- 🔴 Broken: `Rice.Data.Logic.DList`; `runtime/external.c`/
-  `Prelude_external.{c,h}` (still need the Phase 2 rewrite scoped above,
-  now also needing reconciliation with `prelude_min.c`'s overlapping
-  real implementations, not just their own pre-existing bug list).
-- ⚪ Not started: Phase 2 in full (case shortcutting, constant
-  preallocation, the `external.c` rewrite reconciled with
-  `prelude_min.c`, literal-case free-variable narrowing, then the
-  backtracking optimizations) — plus, unchanged, a general test
+- 🟢 Working: **the whole compiler pipeline, source to running executable,
+  now verified on a freshly-authored program (not just old_rice's own
+  benchmarks) all the way to correct printed output.** The multi-module
+  driver (optimizer, typed rewrite engine, staleness cache), `runtime/`'s
+  buildable core (Phase 0, `-Wall -Wextra -Werror` clean,
+  `test/runtime_smoke.c` passing), `Rice.Codegen.C.{C,ToC,ToH,PrimOps}` +
+  `Rice.Codegen.Names` (Phase 1), and `runtime/prelude.c` (renamed from
+  `prelude_min.c` and superseding the deleted `external.c`/
+  `Prelude_external.{c,h}` as of Phase 2 item 1, 2026-09-04) — plus four
+  more real bugs across `runtime/prelude.c`, `runtime.c`,
+  `Rice.Codegen.C.PrimOps`, and `Rice.Optimize.Inline` found and fixed
+  2026-09-09 (own section above) getting `putStrLn "Hello world!"` to
+  actually print correctly, and a new `--debug=LEVEL` CLI flag that made
+  that tractable. Also as of 2026-09-09: `(=:=)`/`(=:<=)` now genuinely
+  verified end-to-end for real (not just the ground cases Phase 2 item 1
+  happened to try) — see Phase 2 item 2's own section for the
+  `replace_Prelude.curry` signature bug this caught. As of 2026-09-11:
+  lists, strings, and tuples returned as `main`'s own top-level result
+  now print correctly for the first time — `print_list`/`print_string`/
+  `print_tuple` (`runtime.c`) and `toCStr` (`runtime/prelude.c`) all read
+  `(:)`'s children backwards (own section above), invisible until now
+  because nothing had ever printed one directly; `tests/run.sh`'s own
+  exit-code handling is also fixed (it only checked for timeout, so a
+  crash reported as an ordinary `PASS` whenever no golden existed yet).
+  Plus everything already working as of 2026-08-29 (`Rice.Util`, `Rice.Files.*`,
+  `PrettyFixed`, `ICurry.Goodies`, `ICurry.Transforms`, all of `replace/`'s
+  targeted primitive set, `debug.h`).
+- 🟡 Incomplete: `chr` clamp; `runtime/prelude.c` (real but deliberately
+  narrow on `catch`/`ensureNotFree`/file-I/O/`read*Literal` — honest
+  stubs, Phase 2); the known literal-case free-variable-narrowing gap
+  (Phase 2, above); no case shortcutting or constant/flyweight
+  preallocation (Phase 2, by design for Phase 1); the backtracking
+  optimizations (Phase 2, item 2, started 2026-09-09) — toggle
+  infrastructure and #1/#3/#4/#5 all implemented, verified correct, and
+  now actually measured (`tests/bench.sh`, 2026-09-12 section above):
+  #1/#3's benefit is large and confirmed (two segfaults avoided, up to a
+  measured 14.5x fewer allocations); #4 is a small, consistently-neutral-
+  to-positive wash on the current benchmark set; #5 is a real, if modest,
+  net regression on it (no workload in the suite exercises its skip
+  condition even once) and should stay off until one does. Defaults
+  unchanged by this (#1/#3 on, #4/#5 off remains the right call for now).
+  #2 not independently toggleable, #6 (dependency-tracked caching)
+  deferred per the design doc itself.
+- 🔴 Broken: `Rice.Data.Logic.DList`; `Rice.Codegen.CodeGen`/`Options`
+  (dead, candidates for deletion rather than fixing — see the `src/`
+  table above).
+- ⚪ Not started: Phase 2's remainder (case shortcutting, constant
+  preallocation, literal-case free-variable narrowing) and #6 of the
+  backtracking optimizations — plus, unchanged, a general test
   framework, `read*Literal` overrides, `normalizeLimited`/constant
-  folding, libraries beyond Prelude (by design), and a real "where is my
-  runtime" resolution mechanism for `rice` (currently assumes it's being
-  run from the project's own root).
+  folding, and libraries beyond Prelude (by design).

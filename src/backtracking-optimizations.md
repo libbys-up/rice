@@ -63,9 +63,35 @@ and return, relying on whatever loop called `f_hnf` to notice `root` is still
 `FUNCTION_TAG` and dispatch again; or (b) call `g_hnf(root)` directly, inline,
 before returning. Rice does (b).
 
-**Status**: already Rice's behavior (per the dissertation's `apply_hnf`:
-`if (missing == 0) { HNF(root); }` right after building the fully-applied
-copy, rather than just returning). Not yet toggleable or measured.
+**Status**: option (b) is still Rice's default (per the dissertation's
+`apply_hnf`: `if (missing == 0) { HNF(root); }` right after building the
+fully-applied copy, rather than just returning). Option (a), the genuine
+trampoline, is now implemented behind `OPT_TAIL_JUMP` (default off, since
+`OPT_COPY_COLLAPSE`/`OPT_EPOCH_TRAIL` follow the same "off until validated"
+convention) -- `runtime.h`'s `TAIL_DISPATCH`/`TAIL_DISPATCH_PTR` macros
+(compiled to either the direct call or nothing, letting whichever loop
+consumes `root` next redispatch) and `HNF_SETTLE` (the genuine trampoline
+*consumer*, for the handful of places -- `nf`/`ground_nf`, and a few
+hand-written Prelude primitives that inspect a value's tag right after
+forcing it -- that need a real value right there, not just "whatever's
+cheapest"). `Rice.Codegen.C.ToC`'s generated code is identical either way;
+only the macro's own expansion differs, so this is a link-time `-D` choice
+like the other four, not something `rice` itself needs telling about.
+Verified: a 50-million-deep self-recursive tail call survives at `-O0`
+under `OPT_TAIL_JUMP=1` (segfaults under `-O0` without it, exactly the
+predicted failure mode, confirming the risk this section describes is
+real and not just theoretical) and matches `-O2`'s result exactly; the
+full test suite (`tests/run.sh RICE_CFLAGS=-DOPT_TAIL_JUMP=1`) passes
+identically to the default build. One real bug found and fixed getting
+there: `HNF_SETTLE`'s first draft used a `while(TAG==FUNCTION_TAG)` loop,
+which skips the call entirely for anything that *isn't* already
+FUNCTION_TAG -- CHOICE_TAG above all, the ordinary case for a value
+`nf`/`ground_nf` haven't looked at yet -- silently never calling
+`choose()` at all; `main = A ? B ? C` printed the raw, unresolved choice
+node instead of its three solutions. Needed a `do`/`while` (call at least
+once unconditionally, same as plain `HNF`, then keep looping only while
+still FUNCTION_TAG) -- caught by actually running the test suite, not by
+re-reading the code.
 
 **Validity — sound, with a real caveat, not just semantic hand-waving**:
 producing the same graph either way, so results are identical. The caveat is

@@ -108,6 +108,20 @@ it explains *why*, not just *what*. Keep pure scratch-reasoning (the kind in
 `src/Rice/Codegen/CodeGen.txt` and `Scrutinee.txt`) out of the source tree —
 see the Documentation section below.
 
+**Don't narrate bug-fix history in a comment.** A comment should describe the
+code as it stands — an invariant it depends on, a corner case that isn't
+obvious from reading it, a reason a less obvious approach was chosen over a
+more obvious one — for a reader who has never seen any previous, broken
+version and doesn't need to. It should *not* read as "this used to be wrong,
+here's what the bug was, here's how it was found" — that's a changelog entry,
+not documentation of the present code, and it goes stale the moment the
+surrounding code changes again for an unrelated reason. `STATUS.md`'s dated
+sections are where that history belongs (e.g. its "Verification pass"
+write-ups); a source comment isn't the place for it. This is a real,
+widespread problem in the current codebase (`runtime/runtime.c`,
+`Rice.Codegen.C.PrimOps`, `Rice.Optimize.Inline`, among others) — not yet
+cleaned up wholesale, but don't add more of it.
+
 ### Data types
 
 Plain sum types with positional constructors are the default, e.g.
@@ -124,6 +138,54 @@ case. Don't default to records for ordinary ADTs.
 `newtype` is for zero-cost single-field wrappers, e.g.
 `newtype DList a = DList ([a] -> [a])` (`src/Rice/Data/Functional/DList.curry:8`).
 
+### Pattern matching: flexible equations vs. rigid `case`
+
+This is a Curry-semantics gotcha, not a Rice one, but it's easy to hit by
+reflex if you're used to Haskell — worth knowing before it costs you a
+debugging session. Curry's top-level function *equations* use **flexible**
+matching: unlike Haskell, the language doesn't promise "commit to the first
+equation whose pattern matches, top to bottom." Two equations can both be
+considered live alternatives, explored non-deterministically, rather than
+one strictly shadowing the other. This is harmless — and compiles to a
+genuine, single, deterministic dispatch — when the patterns across
+equations are disjoint constructors of the same type, covering it exactly:
+`f [] = ...; f (x:xs) = ...`, `f True = ...; f False = ...`. But translate
+Haskell's ordinary base-case/recursive-case idiom over an open-ended type
+like `Int` straight across:
+
+```
+count :: Int -> [Int]
+count 0 = []
+count n = n : count (n - 1)
+```
+
+and it breaks: the second equation's bare variable pattern `n` matches
+*any* argument, including `0`, so nothing ever commits to just the base
+case. There is no finite set of constructors here for the compiler to
+build an exhaustive dispatch over the way it can for `[]`/`(:)`, so this
+gets compiled as an `Or` between the two equations' bodies, each guarded by
+a check for whether its own pattern actually applies — and running it
+doesn't stop at `0`, it keeps trying the second equation (whose guard never
+fails) straight past it into negative numbers, forever.
+
+**Fix**: reach for an explicit `case` instead of parallel equations
+whenever a pattern isn't a disjoint, exhaustive constructor split — `case`
+is **rigid**: it evaluates its scrutinee once and commits to exactly one
+branch, the same as Haskell's own matching.
+
+```
+count :: Int -> [Int]
+count n = case n of
+  0 -> []
+  _ -> n : count (n - 1)
+```
+
+Rule of thumb: parallel equations are fine exactly when every pattern is a
+distinct constructor of one type and together they're exhaustive. The
+moment a literal (`Int`/`Char`/`Float`), a guard, or a variable/`_`
+catch-all is doing double duty alongside a more specific pattern for the
+*same* function, use `case` instead.
+
 ### Error handling
 
 Working modules avoid `error`/`undefined` for control flow. Failure is modeled
@@ -134,11 +196,11 @@ unmodified function if no replacement exists (`src/Rice/Files/Replace.curry:35-3
 rather than erroring.
 
 `error(...)` (Curry) / `error(msg, expr)` (the C runtime's helper,
-`runtime/runtime.h:192`) is the right tool specifically for "this is
-deliberately not implemented yet" — the C runtime uses it this way
-consistently for unimplemented externals (`catch`, `failure`, `letrec`, etc.
-in `runtime/external.c`). Keep using it that way rather than for ordinary
-recoverable failure.
+`runtime/runtime.h:242`, defined `runtime.c:661`) is the right tool
+specifically for "this is deliberately not implemented yet" — the C
+runtime uses it this way consistently for unimplemented externals (`catch`,
+`ensureNotFree`, `read*Literal`, file I/O, etc. in `runtime/prelude.c`).
+Keep using it that way rather than for ordinary recoverable failure.
 
 ### State-monad usage
 
@@ -168,7 +230,7 @@ C-emission combinators. Don't declare fixity for ordinary project functions.
   `Module_function_hnf` / `make_Module_function` / `set_Module_function` triple,
   with a fixed escape scheme for special characters (`_US` for `_`, `DL` for
   `$`, `EX` for `!`, etc.) — e.g. `Prelude__DL_EX_hnf` for `$!`
-  (`runtime/external.c:294`). Keep new externals consistent with this scheme
+  (`runtime/prelude.c:116`). Keep new externals consistent with this scheme
   rather than inventing new escapes.
 - **Formatting:** Allman brace style (opening brace on its own line), 4-space
   indentation, no tabs, anywhere in `runtime/*.c`/`*.h`.
@@ -185,11 +247,10 @@ C-emission combinators. Don't declare fixity for ordinary project functions.
   is the one place that does, and it's flagged as a bug in `STATUS.md`, not a
   pattern to imitate.
 - **Error handling:** one central `error(msg, expr)` helper
-  (`runtime/runtime.h:192`, defined `runtime.c:607-612`) that prints and exits.
-  A few call sites bypass it with a raw `exit(0)`/`exit(1)`
-  (`runtime/external.c:132-133,288-289,365-366`) — these are inconsistencies to
-  clean up, not a second accepted pattern; route all fatal-error paths through
-  `error(...)`.
+  (`runtime/runtime.h:242`, defined `runtime.c:661`) that prints and exits.
+  `runtime/prelude.c` (Phase 2's rewrite of the old `external.c`/
+  `Prelude_external.c`, which had raw `exit()` bypasses — see `STATUS.md`)
+  routes every fatal path, real and stubbed, through it.
 - **Macros:** used deliberately for the `child_at_N` dispatch table
   (`runtime/macros.h`), for selecting optimization strategy via `-DTEST=N`
   (`runtime/runtime.h:61-99`), and for debug logging that compiles to nothing
@@ -197,10 +258,9 @@ C-emission combinators. Don't declare fixity for ordinary project functions.
   wrapped in `do { ... } while(0)` — `runtime/memory.h:11`'s `alloc(size)`
   macro currently isn't, which is fragile; new macros should not repeat that.
 - **Inlining:** node constructors/setters are `static inline
-  __attribute__((always_inline))` throughout (`runtime/runtime.h:106-501`,
-  all of `Prelude_external.h`) — this is a deliberate performance choice
-  (zero-cost wrappers at every call site) and should be kept for any new
-  primitive constructor.
+  __attribute__((always_inline))` throughout (`runtime/runtime.h:106-501`)
+  — this is a deliberate performance choice (zero-cost wrappers at every
+  call site) and should be kept for any new primitive constructor.
 
 ## Housekeeping suggestions (repo-wide)
 
@@ -221,13 +281,6 @@ These aren't style rules so much as loose ends worth tidying when convenient
   and `Scrutinee.txt` are informal first-person design/proof notes sitting
   next to source files. Consider consolidating all three into one
   `ARCHITECTURE.md` at some point, once the codegen design settles down.
-- `runtime/external.c` and `runtime/Prelude_external.c` currently implement
-  overlapping externals differently (e.g. `$!`, `returnIO`, file IO are real
-  in `external.c` but stubbed with `error(...)` in `Prelude_external.c`), and
-  both define `make_cstr` independently. When resuming work on externals,
-  pick one file as canonical for each function rather than letting both grow
-  independently — see `STATUS.md` for the itemized list.
-- `runtime/external.c` uses a bare `field` type throughout, while everything
-  else in `runtime/` uses `union field` — introducing a real `typedef union
-  field field;` (or just rewriting `external.c` to say `union field`) would
-  remove this split.
+- ~~`runtime/external.c` and `runtime/Prelude_external.c` currently implement
+  overlapping externals differently~~ — resolved (2026-09-04): both deleted,
+  superseded by the single `runtime/prelude.c` (see `STATUS.md`'s Phase 2).

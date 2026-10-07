@@ -40,6 +40,7 @@ void stack_push(Stack* s, union field from, union field rep, bool choice)
     s->array[s->size].choice = choice;
     s->array[s->size].lhs = from;
     s->array[s->size].rhs = rep;
+    s->array[s->size].epoch = current_epoch;
     debug(HIGH, "pushing ");
     debug_frame(HIGH, &s->array[s->size]);
     debug(HIGH, "\n");
@@ -50,6 +51,7 @@ void stack_push(Stack* s, union field from, union field rep, bool choice)
 FieldPair* pop(Stack* s)
 {
     s->size--;
+    current_epoch = s->array[s->size].epoch;
     debug_frame(HIGH, &s->array[s->size]);
     debug(HIGH, "\n");
     return &s->array[s->size];
@@ -68,6 +70,7 @@ FieldPair* pop_to(Stack* s, int n)
         return NULL;
     }
     s->size = n;
+    current_epoch = s->array[s->size].epoch;
     debug_frame(HIGH, &s->array[s->size]);
     debug(HIGH, "\n");
     return &s->array[s->size];

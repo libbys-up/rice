@@ -112,7 +112,9 @@ RESULTS="$SCRATCH/results.tsv"
 # and had no row at all for #2/OPT_TAIL_JUMP -- added along with the
 # trampoline implementation, after this script was first written).
 # `default` (today's shipped defaults: #1/#3 on, rest off) and `all-on`
-# stay as bonus reference points, not part of the pairwise isolation
+# (everything except #1: #1+#5 is unsound without a write barrier, and
+# runtime.h refuses to build it -- opt_conflict.md) stay as bonus
+# reference points, not part of the pairwise isolation
 # itself. Not a full 2^5 factorial -- backtracking-optimizations.md's own
 # "Orthogonality" notes already argue the five don't interact in ways a
 # factorial sweep would need to expose, and 32 configs would multiply
@@ -136,7 +138,7 @@ else
     "$NAIVE -DOPT_COPY_COLLAPSE=1"
     "$NAIVE -DOPT_EPOCH_TRAIL=1"
     ""
-    "-DOPT_NONDET_TRAIL=1 -DOPT_TAIL_JUMP=1 -DOPT_SCOPED_BACKTRACK=1 -DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1"
+    "-DOPT_NONDET_TRAIL=0 -DOPT_TAIL_JUMP=1 -DOPT_SCOPED_BACKTRACK=1 -DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1"
   )
 fi
 

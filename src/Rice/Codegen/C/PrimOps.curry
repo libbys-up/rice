@@ -21,10 +21,19 @@
 --- see `src/codegen-runtime-review.md`'s case for this over old_rice's
 --- ~15 independently hand-written `make`/`set` pairs.
 ---
---- Deliberately **not** in this table: `prim_show*Literal` -- those return
---- a `String` (not a raw scalar), and are already hand-written `_hnf`
---- functions in `runtime/external.c`/`Prelude_external.c`, dispatched the
---- ordinary way (an `IExternal` function, not inlined).
+--- Deliberately **not** in this table: `prim_show*Literal` and
+--- `prim_putChar` -- `prim_show*Literal` returns a `String` (not a raw
+--- scalar); `prim_putChar` reads a raw `Char#` argument like everything
+--- else here, but can't be inlined this way regardless, because every
+--- entry in this table compiles to a plain C *expression*, evaluated as
+--- soon as C's own control flow reaches the `Let` that binds it --
+--- correct only because every other primitive here is pure, so *when*
+--- the expression actually runs is unobservable. `prim_putChar` has a
+--- real side effect that `bindIO`'s sequencing has to control the order
+--- of, so it can't be run early. Both are instead genuine `_hnf`
+--- functions in `runtime/prelude.c`, dispatched the ordinary way (an
+--- `IExternal` function, not inlined) so they only run when something
+--- actually forces them -- same as `getChar`.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -48,13 +57,9 @@ import Rice.Codegen.C.C
 --- @cons PrimCmp     a comparison (`prim_eqInt`, `prim_ltEqChar`, ...):
 ---                    reads `primArgType`-typed raw arguments, produces a
 ---                    `Prelude.True`/`Prelude.False` node, not a raw value.
---- @cons PrimPutChar `prim_putChar` specifically: side-effecting, produces
----                    `Prelude.()`, not a raw value -- the one primitive
----                    that doesn't fit either shape above.
 data PrimEntry
   = PrimArith { peArgType :: CType, peResType :: CType, peCompute :: [CExpr] -> CExpr }
   | PrimCmp   { peArgType :: CType, peOp :: CExpr -> CExpr -> CExpr }
-  | PrimPutChar
 
 --- Which raw type a primitive's arguments should be read as (needed by
 --- the caller to project each `IExpr` argument via `showPrim` before
@@ -62,12 +67,10 @@ data PrimEntry
 primArgType :: PrimEntry -> CType
 primArgType (PrimArith t _ _) = t
 primArgType (PrimCmp   t _)   = t
-primArgType PrimPutChar       = "char"
 
-trueQ, falseQ, unitQ :: IQName
+trueQ, falseQ :: IQName
 trueQ  = ("Prelude", "True",  0)
 falseQ = ("Prelude", "False", 0)
-unitQ  = ("Prelude", "()",    0)
 
 makeCtor :: IQName -> CExpr
 makeCtor n = call ("make_" ++ mangle n) [int 0]
@@ -84,14 +87,6 @@ primMake entry args = case entry of
   PrimCmp   _      op       -> case args of
     [x,y] -> op x y <+> text "?" <+> makeCtor trueQ <+> text ":" <+> makeCtor falseQ
     _     -> error "Rice.Codegen.C.PrimOps: comparison primitive needs exactly 2 arguments"
-  -- Side-effecting primitives can still appear in expression position
-  -- (Prelude's own code does, confirmed empirically -- not just the
-  -- `Let`-bound `setExpr` position this was first assumed to be
-  -- restricted to). C's comma operator sequences the side effect and
-  -- yields the Unit value.
-  PrimPutChar -> case args of
-    [c] -> parens (call "putchar" [c] <> comma <+> makeCtor unitQ)
-    _   -> error "Rice.Codegen.C.PrimOps: prim_putChar needs exactly 1 argument"
 
 --- The statement form: assign the primitive's result directly into
 --- `root`'s raw field -- used wherever the call is the immediate
@@ -103,9 +98,6 @@ primSet entry root args = case entry of
   PrimCmp   _      op       -> case args of
     [x,y] -> [cifElse (op x y) [setCtor trueQ root] [setCtor falseQ root]]
     _     -> error "Rice.Codegen.C.PrimOps: comparison primitive needs exactly 2 arguments"
-  PrimPutChar -> case args of
-    [c] -> [scall "putchar" [c], setCtor unitQ root]
-    _   -> error "Rice.Codegen.C.PrimOps: prim_putChar needs exactly 1 argument"
 
 arith :: CType -> CType -> ([CExpr] -> CExpr) -> PrimEntry
 arith argTy resTy f = PrimArith argTy resTy f
@@ -183,9 +175,6 @@ primOpsTable = Map.fromList
   , (("Prelude","prim_asinhFloat"), arith "float" "float" (un (\x -> libCall "asinh" [x])))
   , (("Prelude","prim_acoshFloat"), arith "float" "float" (un (\x -> libCall "acosh" [x])))
   , (("Prelude","prim_atanhFloat"), arith "float" "float" (un (\x -> libCall "atanh" [x])))
-
-    -- I/O
-  , (("Prelude","prim_putChar"), PrimPutChar)
   ]
 
 --- Look up a call site's `IQName` against the primitive table -- see

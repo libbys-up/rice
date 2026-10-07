@@ -249,18 +249,37 @@ showAsgn (IVarAssign  v e)     = var v .= showExpr e
 --- `root` at all. With no enclosing case (`Nothing` -- a function that's
 --- unconditionally undefined), there's no local scrutinee to retry
 --- against, so this falls straight through to the unmodified `fail`.
---- A failed retry pops the `save_copy(root)` that `showConsBranch` already
---- pushed for this branch, so SCOPED_RESAVE re-saves `root` before `fail`
---- (see runtime.h) -- otherwise `fail(root)` would be an unlogged write.
+--- A failed retry pops the `trail_node(root, nondet)` frame that
+--- `showConsBranch` already pushed for this branch, so SCOPED_RESAVE
+--- re-saves `root` before `fail` (see runtime.h) -- otherwise `fail(root)`
+--- would be an unlogged write.
 showStmt :: RetryCtx -> String -> IStatement -> [CStmt]
 showStmt ctx n IExempt =
   maybe [] (const [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
                   , scall "SCOPED_RESAVE" [nondetVar, root] ]) ctx ++
+  uncaseTrail ctx ++
   scall "fail" [root] : debugLeave n ++ [creturn]
-showStmt _ n (IReturn e) =
-  setExpr e ++ debugLeave n ++ [creturn]
+showStmt ctx n (IReturn e) =
+  uncaseTrail ctx ++ setExpr e ++ debugLeave n ++ [creturn]
 showStmt _   n (ICaseCons v bs) = [showConsCase n v bs]
 showStmt ctx n (ICaseLit  v bs) = [showLitCase ctx n v bs]
+
+--- The trail point for a write to `root` that no constructor-case branch
+--- covers (`Nothing`: a function body, or literal-case branch, with no
+--- enclosing `showConsBranch`, whose own `trail_node` would otherwise have
+--- run just before). Nothing nondeterministic was read on the way here,
+--- so `nondet` is false: with OPT_NONDET_TRAIL on, `needs_trail` is
+--- constant false and this compiles to nothing. With it off this is the
+--- baseline trail every rewrite needs -- without it, #5 alone was unsound:
+--- an old node rewritten here, untrailed, to point at a node younger than
+--- the active choice point is exactly the #1+#5 failure (opt_conflict.md),
+--- reproduced by counterexamples/StaleApply.curry, whose `o` is a let-
+--- lifted function with no case. Emitted right before the write, after
+--- any forcing, so the epoch check sees the choice points that forcing
+--- created (setExpr itself never forces before writing `root`).
+uncaseTrail :: RetryCtx -> [CStmt]
+uncaseTrail Nothing  = [scall "trail_node" [root, cfalse]]
+uncaseTrail (Just _) = []
 
 ------------------------------------------------------------------------------
 -- Constructor cases
@@ -312,12 +331,12 @@ showConsCase n v bs = cblock
 --- `IExempt`'s "this scrutinee is fine, just unhandled". SCOPED_RETRY
 --- goes first, before `root` is touched at all: `undo()` only walks the
 --- trail stack, so it doesn't need `root` mutated first, and if it finds
---- nothing to flip, falling through to the unmodified save_copy/fail
+--- nothing to flip, falling through to the unmodified trail_node/fail
 --- sequence is exactly today's behavior either way.
 failBlock :: String -> IVarIndex -> CStmt
 failBlock n _ = ccase (text "FAIL_TAG")
   ( [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
-    , cif nondetVar [scall "save_copy" [root]]
+    , scall "trail_node" [root, nondetVar]
     , scall "fail" [root]
     ] ++ debugLeave n ++ [creturn]
   )
@@ -355,7 +374,7 @@ freeCaseBlock v (IConsBranch first _ _ : restBs) =
 showConsBranch :: String -> IVarIndex -> IConsBranch -> CStmt
 showConsBranch n v (IConsBranch c _ b) =
   ccase (text (tag c))
-    (writeBack v : cif nondetVar [scall "save_copy" [root]] : showBlock (Just v) n b)
+    (writeBack v : scall "trail_node" [root, nondetVar] : showBlock (Just v) n b)
 
 ------------------------------------------------------------------------------
 -- Literal cases
@@ -380,7 +399,8 @@ litValue (IChar  c) = int (ord c)
 --- whichever constructor-case scrutinee most recently enclosed it, not
 --- lose that context just because a literal case sits in between.
 showLitCase :: RetryCtx -> String -> IVarIndex -> [ILitBranch] -> CStmt
-showLitCase ctx n v bs = cifCase (map branchCond bs) (scall "fail" [root] : [creturn])
+showLitCase ctx n v bs =
+  cifCase (map branchCond bs) (uncaseTrail ctx ++ scall "fail" [root] : [creturn])
  where
   branchCond (ILitBranch l b) =
     (rawField (litCType l) (var v) .== litValue l, showBlock ctx n b)

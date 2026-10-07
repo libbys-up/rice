@@ -3,19 +3,14 @@
 
 #include <math.h>
 
-// Helpers for the handful of primitive operations (Rice.Codegen.C.PrimOps)
-// whose correct behavior isn't just a bare C operator -- kept as real,
-// reviewable functions here rather than inlined as generated ternary
-// expressions at every call site (repeated once per module that uses them,
-// and much harder to read/verify in the generated .c output).
-//
 // div/mod/quot/rem: quot/rem are already exactly C's native `/`/`%`
-// (truncating-toward-zero, same-sign-as-dividend) -- no helper needed,
+// (truncating-toward-zero, same-sign-as-dividend).
 // Rice.Codegen.C.PrimOps uses the operators directly. div/mod need the
-// standard sign-adjusted formulas (div rounds toward negative infinity,
-// mod takes the divisor's sign); verified against test/test.c's own
+// standard sign-adjusted formulas.
+//  - div rounds toward negative infinity,
+//  - mod takes the divisor's sign
+// verified against test/test.c's own
 // worked examples for all four sign combinations before being written
-// here as the authoritative implementation.
 
 static inline long prim_mod(long a, long b)
 {

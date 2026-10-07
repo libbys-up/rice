@@ -1,0 +1,1 @@
+Error: can't narrow a free variable to Int: it has a raw (unboxed) field

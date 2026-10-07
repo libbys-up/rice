@@ -14,27 +14,38 @@ typedef union field
     double        f; //primitive float
 } field;
 
-// What does a constructor's single "payload" child actually hold?
-// PAYLOAD_NONE means an ordinary Node* child (the common case -- every
-// user-defined constructor). The other three mark the boxed Int/Char/Float
-// wrapper constructors codegen generates: their one child holds a raw C
-// value directly (no separate wrapper node for *that*), and this is how
-// generic code (printing, unify, nf/ground_nf) tells which raw
-// interpretation applies without needing a per-node discriminant -- it's a
-// fact about the constructor, so it lives on the Symbol, set once at
-// codegen time alongside .tag/.arity/.name. See archetecture.md's "Boxed
-// primitives, and the Symbol.payload design" for the full writeup,
-// including a sketched generalization of this to a per-child-slot array,
-// for a future where nodes can mix boxed and unboxed children and a
-// tracing GC needs to know which child slots are real pointers.
-typedef enum { PAYLOAD_NONE, PAYLOAD_INT, PAYLOAD_CHAR, PAYLOAD_FLOAT } Payload;
+// How each child of a node is represented: a pointer to another node, or a
+// raw primitive value stored directly in the `union field`. A Symbol's
+// `reps` array has one entry per child slot in [0, arity); a NULL `reps`
+// means every child is a pointer, which is the common case and costs no
+// data. Generated symbols get their arrays from the compiler's field-rep
+// table (Rice.Codegen.FieldReps, src/field-reps-plan.md).
+//
+// Rules every child walker (and later the GC) relies on:
+//   * only slots in [0, arity) are described; a slot at or past `arity`
+//     (choice_symbol's raw `side` in slot 2, for instance) must never
+//     hold a pointer;
+//   * a partial application (missing > 0) has filled only its first
+//     arity - missing slots; the last `missing` are NULL until apply_hnf
+//     fills them (filled_arity(), runtime.h). An `apply` node
+//     (missing < 0) has arity 0 and keeps its arguments outside this
+//     scheme entirely -- see apply_hnf;
+//   * a node's children always match its *current* symbol -- a rewrite
+//     replaces symbol and children together, never one child's rep alone.
+typedef enum
+{
+    R_PTR = 0,  // pointer to a node
+    R_INT,      // raw long   (union field .i)
+    R_CHAR,     // raw char   (union field .c)
+    R_FLOAT     // raw double (union field .f)
+} FieldRep;
 
 typedef struct
 {
     const unsigned char tag;
     const unsigned int arity;
     const char* name;
-    const Payload payload;
+    const unsigned char* reps; // FieldRep per child, or NULL for all pointers
     void (*hnf)(union field);
     struct Node* (*hnf_RET)(struct Node*);
 } Symbol;
@@ -44,6 +55,20 @@ typedef struct Node
 {
     int missing;
     bool nondet;
+#if OPT_EPOCH_TRAIL
+    // Allocation-order stamp for backtracking-optimizations.md's #5: set
+    // once, when this exact memory is first allocated (never touched by
+    // an in-place rewrite of its contents -- see runtime.c's set_copy),
+    // compared against the active choice point's own stamp (current_epoch,
+    // runtime.h) to tell whether backtracking past that choice point would
+    // make this node unreachable on its own, without needing a trail
+    // frame. Conditional on the same flag that uses it so a build that
+    // doesn't enable #5 doesn't pay for it -- OPT_EPOCH_TRAIL is a
+    // command-line -D (or runtime.h's own default), visible before this
+    // header is processed either way, so its value here always matches
+    // whatever the rest of the same build was compiled with.
+    unsigned int epoch;
+#endif
     Symbol* symbol;
     union field children[4];
 } Node;

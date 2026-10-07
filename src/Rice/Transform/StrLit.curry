@@ -34,6 +34,6 @@ isChar c = case c of
     _                -> False
 
 getString :: TExpr -> String
-getString (TComb _ ConsCall ("Prelude","[]") []) = ""
+getString (TComb _ ConsCall ("Prelude","[]") [])     = ""
 getString (TComb _ ConsCall ("Prelude",":")  [h, t]) = char h : getString t
  where char (TLit _ (Charc c)) = c

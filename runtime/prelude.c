@@ -46,9 +46,24 @@ field toCurryString(char* str)
     return string;
 }
 
+// set_copy, not a raw memcpy: `root` keeps its own epoch (#5) instead of
+// taking the fresh string node's. Callers decide about trailing (generated
+// code trails before any write to root; see ToC.curry's uncaseTrail).
 void setCurryString(field root, char* str)
 {
-    memcpy(root.n, toCurryString(str).n, sizeof(Node));
+    set_copy(root, toCurryString(str));
+}
+
+// A primitive rewriting `root` in place with an already-built value.
+// Trails like any other rewrite, at the point of the write (after
+// whatever forcing produced `value`). nondet is false: these primitives
+// don't track it, so under OPT_NONDET_TRAIL this trails nothing, exactly
+// as before; with #1 off it is the baseline trail #5 relies on. set_copy
+// keeps root's own epoch.
+static void overwrite_root(field root, field value)
+{
+    trail_node(root, false);
+    set_copy(root, value);
 }
 
 // (:)'s children are forward-stored, same as any other ordinary
@@ -145,10 +160,7 @@ static void strictApply(field root, void (*force)(field))
     // choose(), only the choice node's was.
     bool nondet = false;
     x = settle(x, &nondet, force);
-    if(nondet)
-    {
-        save_copy(root);
-    }
+    trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
     {
         fail(root);
@@ -280,44 +292,14 @@ void Prelude__prim_USshowIntLiteral_hnf(field root)
 {
     char buf[32];
     snprintf(buf, sizeof(buf), "%ld", child_at_i(root, 0));
-    memcpy(root.n, toCurryString(buf).n, sizeof(Node));
+    overwrite_root(root, toCurryString(buf));
 }
 
 void Prelude__prim_USshowFloatLiteral_hnf(field root)
 {
     char buf[64];
     snprintf(buf, sizeof(buf), "%f", child_at_f(root, 0));
-    memcpy(root.n, toCurryString(buf).n, sizeof(Node));
-}
-
-// Appends c's *derived-Show* escaped spelling to buf (which must have
-// room for at least 4 more bytes: the longest single-character
-// expansion, a decimal escape like "\127", is 4 bytes) and returns the
-// new write position. `quote` is whichever of '\'' or '"' is the
-// enclosing literal's own delimiter -- the one character that needs
-// escaping in one context but not the other (a bare '"' is fine inside
-// 'x', a bare '\'' is fine inside "..."; confirmed against real kics2's
-// own `show` output for exactly this case). Named escapes match GHC's
-// derived Show (\a\b\f\n\r\t\v, plus \\ and the delimiter itself);
-// anything else non-printable (code < 32, or >= 127 for a plain 7-bit
-// char) falls back to a decimal escape, same convention.
-char* appendEscaped(char* buf, char c, char quote)
-{
-    if (c == '\\')       { *buf++ = '\\'; *buf++ = '\\'; }
-    else if (c == quote) { *buf++ = '\\'; *buf++ = quote; }
-    else if (c == '\a')  { *buf++ = '\\'; *buf++ = 'a'; }
-    else if (c == '\b')  { *buf++ = '\\'; *buf++ = 'b'; }
-    else if (c == '\f')  { *buf++ = '\\'; *buf++ = 'f'; }
-    else if (c == '\n')  { *buf++ = '\\'; *buf++ = 'n'; }
-    else if (c == '\r')  { *buf++ = '\\'; *buf++ = 'r'; }
-    else if (c == '\t')  { *buf++ = '\\'; *buf++ = 't'; }
-    else if (c == '\v')  { *buf++ = '\\'; *buf++ = 'v'; }
-    else if (c < 32 || c >= 127)
-    {
-        buf += sprintf(buf, "\\%d", (int)(unsigned char)c);
-    }
-    else { *buf++ = c; }
-    return buf;
+    overwrite_root(root, toCurryString(buf));
 }
 
 void Prelude__prim_USshowCharLiteral_hnf(field root)
@@ -329,7 +311,7 @@ void Prelude__prim_USshowCharLiteral_hnf(field root)
     p = appendEscaped(p, c, '\'');
     *p++ = '\'';
     *p = '\0';
-    memcpy(root.n, toCurryString(buf).n, sizeof(Node));
+    overwrite_root(root, toCurryString(buf));
 }
 
 void Prelude__prim_USshowStringLiteral_hnf(field root)
@@ -344,7 +326,7 @@ void Prelude__prim_USshowStringLiteral_hnf(field root)
     for (size_t i = 0; i < len; i++) { p = appendEscaped(p, s[i], '"'); }
     *p++ = '"';
     *p = '\0';
-    memcpy(root.n, toCurryString(buf).n, sizeof(Node));
+    overwrite_root(root, toCurryString(buf));
     free(s);
     free(buf);
 }
@@ -382,10 +364,7 @@ void Prelude___AN_hnf(field root)
     field y = child_at(root, 1);
     bool nondet = false;
     x = settle(x, &nondet, HNF_SETTLE);
-    if(nondet)
-    {
-        save_copy(root);
-    }
+    trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
     {
         fail(root);
@@ -402,6 +381,7 @@ void Prelude___AN_hnf(field root)
 
 void Prelude__failed_hnf(field root)
 {
+    trail_node(root, false);
     fail(root);
 }
 
@@ -445,10 +425,7 @@ void Prelude__cond_hnf(field root)
     // that's not equivalent).
     bool nondet = false;
     c = settle(c, &nondet, HNF_SETTLE);
-    if(nondet)
-    {
-        save_copy(root);
-    }
+    trail_node(root, nondet);
     if(c.n->symbol->tag == FAIL_TAG)
     {
         fail(root);
@@ -507,12 +484,35 @@ void Prelude__prim_USioError_hnf(field root)
 // structure but doesn't collapse FORWARD_TAG chains (archetecture.md's
 // "FORWARD_TAG collapsing" design), so this still has to chase forwards
 // itself at every level, same as every other consumer.
+//
+// *nondet accumulates whether the outcome depends on anything a choice
+// point could still revert, for the caller's trail decision on root (#1):
+// the flag of every node visited, forwards included (a resolved choice is
+// a forward with nondet set, see choose()), and true whenever a free
+// variable gets bound -- like narrowing, the binding is undone on
+// backtracking, so a root left saying True without it would be stale.
+// Every node the result depends on is visited before returning, so the
+// early `return false`s need nothing extra.
 // ----------------------------------------------------------------------
 
-static bool unify_step(field x, field y)
+// Whether two raw values of the same rep are equal.
+static bool raw_equal(field a, field b, FieldRep r)
 {
-    while(x.n->symbol->tag == FORWARD_TAG) { x = child_at(x, 0); }
-    while(y.n->symbol->tag == FORWARD_TAG) { y = child_at(y, 0); }
+    switch(r)
+    {
+        case R_INT:   return a.i == b.i;
+        case R_CHAR:  return a.c == b.c;
+        case R_FLOAT: return a.f == b.f;
+        case R_PTR:   break;
+    }
+    return false;
+}
+
+static bool unify_step(field x, field y, bool* nondet)
+{
+    *nondet |= x.n->nondet || y.n->nondet;
+    while(x.n->symbol->tag == FORWARD_TAG) { x = child_at(x, 0); *nondet |= x.n->nondet; }
+    while(y.n->symbol->tag == FORWARD_TAG) { y = child_at(y, 0); *nondet |= y.n->nondet; }
 
     // one side failed, we can't unify
     if(x.n->symbol->tag == FAIL_TAG || y.n->symbol->tag == FAIL_TAG)
@@ -523,12 +523,14 @@ static bool unify_step(field x, field y)
     //one side if free, set it to point to the other side
     if(x.n->symbol->tag == FREE_TAG)
     {
+        *nondet = true;
         save_copy(x);
         set_forward(x, y);
         return true;
     }
     if(y.n->symbol->tag == FREE_TAG)
     {
+        *nondet = true;
         save_copy(y);
         set_forward(y, x);
         return true;
@@ -540,24 +542,14 @@ static bool unify_step(field x, field y)
         return false;
     }
 
-    // We have Int/Char/Float, make sure the values match.
-    if(x.n->symbol->payload == PAYLOAD_INT)
-    {
-        return child_at_i(x, 0) == child_at_i(y, 0);
-    }
-    if(x.n->symbol->payload == PAYLOAD_CHAR)
-    {
-        return child_at_c(x, 0) == child_at_c(y, 0);
-    }
-    if(x.n->symbol->payload == PAYLOAD_FLOAT)
-    {
-        return child_at_f(x, 0) == child_at_f(y, 0);
-    }
-    
-    // try to unify the children.
+    // Unify the children: raw ones (a box's value, say) by comparing
+    // values, pointer ones recursively.
     for(unsigned int i = 0; i < x.n->symbol->arity; i++)
     {
-        if(!unify_step(child_at_v(x, i), child_at_v(y, i)))
+        FieldRep r = child_rep(x.n->symbol, i);
+        bool ok = r == R_PTR ? unify_step(child_at_v(x, i), child_at_v(y, i), nondet)
+                             : raw_equal(child_at_v(x, i), child_at_v(y, i), r);
+        if(!ok)
         {
             return false;
         }
@@ -571,7 +563,13 @@ void Prelude__constrEq_hnf(field root)
     field y = child_at(root, 1);
     nf(x);
     nf(y);
-    if(unify_step(x, y))
+    // Decided after unifying (unify_step reports what the outcome read),
+    // but before root is written. unify_step's own free-variable bindings
+    // are trailed separately, so the order of the two frames doesn't matter.
+    bool nondet = false;
+    bool ok = unify_step(x, y, &nondet);
+    trail_node(root, nondet);
+    if(ok)
     {
         set_Prelude__True(root, 0);
     }
@@ -589,7 +587,7 @@ void Prelude__constrEq_hnf(field root)
 // to match s's already-known head constructor.
 // Returns both success and whether any narrowing
 // step touched a genuinely nondeterministic value, same "caller decides
-// whether to save_copy" convention as strictApply/cond/(&) above.
+// whether to trail" convention (trail_node) as strictApply/cond/(&) above.
 // ----------------------------------------------------------------------
 
 typedef struct { bool ok; bool nondet; } LazyResult;
@@ -632,9 +630,11 @@ static LazyResult lazy_unify_step(field s, field t)
         // free variable: Save a copy, so we can undo the choice.
         else if(scruts.n->symbol->tag == FREE_TAG)
         {
+            // The binding is undone on backtracking, so the caller's root
+            // must be trailed too (same as the narrowing branch below).
             save_copy(scruts);
             set_forward(scruts, t);
-            return (LazyResult){ true, nondet };
+            return (LazyResult){ true, true };
         }
         else if(scruts.n->symbol->tag == FORWARD_TAG)
         {
@@ -676,7 +676,7 @@ static LazyResult lazy_unify_step(field s, field t)
         else if(scrutt.n->symbol->tag == FREE_TAG)
         {
             save_copy(scrutt);
-            set_free_constructor(scrutt, scruts.n->symbol);
+            set_free_constructor(scrutt, scruts);
             nondet = true;
         }
         else if(scrutt.n->symbol->tag == FORWARD_TAG)
@@ -705,25 +705,15 @@ static LazyResult lazy_unify_step(field s, field t)
         #endif
         return (LazyResult){ false, nondet };
     }
-    // We have a primitive value, so check to see if its the same one.
-    // The typechecking will ensure that its the same type of primitive.
-    if(scruts.n->symbol->payload == PAYLOAD_INT)
-    {
-        return (LazyResult){ child_at_i(scruts, 0) == child_at_i(scrutt, 0), nondet };
-    }
-    if(scruts.n->symbol->payload == PAYLOAD_CHAR)
-    {
-        return (LazyResult){ child_at_c(scruts, 0) == child_at_c(scrutt, 0), nondet };
-    }
-    if(scruts.n->symbol->payload == PAYLOAD_FLOAT)
-    {
-        return (LazyResult){ child_at_f(scruts, 0) == child_at_f(scrutt, 0), nondet };
-    }
-
-    // make sure all the children unify.
+    // make sure all the children unify: raw ones by value (the type
+    // checker guarantees both sides hold the same primitive), pointer ones
+    // recursively.
     for(unsigned int i = 0; i < scruts.n->symbol->arity; i++)
     {
-        LazyResult r = lazy_unify_step(child_at_v(scruts, i), child_at_v(scrutt, i));
+        FieldRep rep = child_rep(scruts.n->symbol, i);
+        LazyResult r = rep == R_PTR
+            ? lazy_unify_step(child_at_v(scruts, i), child_at_v(scrutt, i))
+            : (LazyResult){ raw_equal(child_at_v(scruts, i), child_at_v(scrutt, i), rep), false };
         nondet |= r.nondet;
         if(!r.ok)
         {
@@ -744,10 +734,7 @@ void Prelude__nonstrictEq_hnf(field root)
     field x = child_at(root, 0);
     field y = child_at(root, 1);
     LazyResult r = lazy_unify_step(x, y);
-    if(r.nondet)
-    {
-        save_copy(root);
-    }
+    trail_node(root, r.nondet);
     if(r.ok)
     {
         set_Prelude__True(root, 0);
@@ -792,6 +779,7 @@ void Prelude__ensureNotFree_hnf(field root)
 {
     field x = child_at(root, 0);
     x = settle(x, NULL, HNF_SETTLE);
+    trail_node(root, false);
     set_forward(root, x);
 }
 
@@ -845,7 +833,7 @@ void Prelude__prim_USreadFile_hnf(field root)
     char* path = toCStr(child_at(root, 0));
     char* content = readWholeFile(path, "readFile");
     free(path);
-    memcpy(root.n, toCurryString(content).n, sizeof(Node));
+    overwrite_root(root, toCurryString(content));
     free(content);
 }
 
@@ -895,7 +883,7 @@ void Prelude__catch_hnf(field root) { error("catch not implemented yet", root); 
 // is one bare literal) is correct for both that internal use and any
 // direct external call.
 //
-// Escaping is the exact inverse of appendEscaped's own table (prelude.c,
+// Escaping is the exact inverse of appendEscaped's own table (runtime.c,
 // above show*Literal): same named escapes, same decimal \NNN fallback.
 // ----------------------------------------------------------------------
 
@@ -1029,7 +1017,7 @@ void Prelude__prim_USreadNatLiteral_hnf(field root)
         while (isAsciiDigit(*p)) { value = value * 10 + (*p - '0'); p++; }
         result = oneParse(make_Prelude__Int((field)(long)value, 0), p);
     }
-    memcpy(root.n, result.n, sizeof(Node));
+    overwrite_root(root, result);
     free(s);
 }
 
@@ -1040,7 +1028,7 @@ void Prelude__prim_USreadCharLiteral_hnf(field root)
     field result = r.ok
       ? oneParse(make_Prelude__Char((field)(unsigned long)(unsigned char)r.value, 0), r.rest)
       : noParse();
-    memcpy(root.n, result.n, sizeof(Node));
+    overwrite_root(root, result);
     free(s);
 }
 
@@ -1049,7 +1037,7 @@ void Prelude__prim_USreadStringLiteral_hnf(field root)
     char* s = toCStr(child_at(root, 0));
     StringParse r = tryParseStringLiteral(s);
     field result = r.ok ? oneParse(toCurryString(r.value), r.rest) : noParse();
-    memcpy(root.n, result.n, sizeof(Node));
+    overwrite_root(root, result);
     if (r.ok) { free(r.value); }
     free(s);
 }
@@ -1061,6 +1049,6 @@ void Prelude__prim_USreadFloatLiteral_hnf(field root)
     field result = r.ok
       ? oneParse(make_Prelude__Float((field)(double)r.value, 0), r.rest)
       : noParse();
-    memcpy(root.n, result.n, sizeof(Node));
+    overwrite_root(root, result);
     free(s);
 }

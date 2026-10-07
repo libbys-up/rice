@@ -38,6 +38,42 @@
 // set_child_at needs its own, pointer-typed ternary to dereference and assign through.
 #define set_child_at(r, i, v) (*((i) < 3 ? &r.n->children[i] : &r.n->children[3].a[(i)-3]) = (v))
 
+// The representation of child i of a node with symbol s (node.h's FieldRep
+// rules). Only meaningful for i in [0, s->arity).
+static inline FieldRep child_rep(const Symbol* s, int i)
+{
+    return s->reps ? (FieldRep)s->reps[i] : R_PTR;
+}
+
+// How many of node n's children are filled in: all of them, except for a
+// partial application (missing > 0), whose last `missing` slots are
+// still empty (node.h's FieldRep rules).
+static inline int filled_arity(union field n)
+{
+    int arity = (int)n.n->symbol->arity;
+    return n.n->missing > 0 ? arity - n.n->missing : arity;
+}
+
+// Debug check that a node's children match its symbol's reps (node.h):
+// every filled R_PTR child must look like a node pointer. Catches a wrong
+// field-rep table -- a raw value sitting in a pointer slot -- where the
+// node is built, instead of as a crash wherever it's next read. On by
+// default at DEBUG >= MED; -DCHECK_LAYOUT=1 turns it on alone, without
+// the debug trace output.
+#ifndef CHECK_LAYOUT
+#define CHECK_LAYOUT (DEBUG >= MED)
+#endif
+void check_layout(union field n, bool allow_null, const char* where);
+
+// If s is one of the primitive boxes (Prelude's Int/Char/Float: a
+// constructor whose one child is raw), which primitive it holds; R_PTR for
+// every other symbol. The constructor-tag check keeps a function with one
+// raw parameter (prim_putChar's thunk) from looking like a box.
+static inline FieldRep box_rep(const Symbol* s)
+{
+    return (s->tag > FREE_TAG && s->arity == 1) ? child_rep(s, 0) : R_PTR;
+}
+
 
 
 __attribute__((always_inline)) 
@@ -85,6 +121,7 @@ static inline void HNF(union field root)
 // throughput or the specific thing it exists to guarantee: that a deep
 // tail-recursive Curry function genuinely can't overflow the C stack,
 // independent of what the C compiler's own optimizer decides to do).
+// #5 additionally requires #1 off -- see the #error below.
 #ifndef OPT_NONDET_TRAIL
 #define OPT_NONDET_TRAIL 1
 #endif
@@ -99,6 +136,15 @@ static inline void HNF(union field root)
 #endif
 #ifndef OPT_EPOCH_TRAIL
 #define OPT_EPOCH_TRAIL 0
+#endif
+
+// #1 and #5 are each sound alone but not together: #1 leaves an old
+// node's deterministic rewrite untrailed, which can leave it pointing at
+// a young node whose own rewrite #5 skipped (opt_conflict.md,
+// ~/curry/papers/unif/proofs/counterexamples/). Remove this once the
+// write barrier (opt_conflict.md, option A) exists.
+#if OPT_NONDET_TRAIL && OPT_EPOCH_TRAIL
+#error "OPT_EPOCH_TRAIL is unsound with OPT_NONDET_TRAIL (no write barrier yet); add -DOPT_NONDET_TRAIL=0"
 #endif
 
 // backtracking-optimizations.md's #2, the trampolined half: `Rice.Codegen.
@@ -268,15 +314,14 @@ static inline field settle(union field root, bool* nondet, void (*force)(field))
 // SCOPED_RESAVE(nondet_var, root_node): used right after a SCOPED_RETRY that
 // failed to find anything to flip, immediately before the `fail(root)` that
 // follows. An unhandled (IExempt) case sits *inside* a constructor branch,
-// and showConsBranch's prologue has already done `if(nondet) save_copy(root)`
+// and showConsBranch's prologue has already done `trail_node(root, nondet)`
 // by then -- but a failed retry's undo(_cutoff) pops that very frame (it's
 // the topmost one in scope) and restores `root`, so without re-saving,
 // `fail(root)` would overwrite `root` with no trail record and later global
 // backtracking could never restore it. (The FAIL_TAG path doesn't need this:
-// its SCOPED_RETRY runs *before* its own save_copy.) With scoped retry off
+// its SCOPED_RETRY runs *before* its own trail_node.) With scoped retry off
 // the prologue's save is still on the trail, so this is a no-op then.
-#define SCOPED_RESAVE(nondet_var, root_node) \
-  if (nondet_var) { save_copy(root_node); }
+#define SCOPED_RESAVE(nondet_var, root_node) trail_node(root_node, nondet_var)
 #else
 #define SCOPED_CUTOFF() ((void)0)
 #define SCOPED_RETRY(scrutinee_var, orig_var) ((void)0)
@@ -307,40 +352,74 @@ extern unsigned int current_epoch;
 static inline void fail(union field root);
 union field copy(union field node);
 void save_copy(union field n);
+void save_snapshot(union field n);
 
-// push a node on the backtracking stack -- unconditionally under
-// !OPT_NONDET_TRAIL, only when `nondet` is set otherwise (see
-// backtracking-optimizations.md's #1: a node whose reduction never
-// touched a CHOICE/FREE node produces the same result regardless of which
-// alternative an *enclosing* choice takes, so there's nothing for
-// backtracking to ever need to undo about it). Under OPT_EPOCH_TRAIL,
-// #1's criterion is further tightened per #5: even a nondet node needs no
-// trail frame if it was allocated *after* the active choice point --
-// backtracking past that choice point already makes it unreachable on its
-// own, the same way WAM's own trail condition skips anything younger than
-// the top choice point rather than relying on a bump-pointer heap reset.
-#if OPT_NONDET_TRAIL
+// Does rewriting `root` in place need a trail frame first? #1 and #5 are
+// two independent filters on that decision -- the formal model's
+// `should_trail` (~/curry/papers/unif/proofs/Machine.v, barrier off),
+// where #5 alone is proved sound (Opt5_EpochTrail.v):
+//   #1 (OPT_NONDET_TRAIL): skip if the rewrite read nothing
+//      nondeterministic -- the result is the same whichever alternative
+//      an enclosing choice takes, so there's nothing to undo.
+//   #5 (OPT_EPOCH_TRAIL): skip if `root` was allocated after the active
+//      choice point -- backtracking past that choice point makes it
+//      unreachable anyway (WAM's trail condition, by time stamp).
+// Each is sound alone; together they are not without a write barrier,
+// hence the #error next to the flag defaults above.
 __attribute__((always_inline))
-static inline void push_node(union field root, bool nondet)
+static inline bool needs_trail(union field root, bool nondet)
 {
-    root.n->nondet = nondet;
-#if OPT_EPOCH_TRAIL
-    if(nondet && root.n->epoch < current_epoch)
+#if OPT_NONDET_TRAIL
+    if(!nondet) return false;
 #else
-    if(nondet)
+    (void)nondet;
 #endif
+#if OPT_EPOCH_TRAIL
+    if(root.n->epoch >= current_epoch) return false;
+#else
+    (void)root;
+#endif
+    return true;
+}
+
+// Trail `root` before an in-place rewrite, if needs_trail says to, and
+// record `nondet` in its flag whether or not a frame was pushed -- #3 and
+// #4 read the flag, so it can't depend on which trail filters are on.
+// The snapshot is taken before the flag changes, so undo restores both.
+// Only for rewriting a node with its own reduct: choice points and
+// free-variable bindings always trail (save_copy/push_choice/choose).
+__attribute__((always_inline))
+static inline void trail_node(union field root, bool nondet)
+{
+    if(needs_trail(root, nondet))
     {
-        stack_push(bt_stack, root, copy(root), false);
+        save_snapshot(root);
+    }
+    if(nondet)
+    {
+        root.n->nondet = true;
     }
 }
-#else
+
+// apply_hnf's trail point: the same decision as trail_node, but `root`'s
+// flag is *set* to `nondet` first (not OR'd), as it always has been here.
+// The snapshot keeps `root`'s own epoch: copy() stamps a fresh node with
+// current_epoch, and undo() restores a frame with a whole-node memcpy, so
+// without this a restored old node would come back reading as young and
+// its next rewrite would be wrongly left off the trail.
 __attribute__((always_inline))
 static inline void push_node(union field root, bool nondet)
 {
     root.n->nondet = nondet;
-    stack_push(bt_stack, root, copy(root), false);
-}
+    if(needs_trail(root, nondet))
+    {
+        union field saved = copy(root);
+#if OPT_EPOCH_TRAIL
+        saved.n->epoch = root.n->epoch;
 #endif
+        stack_push(bt_stack, root, saved, false);
+    }
+}
 
 // when reducing a node to normal form, if the child is FAIL, then the root
 // should also be FAIL.
@@ -417,7 +496,8 @@ void forward_hnf(union field root);
 
 // set a free variable (I think)
 // TODO: figure out if I'm right about this.
-void set_free_constructor(union field n, Symbol* sym);
+void set_free_constructor(union field n, union field like);
+void narrow_raw_error(Symbol* sym);
 
 union field copy(union field node);
 union field set_copy(union field new_node, union field node);

@@ -68,6 +68,24 @@ yet just means "hasn't been reviewed and recorded" — `run.sh` still requires
 the program to compile, run, and exit cleanly within its timeout, just
 without checking the actual output.
 
+## Per-test directives
+
+A test can carry these as comments anywhere in its source:
+
+- `-- rice-mode: standalone` / `-- rice-mode: interactive`: override the
+  mode `run.sh` would infer from `main`'s type.
+- `-- rice-flags: <flags>`: extra `rice` flags for this test only (e.g.
+  `--debug=high`, `--cflags=-DCHECK_LAYOUT=1`).
+- `-- rice-exit: N`: the program is meant to exit with status N (a
+  runtime error under test). Its output, stderr included, is still
+  compared against the golden.
+- `-- rice-golden: none`: only the exit status is checked, never the
+  output, for output that legitimately changes with any codegen change
+  (like a `--debug` trace).
+
+Every compile also gets `--lint-fieldreps` (`src/field-reps-plan.md`), so
+a lint failure is a compile failure.
+
 ## `manifest.txt`
 
 Four statuses, one line per exception:

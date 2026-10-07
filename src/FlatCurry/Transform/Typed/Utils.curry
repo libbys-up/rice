@@ -3,13 +3,7 @@
 --- programs.
 ---
 --- This is the typed (`TExpr`) counterpart of `FlatCurry.Transform.Utils`
---- from the `flatcurry-transform` package (see `FlatCurry.Transform.Typed.
---- Types` for why this lives under `FlatCurry/Transform/Typed`). It only
---- covers what the untyped package's `Utils` module currently covers: the
---- plumbing the rewrite engine itself needs (`ReWriter`, `newVar`,
---- `replace`). Anything a specific transformation needs beyond that
---- (`ground`, substitution, renaming, free variables, ...) is expected to
---- live with the transformation, same as upstream.
+--- from the `flatcurry-transform` package
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------

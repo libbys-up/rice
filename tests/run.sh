@@ -160,7 +160,30 @@ run_one() {
   # unbound-variable error under `set -u`, not an empty expansion the way
   # bash 4+ does -- and neither flag here can contain a space or glob
   # character, so word-splitting is safe.
-  [ -n "${RICE_CFLAGS:-}" ] && flags="$flags --cflags=$RICE_CFLAGS"
+  # One --cflags per word (it's repeatable): a single
+  # `--cflags=$RICE_CFLAGS` would be word-split here, handing rice a bare
+  # `-DOPT_...` for any flag after the first.
+  for cf in ${RICE_CFLAGS:-}; do flags="$flags --cflags=$cf"; done
+  # Every module that gets regenerated is checked for raw values that
+  # could reach a pointer slot (src/field-reps-plan.md); a lint failure is
+  # a compile failure.
+  flags="$flags --lint-fieldreps"
+  # `-- rice-flags: <flags>` anywhere in the source adds compiler flags for
+  # that one test (e.g. `--debug=high`, or `--cflags=-DCHECK_LAYOUT=1`).
+  local extra_flags
+  extra_flags="$(grep -m1 -oE 'rice-flags: .*' "$src" | sed 's/^rice-flags: //')"
+  flags="$flags $extra_flags"
+  # `-- rice-exit: N` says the program is *meant* to exit with status N
+  # (e.g. a runtime error being tested); its output, stderr included, is
+  # still checked against the golden.
+  local want_exit
+  want_exit="$(grep -m1 -oE 'rice-exit: [0-9]+' "$src" | awk '{print $2}')"
+  want_exit="${want_exit:-0}"
+  # `-- rice-golden: none` checks only that the program runs and exits as
+  # expected -- for output that legitimately changes with any codegen
+  # change, like a --debug trace.
+  local no_golden=0
+  grep -qE 'rice-golden: none' "$src" && no_golden=1
   ( cd "$work" && timeout "$COMPILE_TIMEOUT" "$RICE" $flags "$name.curry" ) >"$build_log" 2>&1
   local build_ok=0
   [ -x "$work/$name" ] && build_ok=1
@@ -201,14 +224,14 @@ run_one() {
   # (caught for real: three old_rice benchmarks segfaulting in
   # print_final, all reported PASS by a version of this script without
   # this check).
-  if [ "$run_code" -ne 0 ]; then
+  if [ "$run_code" -ne "$want_exit" ]; then
     if [ "$expected_fail" -eq 1 ]; then
       xfail=$((xfail+1))
       [ "$VERBOSE" -eq 1 ] && echo "XFAIL $rel  (crashed as expected, exit code $run_code: $reason)"
     else
       fail=$((fail+1))
-      fails_list+=("$rel (crashed, exit code $run_code -- see $out_log)")
-      echo "FAIL  $rel  (crashed, exit code $run_code)"
+      fails_list+=("$rel (exit code $run_code, expected $want_exit -- see $out_log)")
+      echo "FAIL  $rel  (exit code $run_code, expected $want_exit)"
       [ "$VERBOSE" -eq 1 ] && tail -20 "$out_log" | sed 's/^/      | /'
     fi
     return
@@ -231,6 +254,12 @@ run_one() {
   # instead of flagging every allocation-count shift as one.
   local out_filtered="$work/out.filtered"
   grep -v '^total memory allocations:' "$out_log" > "$out_filtered"
+
+  if [ "$no_golden" -eq 1 ]; then
+    pass=$((pass+1))
+    [ "$VERBOSE" -eq 1 ] && echo "PASS  $rel  (rice-golden: none -- exit status only)"
+    return
+  fi
 
   local golden="$src"; golden="${golden%.curry}.expected"
   if [ -f "$golden" ]; then

@@ -163,7 +163,7 @@ nestCase :: Maybe (TypeExpr,QName) -> CaseType -> TExpr -> [TBranchExpr] -> VSta
 nestCase Nothing      ct e bs = return $ TCase ct e bs
 nestCase (Just (t,c)) ct e bs = do n <- fresh
                                    let lt = unboxedType t
-                                   let innerCase   = TCase ct (TVarE t n) bs
+                                   let innerCase   = TCase ct (TVarE lt n) bs
                                    let innerBranch = TBranch (TPattern t (boxedName c) [(n,lt)]) innerCase
                                    return $ TCase ct e (innerBranch : litCases bs)
 

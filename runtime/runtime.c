@@ -2,6 +2,7 @@
 #include<stdio.h>
 #include<stdlib.h>
 #include<string.h>
+#include<stdint.h>
 #include<errno.h>
 #include<sys/resource.h>
 #include "runtime.h"
@@ -97,11 +98,14 @@ void choice_hnf(union field root)
     choose(root);
 }
 
-// sets a free varialbe to a specific constructor,
-// and sets all of the children to free variables.
-// This is a core piece of a narrowing step.
-void set_free_constructor(union field n, Symbol* sym)
+// Sets free variable n to the constructor of `like`, with a fresh free
+// variable for every pointer child -- a core piece of a narrowing step.
+// A raw child can't be a free variable (a raw slot holds no node to bind
+// later), and has no structure left to narrow, so it takes `like`'s own
+// value instead.
+void set_free_constructor(union field n, union field like)
 {
+    Symbol* sym = like.n->symbol;
     n.n->symbol = sym;
     n.n->missing = 0;
     n.n->nondet = true;
@@ -111,12 +115,24 @@ void set_free_constructor(union field n, Symbol* sym)
     n.n->children[3].a = NULL;
     if(sym->arity > 3)
     {
-        n.n->children[3].a = (union field*)malloc((sym->arity - 3) * sizeof(union field));
+        n.n->children[3].a = (union field*)alloc((sym->arity - 3) * sizeof(union field));
     }
     for(unsigned int i = 0; i < sym->arity; i++)
     {
-        set_child_at(n, i, free_var());
+        set_child_at(n, i, child_rep(sym, i) == R_PTR ? free_var()
+                                                       : child_at_v(like, i));
     }
+}
+
+// Narrowing a free variable to a constructor with a raw field would put a
+// free variable in a raw slot. Raw values can't be narrowed this way
+// (literal-case narrowing isn't implemented), so stop with a clear
+// message instead of corrupting the node.
+void narrow_raw_error(Symbol* sym)
+{
+    fprintf(stderr, "Error: can't narrow a free variable to %s: "
+                    "it has a raw (unboxed) field\n", sym->name);
+    exit(1);
 }
 
 // copy node into new_node
@@ -152,6 +168,13 @@ union field set_copy(union field new_node, union field node)
 union field set_copy_free(union field new_node, union field node)
 {
     int arity = node.n->symbol->arity;
+    for(int i = 0; i < arity; i++)
+    {
+        if(child_rep(node.n->symbol, i) != R_PTR)
+        {
+            narrow_raw_error(node.n->symbol);
+        }
+    }
 
     new_node.n = (Node*)alloc(sizeof(Node));
 #if OPT_EPOCH_TRAIL
@@ -185,6 +208,27 @@ union field copy(union field node)
 #endif
     set_copy(new, node);
     return new;
+}
+
+// apply_hnf fills slots [from, from+count) of a partial application with
+// argument pointers. The compiler never partially applies a function with
+// a raw parameter (Rice.Codegen.FieldReps' lint), so in a debug build
+// check that every slot being filled really is a pointer slot.
+static inline void check_fill_ptrs(Symbol* sym, int from, int count)
+{
+#if DEBUG > 0
+    for(int i = from; i < from + count; i++)
+    {
+        if(child_rep(sym, i) != R_PTR)
+        {
+            fprintf(stderr, "Error: apply would put a pointer in raw slot %d of %s\n",
+                    i, sym->name);
+            exit(1);
+        }
+    }
+#else
+    (void)sym; (void)from; (void)count;
+#endif
 }
 
 // reduce a node rooted by apply(PART(f,y1,y2...yn), x1, x2 ... xn)
@@ -300,6 +344,7 @@ void apply_hnf(union field root)
         // an already-supplied argument instead of filling the real empty
         // slot, leaving the true slot NULL.
         int fillIdx = f.n->symbol->arity - missing;
+        check_fill_ptrs(f.n->symbol, fillIdx, nargs);
         while(nargs > 2)
         {
             debug_expr(HIGH, array[nargs-3]);
@@ -369,6 +414,7 @@ void apply_hnf(union field root)
         // index must count up from the first missing slot, not down from
         // the last one.
         int fillIdx = newf.n->symbol->arity - missing;
+        check_fill_ptrs(newf.n->symbol, fillIdx, missing);
         while(missing > 0)
         {
             set_child_at(newf, fillIdx, child_at_v(root, nargs));
@@ -417,14 +463,24 @@ void forward_hnf(union field root) { (void)root; }
 // code for backtracking
 //////////////////////////////////////////////////////////////////////////////
 
-// push (node -> copy(node)) on the stack
-void save_copy(union field node)
+// push (node -> copy(node)) on the stack, leaving node itself unchanged.
+// A whole-node memcpy, so the snapshot keeps node's own epoch and nondet
+// flag, and undo() puts both back.
+void save_snapshot(union field node)
 {
     union field saved;
     saved.n = (Node*)alloc(sizeof(Node));
     memcpy(saved.n, node.n, sizeof(Node));
-    node.n->nondet = true;
     stack_push(bt_stack, node, saved, false);
+}
+
+// save_snapshot, then mark node nondet. Always trails: used where the
+// trail is unconditional (free-variable bindings, fail_nf). Rewrites of a
+// node with its own reduct go through trail_node (runtime.h) instead.
+void save_copy(union field node)
+{
+    save_snapshot(node);
+    node.n->nondet = true;
 }
 
 // push (n -> saved) on the backtracking stack)
@@ -596,13 +652,24 @@ void print_stack(Stack* s)
     printf("\n");
 }
 
+static void print_raw(union field v, FieldRep r);
+
+// Prints child i of n: a raw child by value (its rep says which
+// primitive), a pointer child as an expression.
+static void print_child_expr(union field n, int i)
+{
+    FieldRep r = child_rep(n.n->symbol, i);
+    if(r == R_PTR)
+        print_expr(child_at_v(n, i));
+    else
+        print_raw(child_at_v(n, i), r);
+}
+
 void print_expr(union field n)
 {
-    // n is probably an int or char
-    // CLAUDE: There has to be a better way to do this.
-    if(n.i < 1000001)
+    if(n.n == NULL)
     {
-        printf("%ld", n.i);
+        printf("NULL");
         fflush(stdout);
         return;
     }
@@ -633,48 +700,18 @@ void print_expr(union field n)
     }
     else if(n.n->symbol->arity)
     {
+        // Children in storage order; a partial application's unfilled
+        // slots show as `*`.
+        int filled = filled_arity(n);
         printf("(");
-        fflush(stdout);
-        if(n.n->symbol->payload == PAYLOAD_INT)
+        for(int i = 0; i < (int)n.n->symbol->arity; i++)
         {
-            printf("%ld", child_at_i(n,0));
-            fflush(stdout);
-        }
-        else if(n.n->symbol->payload == PAYLOAD_CHAR)
-        {
-            printf("%c", (char)child_at_c(n,0));
-            fflush(stdout);
-        }
-        else if(n.n->symbol->payload == PAYLOAD_FLOAT)
-        {
-            printf("%lf", child_at_f(n,0));
-            fflush(stdout);
-        }
-        else
-        {
-            for(int i = n.n->symbol->arity-1; i > 0; i--)
-            {
-                if(i >= n.n->missing)
-                {
-                    print_expr(child_at_v(n,i));
-                    printf(", ");
-                    fflush(stdout);
-                }
-                else
-                {
-                    printf("*, ");
-                    fflush(stdout);
-                }
-            }
-            if(n.n->missing == 0)
-            {
-                print_expr(child_at_v(n,0));
-            }
+            if(i > 0)
+                printf(", ");
+            if(i < filled)
+                print_child_expr(n, i);
             else
-            {
                 printf("*");
-                fflush(stdout);
-            }
         }
         printf(")");
         fflush(stdout);
@@ -703,6 +740,38 @@ void print_tuple(union field n, int i)
     }
 }
 
+// Appends c's *derived-Show* escaped spelling to buf (which must have
+// room for at least 4 more bytes: the longest single-character
+// expansion, a decimal escape like "\127", is 4 bytes) and returns the
+// new write position. `quote` is whichever of '\'' or '"' is the
+// enclosing literal's own delimiter -- the one character that needs
+// escaping in one context but not the other (a bare '"' is fine inside
+// 'x', a bare '\'' is fine inside "..."; confirmed against real kics2's
+// own `show` output for exactly this case). Named escapes match GHC's
+// derived Show (\a\b\f\n\r\t\v, plus \\ and the delimiter itself);
+// anything else non-printable (code < 32, or >= 127 for a plain 7-bit
+// char) falls back to a decimal escape, same convention. Lives here,
+// not prelude.c, because runtime.c's own printing uses it and the
+// runtime library (runtime/Makefile) doesn't include prelude.c.
+char* appendEscaped(char* buf, char c, char quote)
+{
+    if (c == '\\')       { *buf++ = '\\'; *buf++ = '\\'; }
+    else if (c == quote) { *buf++ = '\\'; *buf++ = quote; }
+    else if (c == '\a')  { *buf++ = '\\'; *buf++ = 'a'; }
+    else if (c == '\b')  { *buf++ = '\\'; *buf++ = 'b'; }
+    else if (c == '\f')  { *buf++ = '\\'; *buf++ = 'f'; }
+    else if (c == '\n')  { *buf++ = '\\'; *buf++ = 'n'; }
+    else if (c == '\r')  { *buf++ = '\\'; *buf++ = 'r'; }
+    else if (c == '\t')  { *buf++ = '\\'; *buf++ = 't'; }
+    else if (c == '\v')  { *buf++ = '\\'; *buf++ = 'v'; }
+    else if (c < 32 || c >= 127)
+    {
+        buf += sprintf(buf, "\\%d", (int)(unsigned char)c);
+    }
+    else { *buf++ = c; }
+    return buf;
+}
+
 // (:)'s children are forward-stored like every other ordinary
 // constructor (Rice.Codegen.C.ToH's setRealChildren): child 0 is the
 // head (`:`'s first parameter), child 1 the tail (its second) -- *not*
@@ -721,6 +790,31 @@ void print_tuple(union field n, int i)
 // same escaping independently: previously this just wrote each raw
 // byte between quotes, so e.g. a string containing an actual newline
 // or a literal backslash printed unescaped instead of as `\n`/`\\`.
+static void printEscapedChar(char c, char quote);
+
+// Prints a raw value the way Curry would show a literal of its type.
+static void print_raw(union field v, FieldRep r)
+{
+    switch(r)
+    {
+        case R_INT:
+            printf("%ld", v.i);
+            break;
+        case R_CHAR:
+            printf("'");
+            printEscapedChar((char)v.c, '\'');
+            printf("'");
+            break;
+        case R_FLOAT:
+            printf("%lf", v.f);
+            break;
+        case R_PTR:
+            // Not a raw value; callers check the rep first.
+            printf("<ptr %p>", (void*)v.n);
+            break;
+    }
+}
+
 static void printEscapedChar(char c, char quote)
 {
     char buf[5];
@@ -812,48 +906,64 @@ void print_final(union field n)
     if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,)"))   { printf("("); print_tuple(n,13); printf(")"); return; }
     if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,,)"))  { printf("("); print_tuple(n,14); printf(")"); return; }
     if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,,,)")) { printf("("); print_tuple(n,15); printf(")"); return; }
-    if(n.n->symbol->payload == PAYLOAD_INT)
+    // A box prints as its bare value (a Char as 'x', the derived-Show
+    // convention print_string/showCharLiteral also follow).
+    FieldRep box = box_rep(n.n->symbol);
+    if(box != R_PTR)
     {
-        printf("%ld", child_at_i(n,0));
-        return;
-    }
-    if(n.n->symbol->payload == PAYLOAD_CHAR)
-    {
-        // Same derived-Show convention as print_string/showCharLiteral:
-        // a bare Char (not part of a String) shows as 'x', escaped and
-        // single-quoted -- previously printed as the bare byte alone,
-        // with no quoting at all.
-        printf("'");
-        printEscapedChar((char)child_at_c(n,0), '\'');
-        printf("'");
-        return;
-    }
-    if(n.n->symbol->payload == PAYLOAD_FLOAT)
-    {
-        printf("%lf", child_at_f(n,0));
+        print_raw(child_at(n,0), box);
         return;
     }
     printf("%s", n.n->symbol->name);
     if(n.n->symbol->arity)
     {
+        // Children in storage order (forward: child 0 is the first
+        // argument); a partial application's unfilled slots show as `*`.
+        int filled = filled_arity(n);
         printf("(");
-        for(int i = n.n->symbol->arity-1; i > 0; i--)
+        for(int i = 0; i < (int)n.n->symbol->arity; i++)
         {
-            if(i >= n.n->missing)
-            {
-                print_final(child_at_v(n,i));
+            if(i > 0)
                 printf(", ");
-            }
+            if(i >= filled)
+                printf("*");
+            else if(child_rep(n.n->symbol, i) == R_PTR)
+                print_final(child_at_v(n,i));
             else
-            {
-                printf("*, ");
-            }
+                print_raw(child_at_v(n,i), child_rep(n.n->symbol, i));
         }
-        if(n.n->missing == 0)
-            print_final(child_at_v(n,0));
-        else
-            printf("*");
         printf(")");
+    }
+}
+
+// Whether p plausibly points at a node: past the unmapped first page,
+// aligned like any allocation, and with a plausible symbol pointer of its
+// own. A raw Int/Char/Float in a pointer slot almost always fails the
+// first two tests before the third has to dereference anything.
+static bool looks_like_node(union field p)
+{
+    uintptr_t a = (uintptr_t)p.n;
+    if(a < 4096 || a % sizeof(void*) != 0)
+        return false;
+    uintptr_t s = (uintptr_t)p.n->symbol;
+    return s >= 4096 && s % sizeof(void*) == 0;
+}
+
+void check_layout(union field n, bool allow_null, const char* where)
+{
+    Symbol* sym = n.n->symbol;
+    int filled = filled_arity(n);
+    for(int i = 0; i < filled; i++)
+    {
+        if(child_rep(sym, i) != R_PTR)
+            continue;
+        union field c = child_at_v(n, i);
+        if(c.n == NULL ? allow_null : looks_like_node(c))
+            continue;
+        fprintf(stderr, "Error: layout check failed in %s: child %d of %s "
+                        "should be a node pointer (R_PTR) but holds %#lx\n",
+                where, i, sym->name, (unsigned long)c.i);
+        exit(1);
     }
 }
 
@@ -873,7 +983,7 @@ void error(char* msg, union field n)
 //
 // FORWARD_TAG is chased into a *separate* local (`settled`), never by
 // reassigning `expr` itself, and everywhere below that needs "the real
-// value" (debug_expr, the payload check, the child loop's own arity/
+// value" (debug_expr, the box check, the child loop's own arity/
 // children) reads `settled` instead of `expr` -- but `fail(expr)`/
 // `fail_nf(e, expr)` still mutate `expr`, the address our own caller
 // (`nf_all`, or a parent ground_nf's own child loop) actually holds a
@@ -892,7 +1002,7 @@ void ground_nf(union field expr)
 
     // If we're a function or choice, put ourselves in head normal form.
     // HNF_SETTLE, not HNF: this is a genuine "I need a real value here"
-    // entry point (the FREE_TAG/payload/arity checks right below all
+    // entry point (the FREE_TAG/box/arity checks right below all
     // inspect expr's tag/fields directly), so under OPT_TAIL_JUMP a
     // deferred tail call needs draining all the way, not just one hop.
     if(TAG(expr) == CHOICE_TAG ||
@@ -960,16 +1070,16 @@ void ground_nf(union field expr)
 
     debug(LOW, "HNF: ");
     debug_expr(LOW, settled);
-    // If we're a primative value, then we're already in normal form.
-    // int/float/char can't hold unevaluated expressions.
-    if(settled.n->symbol->payload != PAYLOAD_NONE)
+#if CHECK_LAYOUT
+    check_layout(settled, false, "ground_nf");
+#endif
+    // Raw children are already values, and a partial application's
+    // unfilled slots hold nothing: only filled pointer children can still
+    // need evaluating.
+    for(int i = filled_arity(settled)-1; i >= 0; i--)
     {
-        return;
-    }
-
-    // loop backwards because arguments are in reverse order.
-    for(int i = settled.n->symbol->arity-1; i >= 0; i--)
-    {
+        if(child_rep(settled.n->symbol, i) != R_PTR)
+            continue;
         union field e = child_at_v(settled,i);
         if(e.n != NULL)
         {
@@ -1023,15 +1133,14 @@ void nf(union field expr)
     debug(LOW, "HNF: ");
     debug_expr(LOW, settled);
 
-    // If we're a primative value, then we're already in normal form.
-    // int/float/char can't hold unevaluated expressions.
-    if(settled.n->symbol->payload != PAYLOAD_NONE)
+#if CHECK_LAYOUT
+    check_layout(settled, false, "nf");
+#endif
+    // Same as ground_nf: only filled pointer children can need evaluating.
+    for(int i = filled_arity(settled)-1; i >= 0; i--)
     {
-        return;
-    }
-
-    for(int i = settled.n->symbol->arity-1; i >= 0; i--)
-    {
+        if(child_rep(settled.n->symbol, i) != R_PTR)
+            continue;
         union field e = child_at_v(settled,i);
         nf(e);
         // we failed a child, so we fail.

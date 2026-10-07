@@ -16,6 +16,18 @@ typedef struct FieldPair
     bool choice;
     field lhs;
     field rhs;
+    // backtracking-optimizations.md's #5: current_epoch's (runtime.h)
+    // value at the moment this frame was pushed, restored when it's
+    // popped (stack.c) -- present unconditionally (not just under
+    // OPT_EPOCH_TRAIL) so stack_push/pop never need their own #if: when
+    // #5 is off, current_epoch never moves from 0, so snapshotting and
+    // restoring it here is just an inert round-trip through this field,
+    // not dead weight worth special-casing away. choose()/push_choice()
+    // (runtime.c) are the only place this value ever *changes* (once per
+    // choice point, not per push), so this correctly unwinds in lockstep
+    // with the stack regardless of whether a given frame is choice-marked
+    // or an ordinary trail entry.
+    unsigned int epoch;
 } FieldPair;
 
 typedef struct

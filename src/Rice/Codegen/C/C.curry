@@ -343,8 +343,11 @@ varName v
 var :: IVarIndex -> CExpr
 var = text . varName
 
+--- Zero-initialized: a recursive `let` passes a variable to `make_X`
+--- before a later `INodeAssign` fills in the node it names, so it must
+--- read as NULL, not as whatever was on the stack.
 fieldDecl :: IVarIndex -> CStmt
-fieldDecl v = text "field" <+> var v <> semi
+fieldDecl v = text "field" <+> var v <+> equals <+> text "{0}" <> semi
 
 --- `root` names the incoming node (ICurry variable 0, see `varName`).
 --- `scrutinee` is a name `Rice.Codegen.C.ToC.showConsCase` alone owns for
@@ -368,11 +371,10 @@ symbol v = v <> text ".n->symbol"
 symhnf :: CExpr -> CStmt
 symhnf v = text "HNF" <> parens v <> semi
 
-symtag, symname, symarity, symPayload, nondet, missing, epoch :: CExpr -> CExpr
+symtag, symname, symarity, nondet, missing, epoch :: CExpr -> CExpr
 symtag     v = symbol v <> text "->tag"
 symname    v = symbol v <> text "->name"
 symarity   v = symbol v <> text "->arity"
-symPayload v = symbol v <> text "->payload"
 nondet     v = v <> text ".n->nondet"
 missing    v = v <> text ".n->missing"
 --- `node.h`'s `Node.epoch` -- only actually a field under `OPT_EPOCH_TRAIL`

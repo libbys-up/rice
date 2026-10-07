@@ -5,12 +5,17 @@ import System.CurryPath         (runModuleActionQuiet)
 import FlatCurry.Typed.Files    (readTypedFlatCurry)
 import FlatCurry.Typed.Goodies  (updQNamesInTProg, updQNamesInTFunc, updTProgTFuncs, 
                                  tFuncName, tProgTFuncs, tProgName, updTRuleExtDecl,
-                                 updTFuncTRule)
+                                 updTFuncTRule, updTRule, trTExpr,
+                                 updQNamesInTypeExpr)
 import System.Directory         (doesFileExist)
-import FlatCurry.Typed.Types    (TProg, TFuncDecl)
+import FlatCurry.Typed.Types    (TProg, TFuncDecl, TExpr (..), TBranchExpr (..),
+                                 TPattern (..))
 import FlatCurry.Types          (QName)
 import System.FilePath          ((</>), (<.>))
 import Data.List                (find, isPrefixOf)
+
+import Rice.Transform.StrLit    (condenseStrings)
+import Rice.Transform.Unbox     (unbox)
 
 -- | Replaces the primitive types in the given module with their unboxed versions.
 rename_SH :: QName -> QName
@@ -26,7 +31,8 @@ replacePrim :: TProg -> IO TProg
 replacePrim pre = do home <- getEnv "RICEHOME"
                      let primFile = home </> "replace" </> "replace_Prim" <.> "curry"
                      prim <- runModuleActionQuiet readTypedFlatCurry primFile
-                     let prim_sharp = updQNamesInTProg rename_SH prim
+                     let prim_sharp = updTProgTFuncs (map (updTypeQNamesInTFunc rename_SH))
+                                        (updQNamesInTProg rename_SH prim)
                      return $ replaceFuncs "Prelude" prim_sharp pre
 
 -- tries to find a function is the replace program with the same name
@@ -53,7 +59,31 @@ replaceName from to name
  | otherwise                 = head name : replaceName from to (tail name)
 
 updName :: String -> TFuncDecl -> TFuncDecl
-updName name = updQNamesInTFunc (\(_,n) -> (name,n))
+updName name = updTypeQNamesInTFunc rn . updQNamesInTFunc rn
+ where
+  -- A module-less name is a string literal (`Rice.Transform.StrLit`), not
+  -- something defined anywhere, so it keeps its empty module.
+  rn (m,n) = if null m then (m,n) else (name,n)
+
+--- Renames the type names `updQNamesInTFunc` leaves alone: it renames the
+--- function's own signature, calls and pattern constructors, but not the
+--- type annotations inside the rule -- parameter types, an external's
+--- type, and every annotation in the body. `Rice.Codegen.FieldReps` reads
+--- those annotations, so a replaced function has to agree with the
+--- module it's moved into all the way down.
+updTypeQNamesInTFunc :: (QName -> QName) -> TFuncDecl -> TFuncDecl
+updTypeQNamesInTFunc f =
+  updTFuncTRule (updTRule ty (map (\(v,t) -> (v, ty t))) body id)
+ where
+  ty   = updQNamesInTypeExpr f
+  body = trTExpr (TVarE . ty) (TLit . ty) (TComb . ty) lt fr TOr TCase branch
+                 (\e t -> TTyped e (ty t))
+  lt bs e = TLet [((v, ty t), x) | ((v, t), x) <- bs] e
+  fr vs e = TFree [(v, ty t) | (v, t) <- vs] e
+  branch p e = TBranch (pat p) e
+  pat p = case p of
+    TPattern t c vs -> TPattern (ty t) c [(v, ty t') | (v, t') <- vs]
+    TLPattern t l   -> TLPattern (ty t) l
 
 addFuncs :: String -> TProg -> TProg -> TProg
 addFuncs name rep p = updTProgTFuncs allFuncs p
@@ -72,4 +102,7 @@ replace p = do let name = tProgName p
                if not hasRepFile
                 then return p
                 else do repP <- runModuleActionQuiet readTypedFlatCurry repFile
-                        return $ replaceFuncs name repP p
+                        -- The module being replaced into has already been
+                        -- through these; its replacements have to match.
+                        let prepped = unbox (condenseStrings repP)
+                        return $ replaceFuncs name prepped p
