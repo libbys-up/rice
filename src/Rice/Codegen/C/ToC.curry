@@ -1,42 +1,17 @@
 ------------------------------------------------------------------------------
 --- ICurry -> C source (`ModuleName.c`) generation -- the core translation.
 ---
---- `setExpr`'s function-call/choice cases eagerly call
---- `F_hnf(root)`/`choice_hnf(root)`/`apply_hnf(root)` right after building
---- the node, matching both reference sources this was designed against
---- (old_rice's `Compile.ToC`, `~/curry/fast_backtrack`'s draft) -- this
---- was, briefly, mid-port, a deliberate *deviation* from both, reasoned as
---- "just an optimization, safe to defer to Phase 2's toggleable
---- backtracking-optimizations work." That reasoning was wrong, caught by
---- actually running the result (a real function's result printed as the
---- unevaluated call that built it, e.g. `main_LET0(True)`, not the value
---- `1`) rather than trusting the argument: an `_hnf` function's contract
---- is to leave `root` in actual weak head normal form when it returns --
---- `nf`'s own structure depends on that (`if(missing<=0) HNF(expr);` is
---- called *once*, not in a loop, then children are forced directly,
---- assuming `expr` itself is already stable). A `_hnf` that returns with
---- `root` as *another* pending `FUNCTION_TAG` call breaks that contract
---- silently -- `nf` never re-checks, so the caller sees the unevaluated
---- intermediate node. Reaching WHNF fully, not leaving it as "whatever
---- the next consumer's own dispatch loop happens to re-force," is baseline
---- correctness here, not an optional scheduling optimization on top of it.
---- The real, *documented* risk this eager form carries -- a self-recursive
---- tail call evaluates as `self_hnf` calling `self_hnf` directly, correct
---- only as far as the C compiler actually applies tail-call elimination --
---- is real and belongs on `backtracking-optimizations.md`'s list; wasn't
---- this port's to solve by silently leaving `_hnf` half-finished, but is
---- now solved properly, behind `OPT_TAIL_JUMP`: `tailDispatch` (below)
---- generates the *same* call either way, routed through `runtime.h`'s
---- `TAIL_DISPATCH` macro, so this file's own output doesn't fork on the
---- flag -- only which of "call it now" or "leave root pending, let
---- whatever consumes it next redispatch" the macro expands to does. `nf`
---- (and everything else that genuinely needs a settled value, not just
---- "whatever's next") was updated to `HNF_SETTLE`, a real trampoline
---- consumer, precisely so the assumption this comment describes
---- (`nf`'s single, non-looping `HNF(expr)`) keeps holding under the flag
---- instead of reopening the exact bug this paragraph is about.
+--- Generated code runs on the evaluation machine (`runtime/machine.h`,
+--- `src/explicit-stack-plan.md`): every function body and every
+--- constructor case (lifted into its own *case block*) is a
+--- `RICE_CC void f(void)` that moves control only by `musttail` jumps and
+--- `RETURN()`. A case evaluates its scrutinee by saving its state in its
+--- frame and jumping to the scrutinee's code; tail calls are jumps. So
+--- evaluation depth lives on Rice's own stack, not the C stack. An `_hnf`
+--- function's contract is unchanged: when it returns, `root` is in head
+--- normal form (or a forward/failure that the consumer resolves).
 ---
---- Also deliberately excluded (matching `STATUS.md`'s Phase 1 scoping):
+--- Deliberately excluded (matching `STATUS.md`'s Phase 1 scoping):
 --- free-variable narrowing for a *literal* case's scrutinee. Ordinary
 --- constructor cases (`ICaseCons`, always complete per `ICurry.Types`' own
 --- contract) narrow a free scrutinee among their listed constructors as
@@ -67,20 +42,24 @@ module Rice.Codegen.C.ToC (toSource, writeMain, StackSize (..), MainMode (..)) w
 
 import Data.Maybe (isJust)
 import Data.Char (ord)
+import Data.List (nub, (\\))
+import qualified Data.Map as Map
+import Control.Monad.Trans.State (State, get, put, runState)
 import Text.Pretty
 
 import ICurry.Types
 import Rice.Codegen.C.C
 import Rice.Codegen.C.PrimOps (PrimEntry, lookupPrim, primArgType, primMake, primSet)
 import Rice.Codegen.Names (mangle, uninstance, toName, isStrConst, strConst)
+import Rice.Codegen.FieldReps (FieldRep (..), FieldRepTable (..))
 
 --- A module's whole `.c` file, as one `Doc`.
-toSource :: IProg -> Doc
-toSource (IProg name imps _ allFuns) = vcat $
+toSource :: FieldRepTable -> IProg -> Doc
+toSource reps (IProg name imps _ allFuns) = vcat $
   [ cinclude name, cinclude "debug", cinclude "runtime" ] ++
   map cinclude imps ++
   [ text "" ] ++
-  concatMap funSource codeFuns
+  concatMap (funSource reps) codeFuns
  where
   -- Same filter as Rice.Codegen.C.ToH: primitives are inlined at every
   -- call site (below), never actually defined as a real function.
@@ -175,16 +154,52 @@ writeMain rootModule stackSize mode = vcat
 -- Functions
 ------------------------------------------------------------------------------
 
-funSource :: IFunction -> [CStmt]
-funSource (IFunction name _ _ _ body) = case body of
-  IExternal _     -> []  -- hand-written in external.c/Prelude_external.c
+--- A function's code runs on the evaluation machine (`runtime/machine.h`,
+--- `src/explicit-stack-plan.md`). Its body up to the first constructor
+--- case is `f_hnf` itself; every constructor case is lifted into its own
+--- C function, a *case block* (`f_hnf_case<k>`), whose frame on the
+--- machine stack is also its continuation: evaluating the scrutinee jumps
+--- to the scrutinee's code, which returns by jumping back into the case
+--- block. Control only ever moves by `musttail` jumps and `RETURN()`, so
+--- the C stack doesn't grow with evaluation depth.
+---
+--- @field gName  the function, for naming its case blocks
+--- @field gLabel its source name, for `--debug` messages
+--- @field gReps  the field rep of each of its variables (`frVars`)
+--- @field gRetry the innermost enclosing constructor case's scrutinee, if
+---               any. Code is inside a case block's branch exactly when
+---               this is `Just`, which is also exactly when that case's
+---               frame is on top of the machine stack (see `leave`).
+data Gen = Gen
+  { gName  :: IQName
+  , gLabel :: String
+  , gReps  :: Map.Map Int FieldRep
+  , gRetry :: RetryCtx
+  }
+
+--- One case block: the declarations that must precede any use of it
+--- (prototype, reps array, `FrameInfo`), and its definition.
+data CaseBlock = CaseBlock [CStmt] [CStmt]
+
+--- Code generation for one function threads a case-block counter and the
+--- case blocks generated so far.
+type G a = State (Int, [CaseBlock]) a
+
+funSource :: FieldRepTable -> IFunction -> [CStmt]
+funSource reps (IFunction name _ _ _ body) = case body of
+  IExternal _     -> []  -- hand-written in runtime/prelude.c
   IFuncBody block ->
-    [ comment (uninstance name)
-    , cfunDefn hnfRet (hnf name) []
-        ((text "field" <+> root <+> equals <+> text "rice_root" <> semi)
-         : showBody (toName name) block)
-    , text ""
-    ]
+    let (m, n, _) = name
+        gen = Gen name (toName name)
+                  (Map.findWithDefault Map.empty (m, n) (frVars reps)) Nothing
+        (entry, (_, blocks)) = runState (showBody gen block) (0, [])
+        cs = reverse blocks
+    in [ comment (uninstance name) ] ++
+       concat [ ds | CaseBlock ds _ <- cs ] ++
+       [ cfunDefn hnfRet (hnf name) []
+           ((text "field" <+> root <+> equals <+> text "rice_root" <> semi) : entry)
+       , text "" ] ++
+       concat [ d ++ [text ""] | CaseBlock _ d <- cs ]
 
 --- backtracking-optimizations.md's #3: every function's trail-stack
 --- cutoff is recorded once, here, before any of its own body could have
@@ -193,12 +208,14 @@ funSource (IFunction name _ _ _ body) = case body of
 --- identically, regardless of the flag (matching TAIL_DISPATCH's own
 --- convention: codegen never forks on an OPT_* flag, only the macros'
 --- own expansion does).
-showBody :: String -> IBlock -> [CStmt]
-showBody n block =
-  [ scall "SCOPED_CUTOFF" []
-  , scall "debug"      [text "LOW", dquotes (text ("HNF " ++ n ++ ":\\n"))]
-  , scall "debug_expr" [text "LOW", root]
-  ] ++ showBlock Nothing n block
+showBody :: Gen -> IBlock -> G [CStmt]
+showBody gen block = do
+  b <- showBlock gen block
+  return $
+    [ scall "SCOPED_CUTOFF" []
+    , scall "debug"      [text "LOW", dquotes (text ("HNF " ++ gLabel gen ++ ":\\n"))]
+    , scall "debug_expr" [text "LOW", root]
+    ] ++ b
 
 --- `RetryCtx` is `Just v` while generating a case branch's own body (`v`
 --- being *that* case's own scrutinee variable, from `showConsBranch`),
@@ -210,9 +227,10 @@ showBody n block =
 --- for free, matching ordinary lexical scoping.
 type RetryCtx = Maybe IVarIndex
 
-showBlock :: RetryCtx -> String -> IBlock -> [CStmt]
-showBlock ctx n (IBlock decls asgns stmt) =
-  map showDecl (dedupDecls decls) ++ map showAsgn asgns ++ showStmt ctx n stmt
+showBlock :: Gen -> IBlock -> G [CStmt]
+showBlock gen (IBlock decls asgns stmt) = do
+  st <- showStmt gen stmt
+  return (map showDecl (dedupDecls decls) ++ map showAsgn asgns ++ st)
 
 --- The real ICurry the external `icurry` package generates can list the
 --- same variable's `IVarDecl` more than once in one block (confirmed
@@ -256,16 +274,38 @@ showAsgn (IVarAssign  v e)     = var v .= showExpr e
 --- `showConsBranch` already pushed for this branch, so SCOPED_RESAVE
 --- re-saves `root` before `fail` (see runtime.h) -- otherwise `fail(root)`
 --- would be an unlogged write.
-showStmt :: RetryCtx -> String -> IStatement -> [CStmt]
-showStmt ctx n IExempt =
-  maybe [] (const [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
-                  , scall "SCOPED_RESAVE" [nondetVar, root] ]) ctx ++
-  uncaseTrail ctx ++
-  scall "fail" [root] : debugLeave n ++ [creturn]
-showStmt ctx n (IReturn e) =
-  uncaseTrail ctx ++ setExpr e ++ debugLeave n ++ [creturn]
-showStmt _   n (ICaseCons v bs) = [showConsCase n v bs]
-showStmt ctx n (ICaseLit  v bs) = [showLitCase ctx n v bs]
+showStmt :: Gen -> IStatement -> G [CStmt]
+showStmt gen st = case st of
+  IExempt ->
+    return $
+      maybe [] (const [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
+                      , scall "SCOPED_RESAVE" [nondetVar, root] ]) ctx ++
+      uncaseTrail ctx ++
+      scall "fail" [root] : debugLeave (gLabel gen) ++ leave gen returnStmt
+  IReturn e ->
+    let (body, term) = setExpr e
+    in return (uncaseTrail ctx ++ body ++ debugLeave (gLabel gen) ++ leave gen term)
+  ICaseCons v bs -> enterCase gen v bs
+  ICaseLit  v bs -> showLitCase gen v bs
+ where ctx = gRetry gen
+
+--- Leaves the current code: pops the enclosing case block's frame first,
+--- if there is one (`gRetry`), since control is leaving that case for
+--- good -- every statement ends its block, so this is always a tail
+--- position. `term` is the final transfer: `RETURN()` or a jump.
+leave :: Gen -> [CStmt] -> [CStmt]
+leave gen term = maybe [] (const [scall "frame_pop" []]) (gRetry gen) ++ term
+
+--- Return to the frame on top of the machine stack: `root` is in head
+--- normal form.
+returnStmt :: [CStmt]
+returnStmt = [text "RETURN()" <> semi]
+
+--- A tail call: reduce `root` with `code` (an expression of type `Code`),
+--- which returns to wherever this code would have.
+jumpTo :: CExpr -> [CStmt]
+jumpTo code = [ text "rice_root" .= root
+              , text "MUSTTAIL return" <+> code <> text "()" <> semi ]
 
 --- The trail point for a write to `root` that no constructor-case branch
 --- covers (`Nothing`: a function body, or literal-case branch, with no
@@ -315,19 +355,135 @@ writeBack v
   | v == 0    = comment "root scrutinized directly -- no write-back (see writeBack's own note)"
   | otherwise = var v .= scrutinee
 
-showConsCase :: String -> IVarIndex -> [IConsBranch] -> CStmt
-showConsCase n v bs = cblock
-  [ text "bool" <+> nondetVar <+> equals <+> cfalse <> semi
-  , text "field" <+> scrutinee <+> equals <+> var v <> semi
-  , text "field" <+> origScrutinee <+> equals <+> var v <> semi
-  , cwhile ctrue
-      [ nondetVar .|= nondet scrutinee
-      , cswitch (symtag scrutinee)
-          ( [ failBlock n v, funBlock, choiceBlock, forwardBlock, freeCaseBlock v bs ] ++
-            map (showConsBranch n v) bs
-          )
-      ]
+--- A constructor case: push its frame, filled from the variables in
+--- scope here, and jump into its case block. The frame's slots are
+---   0           root
+---   1           the scrutinee variable, as it was when the case began
+---   2           the dispatch loop's current scrutinee (`_scrutinee`)
+---   3 ..        every other variable the branches use (`caseFreeVars`)
+---   nondet      the loop's `nondet` flag (raw)
+---   cutoff      the function's SCOPED_CUTOFF (raw)
+--- with reps from `gReps`, so the GC can trace it.
+enterCase :: Gen -> IVarIndex -> [IConsBranch] -> G [CStmt]
+enterCase gen v bs = do
+  (k, done) <- get
+  put (k + 1, done)
+  let fname = hnf (gName gen) ++ "_case" ++ show k
+      frees = [ x | x <- caseFreeVars v bs, x /= 0, x /= v ]
+      ndS   = 3 + length frees
+      cutS  = ndS + 1
+      repOf x = Map.findWithDefault RPtr x (gReps gen)
+      slotReps = [RPtr, RPtr, RPtr] ++ map repOf frees ++ [RInt, RInt]
+      inner = gen { gRetry = Just v }
+  body <- caseBody inner v frees ndS cutS bs
+  (k', done') <- get
+  put (k', CaseBlock (caseDecls gen k fname slotReps)
+                     [cfunDefn ("static " ++ hnfRet) fname [] body] : done')
+  return $ leave gen $
+    [ scall "frame_push" [text ("&" ++ fname ++ "_info")]
+    , slot 0 .= root
+    , slot 1 .= var v
+    , slot 2 .= var v ] ++
+    [ slot (3 + i) .= var x | (i, x) <- zip [0 ..] frees ] ++
+    [ rawSlot ndS .= int 0
+    , scall "SCOPED_SAVE_CUTOFF" [slot cutS]
+    , text "MUSTTAIL return" <+> text fname <> text "()" <> semi ]
+
+--- The prototype, reps array and `FrameInfo` of case block `k`.
+caseDecls :: Gen -> Int -> CName -> [FieldRep] -> [CStmt]
+caseDecls gen k fname slotReps =
+  [ text ("static " ++ hnfRet) <+> text fname <> text "(void)" <> semi
+  , (text "static const unsigned char" <+> text (fname ++ "_reps[]"))
+      .= carray (map repLit slotReps)
+  , (text "static const FrameInfo" <+> text (fname ++ "_info"))
+      .= carray [ dinit "code" (text fname)
+                , dinit "size" (int (length slotReps))
+                , dinit "reps" (text (fname ++ "_reps"))
+                , dinit "name" (dquotes (text (gLabel gen ++ " case " ++ show k))) ]
   ]
+ where
+  repLit r = text $ case r of
+    RPtr   -> "R_PTR"
+    RInt   -> "R_INT"
+    RChar  -> "R_CHAR"
+    RFloat -> "R_FLOAT"
+
+--- A case block: reload the case's state from its frame, then run the
+--- dispatch loop. It's entered both from `enterCase` and, after its
+--- scrutinee is evaluated, by that evaluation's `RETURN()` -- either way
+--- the frame holds everything, so the two are the same.
+caseBody :: Gen -> IVarIndex -> [IVarIndex] -> Int -> Int -> [IConsBranch]
+         -> G [CStmt]
+caseBody gen v frees ndS cutS bs = do
+  branches <- mapM (showConsBranch gen v) bs
+  return $
+    [ text "field" <+> root <+> equals <+> slot 0 <> semi ] ++
+    [ text "field" <+> var v <+> equals <+> slot 1 <> semi | v /= 0 ] ++
+    [ text "field" <+> scrutinee <+> equals <+> slot 2 <> semi
+    , text "field" <+> origScrutinee <+> equals <+> slot 1 <> semi ] ++
+    [ text "field" <+> var x <+> equals <+> slot (3 + i) <> semi
+    | (i, x) <- zip [0 ..] frees ] ++
+    [ text "bool" <+> nondetVar <+> equals <+> rawSlot ndS <> semi
+    , scall "SCOPED_LOAD_CUTOFF" [slot cutS]
+    , cwhile ctrue
+        [ nondetVar .|= nondet scrutinee
+        , cswitch (symtag scrutinee)
+            ( [ failBlock gen, funBlock ndS, choiceBlock, forwardBlock
+              , freeCaseBlock v bs ] ++
+              branches )
+        ]
+    ]
+
+slot :: Int -> CExpr
+slot i = text ("SLOT(" ++ show i ++ ")")
+
+rawSlot :: Int -> CExpr
+rawSlot i = slot i <> text ".i"
+
+--- The variables a case uses that it doesn't declare itself: its
+--- scrutinee, plus everything its branches read from an enclosing scope.
+--- ICurry variable numbers are unique within a function, so one set
+--- difference over the whole subtree is enough.
+caseFreeVars :: IVarIndex -> [IConsBranch] -> [IVarIndex]
+caseFreeVars v bs =
+  nub (v : concatMap (usedBlock . branchBlock) bs)
+    \\ concatMap (declBlock . branchBlock) bs
+ where branchBlock (IConsBranch _ _ b) = b
+
+usedBlock :: IBlock -> [IVarIndex]
+usedBlock (IBlock _ asgns st) = concatMap usedAsgn asgns ++ usedStmt st
+ where
+  usedAsgn a = case a of
+    IVarAssign  _ e   -> usedExpr e
+    INodeAssign x _ e -> x : usedExpr e
+  usedStmt s = case s of
+    IExempt         -> []
+    IReturn e       -> usedExpr e
+    ICaseCons x cbs -> x : concat [ usedBlock b | IConsBranch _ _ b <- cbs ]
+    ICaseLit  x lbs -> x : concat [ usedBlock b | ILitBranch _ b <- lbs ]
+
+usedExpr :: IExpr -> [IVarIndex]
+usedExpr e = case e of
+  IVar x           -> [x]
+  IVarAccess x _   -> [x]
+  ILit _           -> []
+  IFCall _ es      -> concatMap usedExpr es
+  ICCall _ es      -> concatMap usedExpr es
+  IFPCall _ _ es   -> concatMap usedExpr es
+  ICPCall _ _ es   -> concatMap usedExpr es
+  IOr e1 e2        -> usedExpr e1 ++ usedExpr e2
+
+declBlock :: IBlock -> [IVarIndex]
+declBlock (IBlock decls asgns st) =
+  map declIdx decls ++ [ x | IVarAssign x _ <- asgns ] ++ declStmt st
+ where
+  declIdx d = case d of
+    IVarDecl  x -> x
+    IFreeDecl x -> x
+  declStmt s = case s of
+    ICaseCons _ cbs -> concat [ declBlock b | IConsBranch _ _ b <- cbs ]
+    ICaseLit  _ lbs -> concat [ declBlock b | ILitBranch _ b <- lbs ]
+    _               -> []
 
 --- `v` (this case's own scrutinee) is `_scrutinee` reaching FAIL_TAG
 --- directly -- an upstream failure propagating through, as opposed to
@@ -336,16 +492,24 @@ showConsCase n v bs = cblock
 --- trail stack, so it doesn't need `root` mutated first, and if it finds
 --- nothing to flip, falling through to the unmodified trail_node/fail
 --- sequence is exactly today's behavior either way.
-failBlock :: String -> IVarIndex -> CStmt
-failBlock n _ = ccase (text "FAIL_TAG")
+failBlock :: Gen -> CStmt
+failBlock gen = ccase (text "FAIL_TAG")
   ( [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
     , scall "trail_node" [root, nondetVar]
     , scall "fail" [root]
-    ] ++ debugLeave n ++ [creturn]
+    ] ++ debugLeave (gLabel gen) ++ leave gen returnStmt
   )
 
-funBlock :: CStmt
-funBlock = ccase (text "FUNCTION_TAG") [symhnf scrutinee, cbreak]
+--- The scrutinee still needs evaluating: save the loop's state in the
+--- case's frame and jump to the scrutinee's code. When it reaches head
+--- normal form it returns to this case block, which reloads and
+--- re-dispatches.
+funBlock :: Int -> CStmt
+funBlock ndS = ccase (text "FUNCTION_TAG")
+  [ slot 2 .= scrutinee
+  , rawSlot ndS .= nondetVar
+  , text "rice_root" .= scrutinee
+  , text "MUSTTAIL return" <+> scrutinee <> text ".n->symbol->hnf()" <> semi ]
 
 choiceBlock :: CStmt
 choiceBlock = ccase (text "CHOICE_TAG") [scall "choose" [scrutinee], cbreak]
@@ -374,10 +538,11 @@ freeCaseBlock v (IConsBranch first _ _ : restBs) =
   rest = [c | IConsBranch c _ _ <- restBs]
   pushChoice c = scall "push_choice" [scrutinee, call ("make_" ++ mangle c ++ "_free") []]
 
-showConsBranch :: String -> IVarIndex -> IConsBranch -> CStmt
-showConsBranch n v (IConsBranch c _ b) =
-  ccase (text (tag c))
-    (writeBack v : scall "trail_node" [root, nondetVar] : showBlock (Just v) n b)
+showConsBranch :: Gen -> IVarIndex -> IConsBranch -> G CStmt
+showConsBranch gen v (IConsBranch c _ b) = do
+  body <- showBlock gen b
+  return (ccase (text (tag c))
+                (writeBack v : scall "trail_node" [root, nondetVar] : body))
 
 ------------------------------------------------------------------------------
 -- Literal cases
@@ -401,12 +566,15 @@ litValue (IChar  c) = int (ord c)
 --- case inside one of these branches should still retry against
 --- whichever constructor-case scrutinee most recently enclosed it, not
 --- lose that context just because a literal case sits in between.
-showLitCase :: RetryCtx -> String -> IVarIndex -> [ILitBranch] -> CStmt
-showLitCase ctx n v bs =
-  cifCase (map branchCond bs) (uncaseTrail ctx ++ scall "fail" [root] : [creturn])
+showLitCase :: Gen -> IVarIndex -> [ILitBranch] -> G [CStmt]
+showLitCase gen v bs = do
+  conds <- mapM branchCond bs
+  return [cifCase conds
+            (uncaseTrail (gRetry gen) ++ scall "fail" [root] : leave gen returnStmt)]
  where
-  branchCond (ILitBranch l b) =
-    (rawField (litCType l) (var v) .== litValue l, showBlock ctx n b)
+  branchCond (ILitBranch l b) = do
+    body <- showBlock gen b
+    return (rawField (litCType l) (var v) .== litValue l, body)
 
 ------------------------------------------------------------------------------
 -- Expressions -- building a new node
@@ -456,33 +624,6 @@ missingArgs es m = map showExpr es ++ replicate m nullf ++ [int m]
 -- Expressions -- reducing root in place (IReturn)
 ------------------------------------------------------------------------------
 
---- The eager `X_hnf(root)` call after building a function/choice/apply
---- node -- required for the `_hnf` contract (see this module's own header
---- comment: an `_hnf` function must leave `root` in actual WHNF, not
---- another unevaluated call). Constructors don't need this (`setComb`'s
---- `ICCall` case never calls it): a constructor application is already
---- its own WHNF once built -- `CTR_hnf` is a debug-only no-op precisely
---- because there's nothing left to reduce. Used for `choice` (below) only
---- -- `choice_hnf` is O(1) and never itself produces another pending
---- call, so there's nothing for backtracking-optimizations.md's #2 to
---- defer here; see `tailDispatch` for the two cases that do.
-hnfCall :: CName -> CStmt
-hnfCall name = (text "rice_root" .= root) <+> scall (name ++ "_hnf") []
-
---- The tail-call/`apply` counterpart of `hnfCall`, for the two `setExpr`
---- cases that build a genuine tail call: a real `_hnf`/`apply_hnf`
---- dispatch every time, exactly like `hnfCall`, *unless*
---- `OPT_TAIL_JUMP` is on (`runtime.h`'s `TAIL_DISPATCH` macro), in which
---- case it's left for whatever consumes `root` next to notice it's still
---- FUNCTION_TAG and redispatch -- see `runtime.h`'s own doc comment on
---- `TAIL_DISPATCH` and backtracking-optimizations.md's #2. This is the
---- *only* difference from `hnfCall`: same generated code either way,
---- just routed through a macro instead of a direct call, so which
---- behavior actually happens is a link-time `-D` choice, not something
---- `rice` itself needs to be told about at codegen time.
-tailDispatch :: CName -> CStmt
-tailDispatch name = scall "TAIL_DISPATCH" [text (name ++ "_hnf"), root]
-
 -- IVar/IVarAccess are "collapse points" (backtracking-optimizations.md's
 -- #4): the function body's final value is just an already-existing node
 -- reference, not a freshly-built one. `collapse` (runtime.h) is
@@ -491,28 +632,33 @@ tailDispatch name = scall "TAIL_DISPATCH" [text (name ++ "_hnf"), root]
 -- node happens to already be a safe, non-nondet value at this point --
 -- both branches are always sound, this is a runtime-flag-gated eager/lazy
 -- trade, not a correctness fork here in codegen.
-setExpr :: IExpr -> [CStmt]
-setExpr (IVar v)           = [scall "collapse" [root, var v]]
-setExpr (IVarAccess v ixs) = [scall "collapse" [root, children (var v) ixs]]
-setExpr (ILit (IInt   i))  = [(root <> text ".i") .= int i]
-setExpr (ILit (IChar  c))  = [(root <> text ".c") .= int (ord c)]
-setExpr (ILit (IFloat f))  = [(root <> text ".f") .= float f]
+--
+-- Returns the statements that rewrite `root`, and how control then leaves:
+-- `RETURN()` when `root` is already in head normal form, or a tail jump to
+-- the code that reduces it further (a function call, `?`, `apply`). The
+-- jump is a `musttail` call, so a tail-recursive Curry function runs in
+-- constant C stack.
+setExpr :: IExpr -> ([CStmt], [CStmt])
+setExpr (IVar v)           = ([scall "collapse" [root, var v]], returnStmt)
+setExpr (IVarAccess v ixs) = ([scall "collapse" [root, children (var v) ixs]], returnStmt)
+setExpr (ILit (IInt   i))  = ([(root <> text ".i") .= int i], returnStmt)
+setExpr (ILit (IChar  c))  = ([(root <> text ".c") .= int (ord c)], returnStmt)
+setExpr (ILit (IFloat f))  = ([(root <> text ".f") .= float f], returnStmt)
 setExpr (IOr e1 e2)        =
-  [scall "set_choice" [root, showExpr e1, showExpr e2], hnfCall "choice"]
+  ([scall "set_choice" [root, showExpr e1, showExpr e2]], jumpTo (text "choice_hnf"))
 setExpr (IFCall f es)
-  | isApply f = [ scall ("set_apply" ++ show (length es - 1)) (root : map showExpr es)
-                , tailDispatch "apply"
-                ]
+  | isApply f = ( [scall ("set_apply" ++ show (length es - 1)) (root : map showExpr es)]
+                , jumpTo (text "apply_hnf") )
   | otherwise = case lookupPrim f of
-      Just p  -> primSet p root (map (showPrim (primArgType p)) es)
-      Nothing -> [setComb f es, tailDispatch (mangle f)]
+      Just p  -> (primSet p root (map (showPrim (primArgType p)) es), returnStmt)
+      Nothing -> ([setComb f es], jumpTo (text (mangle f ++ "_hnf")))
 setExpr (ICCall c es)
-  | isStrConst c = [scall "setCurryString" [root, text (strConst c)]]
+  | isStrConst c = ([scall "setCurryString" [root, text (strConst c)]], returnStmt)
   | otherwise    = case lookupPrim c of
-      Just p  -> primSet p root (map (showPrim (primArgType p)) es)
-      Nothing -> [setComb c es]
-setExpr (IFPCall f m es) = [setPartComb f m es]
-setExpr (ICPCall c m es) = [setPartComb c m es]
+      Just p  -> (primSet p root (map (showPrim (primArgType p)) es), returnStmt)
+      Nothing -> ([setComb c es], returnStmt)
+setExpr (IFPCall f m es) = ([setPartComb f m es], returnStmt)
+setExpr (ICPCall c m es) = ([setPartComb c m es], returnStmt)
 
 setComb :: IQName -> [IExpr] -> CStmt
 setComb f es = scall ("set_" ++ mangle f) (root : map showExpr es ++ [int 0])

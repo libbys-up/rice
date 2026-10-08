@@ -84,7 +84,7 @@ void set_stack_size_max(void)
 }
 
 
-RICE_CC void CTR_hnf(void)
+static void CTR_impl(void)
 {
     field root = rice_root;
     (void)root; // unused when DEBUG == 0, since debug_expr expands to nothing
@@ -92,7 +92,7 @@ RICE_CC void CTR_hnf(void)
     debug_expr(LOW, root);
 }
 
-RICE_CC void choice_hnf(void)
+static void choice_impl(void)
 {
     field root = rice_root;
     debug(LOW, "HNF choice:");
@@ -234,18 +234,33 @@ static inline void check_fill_ptrs(Symbol* sym, int from, int count)
 }
 
 // reduce a node rooted by apply(PART(f,y1,y2...yn), x1, x2 ... xn)
+// apply(PART(f,y1,...), x1, ...) on the evaluation machine. apply_hnf
+// pushes a frame [root, f, nondet] and enters apply_k, the loop that
+// evaluates f to a partial application: evaluating f jumps to f's code,
+// which returns into apply_k. Once f is a PART, the frame is popped and
+// the arguments filled in; a now fully applied call is then a tail jump.
+static const unsigned char apply_reps[] = { R_PTR, R_PTR, R_INT };
+static RICE_CC void apply_k(void);
+static const FrameInfo apply_info =
+    { .code = apply_k, .size = 3, .reps = apply_reps, .name = "apply" };
+
 RICE_CC void apply_hnf(void)
 {
     field root = rice_root;
     debug(LOW, "HNF apply: \n");
     debug_expr(LOW, root);
+    frame_push(&apply_info);
+    SLOT(0) = root;
+    SLOT(1) = child_at(root, 0);
+    SLOT(2).i = false;
+    MUSTTAIL return apply_k();
+}
 
-    //split up the node into pieces. PART(f...), x1, x2, and (...xm)
-    union field f = child_at(root,0);
-    union field child1 = root.n->children[1];
-    union field child2 = root.n->children[2];
-    union field* array = root.n->children[3].a;
-    bool nondet = false;
+static RICE_CC void apply_k(void)
+{
+    field root = SLOT(0);
+    union field f = SLOT(1);
+    bool nondet = SLOT(2).i;
 
     //This is the normal HNF loop
     //f should be a partial application,
@@ -259,16 +274,19 @@ RICE_CC void apply_hnf(void)
         {
             case FAIL_TAG:
                 debug(HIGH, "apply FAIL\n");
+                frame_pop();
                 push_node(root,nondet);
                 fail(root);
-                return;
-    
+                RETURN();
+
             case FUNCTION_TAG:
                 debug(HIGH, "apply FUNCTION\n");
                 // f must be fully applied, or we would have left the loop!
-                HNF(f);
-                break;
-    
+                SLOT(1) = f;
+                SLOT(2).i = nondet;
+                rice_root = f;
+                MUSTTAIL return f.n->symbol->hnf();
+
             case CHOICE_TAG:
                 debug(HIGH, "apply CHOICE\n");
                 choose(f);
@@ -279,7 +297,7 @@ RICE_CC void apply_hnf(void)
                 nondet |= f.n->nondet;
                 f = child_at(f,0);
                 break;
-    
+
             case FREE_TAG:
                 debug(HIGH, "apply FREE\n");
                 // we can't actually apply a free variable
@@ -287,18 +305,18 @@ RICE_CC void apply_hnf(void)
                 fprintf(stderr, "Cannot apply free variable!\n");
                 exit(1);
 
-            // TAG(f) is a plain constructor (none of the 5 tags above) --
-            // `f` has already been fully reduced and it's not a function,
-            // so this `apply` node should never have been built with it in
-            // the function slot to begin with. Without this case, falling
-            // through the switch leaves `f` unchanged, so the
-            // `while(f.n->missing <= 0)` loop above spins forever with no
-            // further debug output -- a silent hang instead of a crash.
-            // Fail loudly instead.
+            // A plain constructor in the function position: this apply
+            // node should never have been built with it. Fail loudly.
             default:
                 error("apply: not a function", f);
         }
     }
+    frame_pop();
+
+    union field child1 = root.n->children[1];
+    union field child2 = root.n->children[2];
+    union field* array = root.n->children[3].a;
+
     // Now we're guaranteed to have a partial application
     debug(HIGH, "apply PART\n");
 
@@ -389,10 +407,12 @@ RICE_CC void apply_hnf(void)
             // caller was reached via the identical TAIL_DISPATCH
             // mechanism (ToC.curry's `hnfCall "apply"`), so whatever's
             // waiting further up the chain is what redispatches this.
-            TAIL_DISPATCH_PTR(root);
+            rice_root = root;
+            MUSTTAIL return root.n->symbol->hnf();
         }
         debug(HIGH, "leaving apply\n");
         debug_expr(HIGH, root);
+        RETURN();
     }
     else
     {
@@ -438,14 +458,9 @@ RICE_CC void apply_hnf(void)
         // resolution loop (the `while(f.n->missing <= 0)` loop above)
         // already re-tests TAG(f) every iteration regardless of whether
         // this call actually ran.
-        TAIL_DISPATCH_PTR(newf);
-        debug(HIGH, "fully applied child reduced\n");
-        debug_expr(HIGH, newf);
-
-        // set root to be the reduced function, and update the number
-        // of parameters missing.
-        // This is why we store the parameters in reverse order.
-        // We can just update missing to the number of args left!
+        // newf is a fully applied call. It isn't evaluated here: the
+        // re-entered apply's own loop evaluates it as its function, the
+        // same order as before, on the machine stack.
         child_at(root,0) = newf;
         root.n->missing = -nargs;
         debug(HIGH, "new apply node\n");
@@ -453,15 +468,12 @@ RICE_CC void apply_hnf(void)
 
         // We're still overapplied so try again
         rice_root = root;
-        apply_hnf();
-        debug(HIGH, "leaving apply\n");
-        debug_expr(HIGH, root);
-        return;
+        MUSTTAIL return apply_hnf();
     }
 }
 
 
-RICE_CC void forward_hnf(void) { field root = rice_root; (void)root; }
+static void forward_impl(void) { field root = rice_root; (void)root; }
 
 //////////////////////////////////////////////////////////////////////////////
 // code for backtracking
@@ -989,181 +1001,137 @@ void error(char* msg, union field n)
     exit(1);
 }
 
-// Reduce expr to normal form.
-// If it reduces to a free variable we fail.
-// If any child fails, the entire expression fails.
-//
-// FORWARD_TAG is chased into a *separate* local (`settled`), never by
-// reassigning `expr` itself, and everywhere below that needs "the real
-// value" (debug_expr, the box check, the child loop's own arity/
-// children) reads `settled` instead of `expr` -- but `fail(expr)`/
-// `fail_nf(e, expr)` still mutate `expr`, the address our own caller
-// (`nf_all`, or a parent ground_nf's own child loop) actually holds a
-// reference to. Skipping that distinction and just reassigning `expr`
-// while chasing looks equivalent but silently breaks `nf_all`'s own
-// "SOLUTION" check, which reads `TAG(expr)` directly without chasing
-// FORWARD first: a failure recorded on `settled` instead of `expr`
-// would leave `expr` looking like an ordinary FORWARD, not FAIL_TAG,
-// and print a bogus solution instead of reporting a failure. See
-// `nf`'s own doc comment below for why chasing needs a loop here at
-// all, not just why it needs to preserve `expr`.
-void ground_nf(union field expr)
+// Normal forms on the evaluation machine: nf (every reachable value
+// evaluated) and ground_nf (also fails on a free variable). Both are one
+// routine, nfx_k, with frame [expr, settled, state, mode]:
+//   expr     the node the caller holds. Failures are recorded on it, never
+//            on `settled`: nf_all reads TAG(expr) directly, so a failure
+//            left on a node further down a FORWARD chain would print as a
+//            bogus solution.
+//   settled  expr with FORWARD_TAG chased, evaluated to head normal form
+//   state    -1 while settling; otherwise the index of the child being
+//            normalized right now (children go last to first)
+//   mode     0 for nf, 1 for ground_nf
+// Each child gets its own frame, so depth follows the data on the machine
+// stack, not the C stack. nf and ground_nf below are C drivers for it.
+static const unsigned char nfx_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
+static RICE_CC void nfx_k(void);
+static const FrameInfo nfx_info =
+    { .code = nfx_k, .size = 4, .reps = nfx_reps, .name = "nf" };
+
+static inline void nfx_push(union field expr, bool ground)
 {
-    debug(LOW, "solving: ");
-    debug_expr(LOW, expr);
+    frame_push(&nfx_info);
+    SLOT(0) = expr;
+    SLOT(1) = expr;
+    SLOT(2).i = -1;
+    SLOT(3).i = ground;
+}
 
-    // If we're a function or choice, put ourselves in head normal form.
-    // HNF_SETTLE, not HNF: this is a genuine "I need a real value here"
-    // entry point (the FREE_TAG/box/arity checks right below all
-    // inspect expr's tag/fields directly), so under OPT_TAIL_JUMP a
-    // deferred tail call needs draining all the way, not just one hop.
-    if(TAG(expr) == CHOICE_TAG ||
-       (TAG(expr) == FUNCTION_TAG && expr.n->missing <= 0))
-    {
-        HNF_SETTLE(expr);
-    }
+static RICE_CC void nfx_k(void)
+{
+    union field expr    = SLOT(0);
+    union field settled = SLOT(1);
+    long        state   = SLOT(2).i;
+    bool        ground  = SLOT(3).i;
 
-    // Chase a FORWARD_TAG chain iteratively rather than falling into the
-    // child loop below, which would otherwise recurse into it (one real
-    // C call per hop, via the "child 0 of an arity-1 node" case) --
-    // FORWARD_TAG is the common case here even without OPT_TAIL_JUMP:
-    // choose() itself always resolves a CHOICE_TAG to FORWARD_TAG, so a
-    // long `?`/narrowing chain already hit this unbounded recursion
-    // before OPT_TAIL_JUMP's tail-call-via-collapse case made it worse.
-    // bindIO/cond (runtime/prelude.c) already use this same pattern, for
-    // the same reason.
-    union field settled = expr;
-    while(TAG(settled) == FORWARD_TAG)
+    if(state == -1)
     {
-        settled = child_at(settled, 0);
-        if(TAG(settled) == CHOICE_TAG ||
-           (TAG(settled) == FUNCTION_TAG && settled.n->missing <= 0))
+        debug(LOW, "solving: ");
+        debug_expr(LOW, expr);
+        while(true)
         {
-            HNF_SETTLE(settled);
-        }
-    }
-
-    // `settled` can come out of the chase above directly FAIL_TAG, not
-    // just one of its children (handled by the loop further down):
-    // HNF_SETTLE, just above, hands `settled` itself to arbitrary
-    // generated code as its own `root` argument, and that code is free
-    // to call fail(root) on it in place -- an incomplete case with no
-    // matching branch, reached right where a collapse point's chain of
-    // FORWARD_TAGs bottoms out (backtracking-optimizations.md's #4;
-    // src/scoped-retry-failures.tex's Figures 7-9 walk through exactly
-    // this). Without this check, that failure never reaches fail(expr):
-    // `expr` is left looking like an ordinary FORWARD chain, nf_all's own
-    // `TAG(expr) != FAIL_TAG` check (which does not chase FORWARD_TAG)
-    // reads that as a real solution, and print_final -- which *does*
-    // chase FORWARD_TAG -- prints the word "FAIL" as if it were the
-    // answer. Independent of, and found while investigating,
-    // backtracking-optimizations.md's #3 (scoped retry) -- reproduces
-    // with OPT_SCOPED_BACKTRACK=0 too.
-    //
-    // fail_nf, not a bare fail(expr): expr must be trailed (save_copy)
-    // before it's overwritten, exactly as the "a child failed" case just
-    // below already does, or nf_all's own `while(undo(0))` loop can never
-    // restore expr for the next attempt -- a first caught-here failure
-    // would silently make every later attempt see expr stuck at FAIL_TAG
-    // forever (caught by testing: without this, debug_repros/nested.curry
-    // regressed from "FAIL, 2" to "No solutions found").
-    if(TAG(settled) == FAIL_TAG)
-    {
-        fail_nf(settled, expr);
-        return;
-    }
-
-    // if we're a variable, then we can't reduce to ground normal from
-    if(TAG(settled) == FREE_TAG)
-    {
-        fail(expr);
-        return;
-    }
-
-    debug(LOW, "HNF: ");
-    debug_expr(LOW, settled);
-#if CHECK_LAYOUT
-    check_layout(settled, false, "ground_nf");
-#endif
-    // Raw children are already values, and a partial application's
-    // unfilled slots hold nothing: only filled pointer children can still
-    // need evaluating.
-    for(int i = filled_arity(settled)-1; i >= 0; i--)
-    {
-        if(child_rep(settled.n->symbol, i) != R_PTR)
-            continue;
-        union field e = child_at_v(settled,i);
-        if(e.n != NULL)
-        {
-            ground_nf(e);
-            if(TAG(e) == FAIL_TAG)
+            unsigned char t = TAG(settled);
+            if(t == CHOICE_TAG || (t == FUNCTION_TAG && settled.n->missing <= 0))
             {
+                SLOT(1) = settled;
+                rice_root = settled;
+                MUSTTAIL return settled.n->symbol->hnf();
+            }
+            if(t != FORWARD_TAG)
+                break;
+            settled = child_at(settled, 0);
+        }
+        SLOT(1) = settled;
+        if(TAG(settled) == FAIL_TAG)
+        {
+            frame_pop();
+            fail_nf(settled, expr);
+            RETURN();
+        }
+        if(ground && TAG(settled) == FREE_TAG)
+        {
+            frame_pop();
+            fail(expr);
+            RETURN();
+        }
+        debug(LOW, "HNF: ");
+        debug_expr(LOW, settled);
+#if CHECK_LAYOUT
+        check_layout(settled, false, ground ? "ground_nf" : "nf");
+#endif
+        state = filled_arity(settled);
+    }
+    else
+    {
+        // Child `state` has just been normalized.
+        union field e = child_at_v(settled, state);
+        if(TAG(e) == FAIL_TAG)
+        {
+            if(ground)
+            {
+                // ground_nf marks expr failed and goes on with the rest.
                 fail(expr);
+            }
+            else
+            {
+                frame_pop();
+                fail_nf(e, expr);
+                RETURN();
             }
         }
     }
+
+    // Next child to normalize: pointer children only (raw ones are values
+    // already); ground_nf also skips an empty slot.
+    for(long i = state - 1; i >= 0; i--)
+    {
+        if(child_rep(settled.n->symbol, (int)i) != R_PTR)
+            continue;
+        union field e = child_at_v(settled, i);
+        if(ground && e.n == NULL)
+            continue;
+        SLOT(2).i = i;
+        nfx_push(e, ground);
+        MUSTTAIL return nfx_k();
+    }
+    frame_pop();
+    RETURN();
 }
 
-// Compute expr to normal form.
-// If any child fails, we fail.
-//
-// See ground_nf's own doc comment just above for why this chases
-// FORWARD_TAG into a separate `settled` local rather than an unbounded
-// recursive child-walk, and why `fail_nf`'s root argument stays `expr`
-// throughout regardless.
+static RICE_CC void nf_code(void)
+{
+    nfx_push(rice_root, false);
+    MUSTTAIL return nfx_k();
+}
+
+static RICE_CC void ground_nf_code(void)
+{
+    nfx_push(rice_root, true);
+    MUSTTAIL return nfx_k();
+}
+
+// Reduce expr to normal form. If any reachable value fails, expr fails.
 void nf(union field expr)
 {
-    debug(LOW, "solving: ");
-    debug_expr(LOW, expr);
-    // if we're a constructor,
-    // then we don't need to put ourselves in head normal form
-    // HNF_SETTLE, not HNF -- same reasoning as ground_nf above.
-    if(expr.n->missing <= 0)
-    {
-        HNF_SETTLE(expr);
-    }
+    machine_run(nf_code, expr);
+}
 
-    union field settled = expr;
-    while(TAG(settled) == FORWARD_TAG)
-    {
-        settled = child_at(settled, 0);
-        if(settled.n->missing <= 0)
-        {
-            HNF_SETTLE(settled);
-        }
-    }
-
-    // See ground_nf's identical check, just above, for the full reasoning,
-    // including why this must be fail_nf (trails expr) and not a bare
-    // fail(expr).
-    if(TAG(settled) == FAIL_TAG)
-    {
-        fail_nf(settled, expr);
-        return;
-    }
-
-    debug(LOW, "HNF: ");
-    debug_expr(LOW, settled);
-
-#if CHECK_LAYOUT
-    check_layout(settled, false, "nf");
-#endif
-    // Same as ground_nf: only filled pointer children can need evaluating.
-    for(int i = filled_arity(settled)-1; i >= 0; i--)
-    {
-        if(child_rep(settled.n->symbol, i) != R_PTR)
-            continue;
-        union field e = child_at_v(settled,i);
-        nf(e);
-        // we failed a child, so we fail.
-        // put the current node on the stack, and fail it.
-        if(TAG(e) == FAIL_TAG)
-        {
-            fail_nf(e,expr);
-            // exit the loop.
-            i = 0;
-        }
-    }
+// Reduce expr to ground normal form: like nf, but a free variable
+// anywhere fails expr too.
+void ground_nf(union field expr)
+{
+    machine_run(ground_nf_code, expr);
 }
 
 // Runs `expr` (a standalone program's `main`, always `IO _`) to normal
@@ -1227,3 +1195,13 @@ void nf_all(union field expr)
     printf("total memory allocations: %ld\n", mem);
 }
 
+
+// ----------------------------------------------------------------------
+// Machine entry points (runtime/machine.h). Each runs its C-convention
+// implementation above, which may still evaluate subterms with nested
+// eval_hnf calls, then returns to the frame on top of the machine stack.
+// ----------------------------------------------------------------------
+
+RICE_CC void CTR_hnf(void) { CTR_impl(); RETURN(); }
+RICE_CC void choice_hnf(void) { choice_impl(); RETURN(); }
+RICE_CC void forward_hnf(void) { forward_impl(); RETURN(); }

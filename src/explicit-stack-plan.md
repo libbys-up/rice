@@ -342,6 +342,63 @@ Status:
   `RICE_CC void f_hnf(void)` and starts with `field root = rice_root;`.
   Calls set `rice_root` first (`hnfCall`, `TAIL_DISPATCH*`, `eval_hnf`).
   `C.cparams []` prints `(void)`.
+- **Stage 3 done 2026-10-07.** `ToC` lifts each `ICaseCons` into a case
+  block `f_hnf_case<k>` with a static `FrameInfo` (slots: root, scrutinee
+  as it began, current scrutinee, the branches' free variables, then raw
+  `nondet` and cutoff; reps from `frVars`). Entering a case pushes its
+  frame and jumps in. `FUNCTION_TAG` saves the loop state and jumps to the
+  scrutinee's code. Branch exits pop the frame first (`leave`; a frame is
+  present exactly when the retry context is `Just`). `setExpr` returns its
+  exit: `RETURN()` or a `musttail` jump for calls, `?` and `apply`. The
+  hand-written runtime `_hnf`s became C-convention `X_impl` bodies behind
+  machine-convention `X_hnf` wrappers (`impl(); RETURN();`). Their nested
+  evaluations, and `TAIL_DISPATCH*`, go through `eval_hnf` until stage 4.
+  `SCOPED_SAVE_CUTOFF`/`SCOPED_LOAD_CUTOFF` carry the cutoff through
+  frames. `regressions/deep_nontail_recursion` (`len` over a million
+  elements) passes on the default 8 MB C stack. `foldr (+) 0 [1..10^6]`
+  still overflows: its `(+)` goes through `apply_hnf`, which is still
+  C-nested.
+  `tests/run.sh --slow`: `reverse_prim` (262,144-deep non-tail reverse)
+  now runs, so it moved from XSLOW to SLOW with a golden. **`perf/tailsum`
+  regressed** (segfault). Its `sumTail $! (acc + n)` passes through
+  `$!` and `apply_hnf` on every iteration. Their calls back into machine
+  code are nested `eval_hnf`s now, where clang used to turn them into
+  sibling calls, so ten million iterations exhaust the C stack. Stage 4
+  makes both machine routines. (`cent`'s golden was re-recorded: it
+  predated the field-rep printing fix and listed constructor arguments
+  reversed. All 528 solutions are the same, in the same order.)
+- **Stage 4, first half, 2026-10-07.** On the machine: `apply` (frame
+  `[root, f, nondet]`; the over-applied case now stores the copied call as
+  the function child and re-enters `apply`, whose own loop evaluates it),
+  `$!`, `&`, `cond`, `ensureNotFree` (evaluate-and-resume via
+  `settle_step`/`EVAL_OR_CONTINUE`, frame `[root, x, nondet]`), `bindIO`
+  (settle frame, then a one-slot commit frame that runs `pop_to` once
+  `apply f m` is in head normal form), and `Prelude.apply` (a jump).
+  `$!!`/`$##` still force their argument with nested `nf`/`ground_nf`,
+  but their final apply is a jump. Now passing:
+  `regressions/deep_apply_foldr` (`foldr (+) 0 [1..10^6]`),
+  `regressions/deep_io_chain` (200,000-step right- and left-nested
+  chains), and `perf/tailsum` again. Still nested: `nf`/`ground_nf`, the
+  two unify routines, `prim_ioError`'s settle (it exits anyway), and
+  `toCStr`'s string settling.
+- **Stage 4, second half, 2026-10-07.** `nf`/`ground_nf` are one
+  machine routine (`nfx_k`, frame `[expr, settled, state, mode]`, one
+  frame per pending child, last child first as before). The C functions
+  `nf`/`ground_nf` are drivers for it through the new `machine_run(code,
+  x)` (`eval_hnf(x)` is `machine_run(x's hnf, x)`). `=:=`'s `unify_step`
+  needs no evaluation (both sides are already normal), so it uses an
+  explicit heap work list in the same depth-first, left-to-right order.
+  `=:<=` runs on the machine: one frame per pending pair
+  `[s, t, scruts, scrutt, phase, child, nondet, cutoff]`, the result
+  passed back through `lu_result`, and the scoped-backtracking retry
+  restarting the pair in place. New tests: `regressions/deep_nf`
+  (`$!!` on a million elements), `regressions/deep_unify` (`=:=` and
+  `=:<=` on million-element lists).
+
+  Noticed, not changed: `=:<=`'s settle loops evaluate only
+  `FUNCTION_TAG` and treat a `CHOICE_TAG` node as a value, where every
+  other settle loop resolves choices. That may be a latent bug, worth a
+  test of its own.
 
 1. **Machine core** (`runtime/machine.h`/`.c`): `Frame`, `FrameInfo`,
    the growable stack, `PUSH`/`POP`/`RETURN`, the sentinel and the C

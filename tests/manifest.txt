@@ -62,11 +62,11 @@ old_rice/benchmarks/tak.curry             SLOW  classic deep-recursion benchmark
 # non-tail-recursive C stack growth with no trampoline yet (STATUS.md's
 # Phase 1/2 notes), not a bug tests/run.sh's own crash-detection fix
 # (STATUS.md, 2026-09-11) should keep flagging as an unexpected regression.
-old_rice/suite/bf_test.curry              XSLOW  1,000,000-element list, non-tail-recursive foldr
-old_rice/benchmarks/buildFold.curry       XSLOW  1,000,000-element list, non-tail-recursive foldr
-old_rice/benchmarks/reverse_foldr.curry   XSLOW  262,144-element list, non-tail-recursive foldr
-old_rice/benchmarks/reverse_prim.curry    XSLOW  262,144-element list, non-tail-recursive reverse
-old_rice/benchmarks/sum_square.curry      XSLOW  200,000-element list, non-tail-recursive foldr
+old_rice/suite/bf_test.curry              SLOW   1,000,000-element list, non-tail-recursive foldr (used to overflow the C stack; runs on the evaluation machine)
+old_rice/benchmarks/buildFold.curry       SLOW   1,000,000-element list, non-tail-recursive foldr (used to overflow the C stack; runs on the evaluation machine)
+old_rice/benchmarks/reverse_foldr.curry   SLOW   262,144-element list, non-tail-recursive foldr (used to overflow the C stack; runs on the evaluation machine)
+old_rice/benchmarks/reverse_prim.curry    SLOW   262,144-element list, non-tail-recursive reverse (used to overflow the C stack; runs on the evaluation machine since the explicit stack)
+old_rice/benchmarks/sum_square.curry      SLOW   200,000-element list, non-tail-recursive foldr (used to overflow the C stack; runs on the evaluation machine)
 
 # queens_perm.curry originally enumerated all permutations of 9 elements
 # (362880, no pruning -- nf_all doesn't stop at the first solution) and

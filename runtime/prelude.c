@@ -141,36 +141,23 @@ char* toCStr(field string)
 // only which forcing function runs differs.
 // ----------------------------------------------------------------------
 
-static void strictApply(field root, void (*force)(field))
+// For $!! and $##: forces x with a nested call (nf/ground_nf aren't on
+// the machine yet), then returns whether root is now `apply f x`, ready
+// to be reduced with a tail jump; false means root failed.
+static bool strictApply(field root, void (*force)(field))
 {
     field f = child_at(root, 0);
     field x = child_at(root, 1);
-    // force(x) alone can leave x sitting at FORWARD_TAG unread: forward_hnf
-    // is a deliberate no-op (runtime.h's own note on it), so if x is
-    // already a forward -- e.g. the result of some earlier collapse point
-    // that wasn't safe to copy, the common case, since choose() itself
-    // always produces one -- a single force() call never even reaches
-    // whatever it points to, and the FAIL_TAG check right below would
-    // silently inspect the wrapper instead of the real value. settle()
-    // (runtime.h) is exactly this fix, factored out: chase, re-force,
-    // repeat, accumulating nondet along the way rather than just reading
-    // x's own -- necessary here specifically, not just belt-and-braces:
-    // x can settle on a node (e.g. a FAIL_TAG reached by chasing through
-    // a choice) whose own nondet flag was never itself touched by
-    // choose(), only the choice node's was.
     bool nondet = false;
     x = settle(x, &nondet, force);
     trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
     {
         fail(root);
+        return false;
     }
-    else
-    {
-        set_apply1(root, f, x);
-        rice_root = root;
-        apply_hnf();
-    }
+    set_apply1(root, f, x);
+    return true;
 }
 
 // HNF_SETTLE, not HNF: strictApply inspects x's tag directly right after
@@ -178,9 +165,58 @@ static void strictApply(field root, void (*force)(field))
 // the way here, not just one hop -- same reasoning as nf/ground_nf
 // (runtime.c), which is also why those two are safe to pass as `force`
 // for $!!/$## below without any change of their own.
-RICE_CC void Prelude___DL_EX_hnf(void)    { field root = rice_root; strictApply(root, HNF_SETTLE); }
-RICE_CC void Prelude___DL_EX_EX_hnf(void) { field root = rice_root; strictApply(root, nf); }
-RICE_CC void Prelude___DL_HT_HT_hnf(void) { field root = rice_root; strictApply(root, ground_nf); }
+// `f $! x`, on the machine: settle x (head normal form) with frame
+// [root, x, nondet], then reduce `apply f x` with a tail jump. The
+// evaluation of x lives on the machine stack, so a tail-recursive loop
+// written with $! (an accumulator) runs in constant C stack.
+static const unsigned char eval1_reps[] = { R_PTR, R_PTR, R_INT };
+static RICE_CC void strict_k(void);
+static const FrameInfo strict_info =
+    { .code = strict_k, .size = 3, .reps = eval1_reps, .name = "$!" };
+
+RICE_CC void Prelude___DL_EX_hnf(void)
+{
+    field root = rice_root;
+    frame_push(&strict_info);
+    SLOT(0) = root;
+    SLOT(1) = child_at(root, 1);
+    SLOT(2).i = false;
+    MUSTTAIL return strict_k();
+}
+
+static RICE_CC void strict_k(void)
+{
+    field root = SLOT(0);
+    field x = SLOT(1);
+    bool nondet = SLOT(2).i;
+    EVAL_OR_CONTINUE(x, 1, nondet, 2);
+    frame_pop();
+    trail_node(root, nondet);
+    if(x.n->symbol->tag == FAIL_TAG)
+    {
+        fail(root);
+        RETURN();
+    }
+    set_apply1(root, child_at(root, 0), x);
+    rice_root = root;
+    MUSTTAIL return apply_hnf();
+}
+RICE_CC void Prelude___DL_EX_EX_hnf(void)
+{
+    field root = rice_root;
+    if(!strictApply(root, nf))
+        RETURN();
+    rice_root = root;
+    MUSTTAIL return apply_hnf();
+}
+RICE_CC void Prelude___DL_HT_HT_hnf(void)
+{
+    field root = rice_root;
+    if(!strictApply(root, ground_nf))
+        RETURN();
+    rice_root = root;
+    MUSTTAIL return apply_hnf();
+}
 
 // ----------------------------------------------------------------------
 // IO plumbing: Rice's execution model has no separate IO-monad
@@ -192,69 +228,104 @@ RICE_CC void Prelude___DL_HT_HT_hnf(void) { field root = rice_root; strictApply(
 // build here).
 // ----------------------------------------------------------------------
 
+// bindIO :: IO a -> (a -> IO b) -> IO b -- m is the first parameter,
+// f the second, so (matching every other node here, and the "forward
+// storage" convention documented in runtime.h) m is child 0 and f is
+// child 1.
+// IO never backtracks: settling `m` (below) can dispatch a CHOICE_TAG
+// node reached along the way (e.g. `m` itself is `x ? y`, or forcing
+// one of its own arguments hits a choice somewhere inside), which
+// pushes a real frame onto bt_stack via choose(). But apply_hnf below
+// then overwrites `root` in place with f's result, permanently
+// orphaning that choice from the reachable graph -- nothing will ever
+// point back at it again. Left alone, the frame just sits on
+// bt_stack, and a later top-level `undo(0)` (nf_all's "try another
+// solution" loop) finds it, restores it, and re-runs nf() on a graph
+// that never actually changed -- observed directly as a spurious
+// second "SOLUTION: ()" for a plain `do`-block containing a `?`
+// (see the regression test this fix adds). Recording the cutoff
+// before doing any work and discarding (not restoring -- pop_to,
+// unlike undo, never writes rhs back into lhs) everything above it
+// once this call's whole dispatch (including running `f`, via
+// apply_hnf) is done commits every choice made along the way, so
+// nothing pushed during *this* bindIO call is ever visible to undo()
+// again. This is also the soundness bar `catch`'s planned cutoff-based
+// design needs bt_stack to actually meet.
+// A single HNF() call is deliberately non-looping (see runtime.h),
+// but an action built from further nested bindIO/`*>` calls (as any
+// multi-statement `do`-block, or `putStr` recursing over a string,
+// desugars to) WHNF-reduces one step at a time, landing on a FORWARD
+// pointing at the *next* still-unrun action rather than a finished
+// value -- the same reason apply_hnf's own dispatch loop chases
+// FORWARD_TAG itself instead of trusting a single HNF() call. Without
+// fully settling `m`, `f` (commonly `\_ -> next`, ignoring its
+// argument -- the ordinary shape for IO () sequencing) would receive
+// and discard that FORWARD reference, silencing every action still
+// pending inside it before its side effects ever ran. settle() (same
+// fix as strictApply/cond, above) does this: chases FORWARD_TAG and
+// redispatches with HNF_SETTLE on whatever that lands on, repeating
+// until `m` is genuinely settled -- forward_hnf being a no-op means
+// neither half alone is enough (a bare loop would stop cold on a
+// freshly-reached FUNCTION_TAG/CHOICE_TAG; a bare HNF_SETTLE never
+// even starts chasing an already-FORWARD_TAG m). No nondet tracking
+// needed here, unlike strictApply/cond: IO actions carry no
+// FAIL/backtracking-stack bookkeeping at all (this function's own
+// header comment), so there's nothing to trail either way.
+//
+// On the machine: bind_k settles m with frame [root, m, nondet, cutoff];
+// then the frame becomes a commit frame [cutoff] while `apply f m` runs,
+// and commit_k pops the trail back to the cutoff once root is in head
+// normal form -- the same "after the whole dispatch" point as before.
+static const unsigned char bind_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
+static const unsigned char commit_reps[] = { R_INT };
+static RICE_CC void bind_k(void);
+static RICE_CC void commit_k(void);
+static const FrameInfo bind_info =
+    { .code = bind_k, .size = 4, .reps = bind_reps, .name = "bindIO" };
+static const FrameInfo commit_info =
+    { .code = commit_k, .size = 1, .reps = commit_reps, .name = "bindIO commit" };
+
 RICE_CC void Prelude__bindIO_hnf(void)
 {
     field root = rice_root;
-    // bindIO :: IO a -> (a -> IO b) -> IO b -- m is the first parameter,
-    // f the second, so (matching every other node here, and the "forward
-    // storage" convention documented in runtime.h) m is child 0 and f is
-    // child 1.
-    field m = child_at(root, 0);
-    field f = child_at(root, 1);
-    // IO never backtracks: settling `m` (below) can dispatch a CHOICE_TAG
-    // node reached along the way (e.g. `m` itself is `x ? y`, or forcing
-    // one of its own arguments hits a choice somewhere inside), which
-    // pushes a real frame onto bt_stack via choose(). But apply_hnf below
-    // then overwrites `root` in place with f's result, permanently
-    // orphaning that choice from the reachable graph -- nothing will ever
-    // point back at it again. Left alone, the frame just sits on
-    // bt_stack, and a later top-level `undo(0)` (nf_all's "try another
-    // solution" loop) finds it, restores it, and re-runs nf() on a graph
-    // that never actually changed -- observed directly as a spurious
-    // second "SOLUTION: ()" for a plain `do`-block containing a `?`
-    // (see the regression test this fix adds). Recording the cutoff
-    // before doing any work and discarding (not restoring -- pop_to,
-    // unlike undo, never writes rhs back into lhs) everything above it
-    // once this call's whole dispatch (including running `f`, via
-    // apply_hnf) is done commits every choice made along the way, so
-    // nothing pushed during *this* bindIO call is ever visible to undo()
-    // again. This is also the soundness bar `catch`'s planned cutoff-based
-    // design needs bt_stack to actually meet.
-    // A single HNF() call is deliberately non-looping (see runtime.h),
-    // but an action built from further nested bindIO/`*>` calls (as any
-    // multi-statement `do`-block, or `putStr` recursing over a string,
-    // desugars to) WHNF-reduces one step at a time, landing on a FORWARD
-    // pointing at the *next* still-unrun action rather than a finished
-    // value -- the same reason apply_hnf's own dispatch loop chases
-    // FORWARD_TAG itself instead of trusting a single HNF() call. Without
-    // fully settling `m`, `f` (commonly `\_ -> next`, ignoring its
-    // argument -- the ordinary shape for IO () sequencing) would receive
-    // and discard that FORWARD reference, silencing every action still
-    // pending inside it before its side effects ever ran. settle() (same
-    // fix as strictApply/cond, above) does this: chases FORWARD_TAG and
-    // redispatches with HNF_SETTLE on whatever that lands on, repeating
-    // until `m` is genuinely settled -- forward_hnf being a no-op means
-    // neither half alone is enough (a bare loop would stop cold on a
-    // freshly-reached FUNCTION_TAG/CHOICE_TAG; a bare HNF_SETTLE never
-    // even starts chasing an already-FORWARD_TAG m). No nondet tracking
-    // needed here, unlike strictApply/cond: IO actions carry no
-    // FAIL/backtracking-stack bookkeeping at all (this function's own
-    // header comment), so there's nothing to trail either way.
-    int cutoff = size(bt_stack);
-    m = settle(m, NULL, HNF_SETTLE);
-    set_apply1(root, f, m);
-    rice_root = root;
-    apply_hnf();
-    pop_to(bt_stack, cutoff);
+    frame_push(&bind_info);
+    SLOT(0) = root;
+    SLOT(1) = child_at(root, 0);
+    SLOT(2).i = false;
+    SLOT(3).i = size(bt_stack);
+    MUSTTAIL return bind_k();
 }
 
-RICE_CC void Prelude__returnIO_hnf(void)
+static RICE_CC void bind_k(void)
+{
+    field root = SLOT(0);
+    field m = SLOT(1);
+    bool nondet = SLOT(2).i;
+    EVAL_OR_CONTINUE(m, 1, nondet, 2);
+    long cutoff = SLOT(3).i;
+    frame_pop();
+    frame_push(&commit_info);
+    SLOT(0).i = cutoff;
+    set_apply1(root, child_at(root, 1), m);
+    rice_root = root;
+    MUSTTAIL return apply_hnf();
+}
+
+static RICE_CC void commit_k(void)
+{
+    long cutoff = SLOT(0).i;
+    frame_pop();
+    pop_to(bt_stack, (int)cutoff);
+    RETURN();
+}
+
+static void Prelude__returnIO_impl(void)
 {
     field root = rice_root;
     set_forward(root, child_at(root, 0));
 }
 
-RICE_CC void Prelude__getChar_hnf(void)
+static void Prelude__getChar_impl(void)
 {
     field root = rice_root;
     int c = getchar();
@@ -270,7 +341,7 @@ RICE_CC void Prelude__getChar_hnf(void)
 // above) has to control the order of. Argument is the raw (unboxed)
 // char replace_Prim.curry's own `putChar` already unwrapped via a
 // `Char c'` case match before ever calling this.
-RICE_CC void Prelude__prim_USputChar_hnf(void)
+static void Prelude__prim_USputChar_impl(void)
 {
     field root = rice_root;
     putchar((int)child_at_c(root, 0));
@@ -283,7 +354,7 @@ RICE_CC void Prelude__prim_USputChar_hnf(void)
 // helper directly rather than a raw exit().
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__prim_USerror_hnf(void)
+static void Prelude__prim_USerror_impl(void)
 {
     field root = rice_root;
     char* msg = toCStr(child_at(root, 0));
@@ -295,7 +366,7 @@ RICE_CC void Prelude__prim_USerror_hnf(void)
 // (the inverse direction) is not implemented yet.
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__prim_USshowIntLiteral_hnf(void)
+static void Prelude__prim_USshowIntLiteral_impl(void)
 {
     field root = rice_root;
     char buf[32];
@@ -303,7 +374,7 @@ RICE_CC void Prelude__prim_USshowIntLiteral_hnf(void)
     overwrite_root(root, toCurryString(buf));
 }
 
-RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(void)
+static void Prelude__prim_USshowFloatLiteral_impl(void)
 {
     field root = rice_root;
     char buf[64];
@@ -311,7 +382,7 @@ RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(void)
     overwrite_root(root, toCurryString(buf));
 }
 
-RICE_CC void Prelude__prim_USshowCharLiteral_hnf(void)
+static void Prelude__prim_USshowCharLiteral_impl(void)
 {
     field root = rice_root;
     char c = (char)child_at_c(root, 0);
@@ -324,7 +395,7 @@ RICE_CC void Prelude__prim_USshowCharLiteral_hnf(void)
     overwrite_root(root, toCurryString(buf));
 }
 
-RICE_CC void Prelude__prim_USshowStringLiteral_hnf(void)
+static void Prelude__prim_USshowStringLiteral_impl(void)
 {
     field root = rice_root;
     char* s = toCStr(child_at(root, 0));
@@ -369,29 +440,40 @@ RICE_CC void Prelude__prim_USshowStringLiteral_hnf(void)
 // strictApply, cond, bindIO, prim_ioError already do) is exactly this
 // fix, factored out: chase, re-force, repeat, *returning* the settled
 // value instead of relying on in-place mutation the caller can't see.
+// `x & y`: settle x (frame [root, x, nondet]); fail if it failed,
+// False if it's False, otherwise root becomes y.
+static RICE_CC void and_k(void);
+static const FrameInfo and_info =
+    { .code = and_k, .size = 3, .reps = eval1_reps, .name = "&" };
+
 RICE_CC void Prelude___AN_hnf(void)
 {
     field root = rice_root;
-    field x = child_at(root, 0);
-    field y = child_at(root, 1);
-    bool nondet = false;
-    x = settle(x, &nondet, HNF_SETTLE);
-    trail_node(root, nondet);
-    if(x.n->symbol->tag == FAIL_TAG)
-    {
-        fail(root);
-    }
-    else if(x.n->symbol->tag == Prelude__False_TAG)
-    {
-        set_Prelude__False(root, 0);
-    }
-    else
-    {
-        set_forward(root, y);
-    }
+    frame_push(&and_info);
+    SLOT(0) = root;
+    SLOT(1) = child_at(root, 0);
+    SLOT(2).i = false;
+    MUSTTAIL return and_k();
 }
 
-RICE_CC void Prelude__failed_hnf(void)
+static RICE_CC void and_k(void)
+{
+    field root = SLOT(0);
+    field x = SLOT(1);
+    bool nondet = SLOT(2).i;
+    EVAL_OR_CONTINUE(x, 1, nondet, 2);
+    frame_pop();
+    trail_node(root, nondet);
+    if(x.n->symbol->tag == FAIL_TAG)
+        fail(root);
+    else if(x.n->symbol->tag == Prelude__False_TAG)
+        set_Prelude__False(root, 0);
+    else
+        set_forward(root, child_at(root, 1));
+    RETURN();
+}
+
+static void Prelude__failed_impl(void)
 {
     field root = rice_root;
     trail_node(root, false);
@@ -412,48 +494,45 @@ RICE_CC void Prelude__failed_hnf(void)
 // (&) above, just returning y instead of a boolean.
 // ----------------------------------------------------------------------
 
+// Prelude.apply f x: rewrite root to the runtime's own apply node and
+// reduce it with a tail jump.
 RICE_CC void Prelude__apply_hnf(void)
 {
     field root = rice_root;
-    field f = child_at(root, 0);
-    field x = child_at(root, 1);
-    set_apply1(root, f, x);
+    set_apply1(root, child_at(root, 0), child_at(root, 1));
     rice_root = root;
-    apply_hnf();
+    MUSTTAIL return apply_hnf();
 }
+
+// `cond c x` (a guarded rule): settle c (frame [root, c, nondet]);
+// root becomes x if c is True, and fails otherwise.
+static RICE_CC void cond_k(void);
+static const FrameInfo cond_info =
+    { .code = cond_k, .size = 3, .reps = eval1_reps, .name = "cond" };
 
 RICE_CC void Prelude__cond_hnf(void)
 {
     field root = rice_root;
-    field c = child_at(root, 0);
-    field x = child_at(root, 1);
-    // settle(), not a single HNF_SETTLE + ad-hoc chase: c's tag is
-    // inspected directly below (True/FAIL/else), and the old chase loop
-    // here only ever followed FORWARD_TAG without ever redispatching what
-    // it landed on (forward_hnf is a no-op, but so is stopping cold on a
-    // freshly-reached, still-unresolved CHOICE_TAG or FUNCTION_TAG) --
-    // confirmed empirically: `cond (False ? True) 99` gave "No solutions
-    // found" instead of "SOLUTION: 99", since neither alternative of the
-    // choice ever actually got resolved via choose(), only chased past.
-    // Same fix as strictApply just above: settle() chases and re-forces
-    // until c is genuinely a value, accumulating nondet at every hop
-    // (not just c's own final flag -- see strictApply's own note on why
-    // that's not equivalent).
-    bool nondet = false;
-    c = settle(c, &nondet, HNF_SETTLE);
+    frame_push(&cond_info);
+    SLOT(0) = root;
+    SLOT(1) = child_at(root, 0);
+    SLOT(2).i = false;
+    MUSTTAIL return cond_k();
+}
+
+static RICE_CC void cond_k(void)
+{
+    field root = SLOT(0);
+    field c = SLOT(1);
+    bool nondet = SLOT(2).i;
+    EVAL_OR_CONTINUE(c, 1, nondet, 2);
+    frame_pop();
     trail_node(root, nondet);
-    if(c.n->symbol->tag == FAIL_TAG)
-    {
-        fail(root);
-    }
-    else if(c.n->symbol->tag == Prelude__True_TAG)
-    {
-        set_forward(root, x);
-    }
+    if(c.n->symbol->tag == Prelude__True_TAG)
+        set_forward(root, child_at(root, 1));
     else
-    {
         fail(root);
-    }
+    RETURN();
 }
 
 // ----------------------------------------------------------------------
@@ -466,7 +545,7 @@ RICE_CC void Prelude__cond_hnf(void)
 // raw message.
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__prim_USioError_hnf(void)
+static void Prelude__prim_USioError_impl(void)
 {
     field root = rice_root;
     field err = child_at(root, 0);
@@ -525,56 +604,81 @@ static bool raw_equal(field a, field b, FieldRep r)
     return false;
 }
 
-static bool unify_step(field x, field y, bool* nondet)
+// One pending comparison: a pointer pair (rep R_PTR) to unify, or a raw
+// pair to compare by value.
+typedef struct { field x, y; FieldRep rep; } UnifyPair;
+
+static bool unify_step(field x0, field y0, bool* nondet)
 {
-    *nondet |= x.n->nondet || y.n->nondet;
-    while(x.n->symbol->tag == FORWARD_TAG) { x = child_at(x, 0); *nondet |= x.n->nondet; }
-    while(y.n->symbol->tag == FORWARD_TAG) { y = child_at(y, 0); *nondet |= y.n->nondet; }
-
-    // one side failed, we can't unify
-    if(x.n->symbol->tag == FAIL_TAG || y.n->symbol->tag == FAIL_TAG)
+    // Depth-first, children left to right -- the same order the recursive
+    // version visited them in, so bindings happen in the same order. An
+    // explicit work list keeps deep data (a long list) off the C stack.
+    size_t cap = 64, n = 0;
+    UnifyPair* work = (UnifyPair*)malloc(cap * sizeof(UnifyPair));
+    work[n++] = (UnifyPair){ x0, y0, R_PTR };
+    bool ok = true;
+    while(ok && n > 0)
     {
-        return false;
-    }
-
-    //one side if free, set it to point to the other side
-    if(x.n->symbol->tag == FREE_TAG)
-    {
-        *nondet = true;
-        save_copy(x);
-        set_forward(x, y);
-        return true;
-    }
-    if(y.n->symbol->tag == FREE_TAG)
-    {
-        *nondet = true;
-        save_copy(y);
-        set_forward(y, x);
-        return true;
-    }
-
-    // the constructors don't match, we fail.
-    if(x.n->symbol->tag != y.n->symbol->tag)
-    {
-        return false;
-    }
-
-    // Unify the children: raw ones (a box's value, say) by comparing
-    // values, pointer ones recursively.
-    for(unsigned int i = 0; i < x.n->symbol->arity; i++)
-    {
-        FieldRep r = child_rep(x.n->symbol, i);
-        bool ok = r == R_PTR ? unify_step(child_at_v(x, i), child_at_v(y, i), nondet)
-                             : raw_equal(child_at_v(x, i), child_at_v(y, i), r);
-        if(!ok)
+        UnifyPair p = work[--n];
+        if(p.rep != R_PTR)
         {
-            return false;
+            ok = raw_equal(p.x, p.y, p.rep);
+            continue;
+        }
+        field x = p.x, y = p.y;
+        *nondet |= x.n->nondet || y.n->nondet;
+        while(x.n->symbol->tag == FORWARD_TAG) { x = child_at(x, 0); *nondet |= x.n->nondet; }
+        while(y.n->symbol->tag == FORWARD_TAG) { y = child_at(y, 0); *nondet |= y.n->nondet; }
+
+        // one side failed, we can't unify
+        if(x.n->symbol->tag == FAIL_TAG || y.n->symbol->tag == FAIL_TAG)
+        {
+            ok = false;
+            continue;
+        }
+
+        //one side if free, set it to point to the other side
+        if(x.n->symbol->tag == FREE_TAG)
+        {
+            *nondet = true;
+            save_copy(x);
+            set_forward(x, y);
+            continue;
+        }
+        if(y.n->symbol->tag == FREE_TAG)
+        {
+            *nondet = true;
+            save_copy(y);
+            set_forward(y, x);
+            continue;
+        }
+
+        // the constructors don't match, we fail.
+        if(x.n->symbol->tag != y.n->symbol->tag)
+        {
+            ok = false;
+            continue;
+        }
+
+        // Children, pushed last first so child 0 is unified first.
+        unsigned int arity = x.n->symbol->arity;
+        if(n + arity > cap)
+        {
+            while(n + arity > cap)
+                cap *= 2;
+            work = (UnifyPair*)realloc(work, cap * sizeof(UnifyPair));
+        }
+        for(unsigned int i = arity; i-- > 0; )
+        {
+            work[n++] = (UnifyPair){ child_at_v(x, i), child_at_v(y, i),
+                                     child_rep(x.n->symbol, i) };
         }
     }
-    return true;
+    free(work);
+    return ok;
 }
 
-RICE_CC void Prelude__constrEq_hnf(void)
+static void Prelude__constrEq_impl(void)
 {
     field root = rice_root;
     field x = child_at(root, 0);
@@ -610,158 +714,204 @@ RICE_CC void Prelude__constrEq_hnf(void)
 
 typedef struct { bool ok; bool nondet; } LazyResult;
 
-static LazyResult lazy_unify_step(field s, field t)
+// On the machine, each pending pair (s, t) has a frame
+//   [s, t, scruts, scrutt, phase, child, nondet, cutoff]
+// phase 0 settles s, phase 1 settles t (narrowing a free t to s's shape),
+// phase 2 unifies the children one at a time: a pointer child pushes its
+// own pair frame and jumps, and its result comes back in lu_result. A pair
+// that finishes pops its frame, sets lu_result, and returns to its parent.
+// Under OPT_SCOPED_BACKTRACK a failing pair retries from the start if
+// undo() finds a choice made since the pair began (cutoff).
+static LazyResult lu_result;
+
+static const unsigned char lu_reps[] =
+    { R_PTR, R_PTR, R_PTR, R_PTR, R_INT, R_INT, R_INT, R_INT };
+static RICE_CC void lu_k(void);
+static const FrameInfo lu_info =
+    { .code = lu_k, .size = 8, .reps = lu_reps, .name = "=:<= pair" };
+
+static inline void lu_push(field s, field t)
 {
-    int n = size(bt_stack);
-    (void)n; // only read under `#if OPT_SCOPED_BACKTRACK` below -- unused
-             // (and otherwise -Werror'd as such) when that's off.
-    bool nondet = false;
-
-    field scruts = s;
-
-    // put s into head normal form
-    // FAIL: backtrack and return (probably wrong)
-    // FREE: forward to t
-    // FORWARD: follow chain
-    // FUN: call HNF
-    // otherwise we've hit a constructor
-    // FORWARD
-    bool done = false;
-    while(!done)
-    {
-        nondet |= scruts.n->nondet;
-        if(scruts.n->symbol->tag == FAIL_TAG)
-        {
-            // If we're doing early backtracking,
-            // try undoing a choice we've made here.
-            // If we haven't made a choice since starting, then we're stuck
-            // so give up and return.
-            #if OPT_SCOPED_BACKTRACK
-            if(undo(n))
-            {
-                // tail call to lazy_unify_step.  We're done with out current call.
-                return lazy_unify_step(s, t);
-            }
-            #endif
-            return (LazyResult){ false, nondet };
-        }
-        // free variable: Save a copy, so we can undo the choice.
-        else if(scruts.n->symbol->tag == FREE_TAG)
-        {
-            // The binding is undone on backtracking, so the caller's root
-            // must be trailed too (same as the narrowing branch below).
-            save_copy(scruts);
-            set_forward(scruts, t);
-            return (LazyResult){ true, true };
-        }
-        else if(scruts.n->symbol->tag == FORWARD_TAG)
-        {
-            scruts = child_at(scruts, 0);
-        }
-        // Evaluate s to HNF.
-        // Even though this will give us a fully evaluated s,
-        // it might be a forward, or fail, so we need to keep looping.
-        else if(scruts.n->symbol->tag == FUNCTION_TAG)
-        {
-            HNF(scruts);
-        }
-        else
-        {
-            done = true;
-        }
-    }
-
-    // Exactly the same as evaluating s.
-    // this could maybe be its own function?
-    field scrutt = t;
-    done = false;
-    while(!done)
-    {
-        nondet |= scrutt.n->nondet;
-        if(scrutt.n->symbol->tag == FAIL_TAG)
-        {
-            #if OPT_SCOPED_BACKTRACK
-            if(undo(n))
-            {
-                // Note: This might also backtrack s too.
-                // I'm like 90% sure that's what we want.
-                // but I wan't to write it down so I remember.
-                return lazy_unify_step(s, t);
-            }
-            #endif
-            return (LazyResult){ false, nondet };
-        }
-        else if(scrutt.n->symbol->tag == FREE_TAG)
-        {
-            save_copy(scrutt);
-            set_free_constructor(scrutt, scruts);
-            nondet = true;
-        }
-        else if(scrutt.n->symbol->tag == FORWARD_TAG)
-        {
-            scrutt = child_at(scrutt, 0);
-        }
-        else if(scrutt.n->symbol->tag == FUNCTION_TAG)
-        {
-            HNF(scrutt);
-        }
-        else
-        {
-            done = true;
-        }
-    }
-
-    // Not the same constructor, we fail.
-    // possibly early backtrack.
-    if(scruts.n->symbol->tag != scrutt.n->symbol->tag)
-    {
-        #if OPT_SCOPED_BACKTRACK
-        if(undo(n)) 
-        {
-            return lazy_unify_step(s, t);
-        }
-        #endif
-        return (LazyResult){ false, nondet };
-    }
-    // make sure all the children unify: raw ones by value (the type
-    // checker guarantees both sides hold the same primitive), pointer ones
-    // recursively.
-    for(unsigned int i = 0; i < scruts.n->symbol->arity; i++)
-    {
-        FieldRep rep = child_rep(scruts.n->symbol, i);
-        LazyResult r = rep == R_PTR
-            ? lazy_unify_step(child_at_v(scruts, i), child_at_v(scrutt, i))
-            : (LazyResult){ raw_equal(child_at_v(scruts, i), child_at_v(scrutt, i), rep), false };
-        nondet |= r.nondet;
-        if(!r.ok)
-        {
-            #if OPT_SCOPED_BACKTRACK
-            if(undo(n))
-            {
-                return lazy_unify_step(s, t);
-            }
-            #endif
-            return (LazyResult){ false, nondet };
-        }
-    }
-    return (LazyResult){ true, nondet };
+    frame_push(&lu_info);
+    SLOT(0) = s;
+    SLOT(1) = t;
+    SLOT(2) = s;
+    SLOT(3) = t;
+    SLOT(4).i = 0;
+    SLOT(5).i = 0;
+    SLOT(6).i = false;
+    SLOT(7).i = size(bt_stack);
 }
+
+static RICE_CC void lu_k(void)
+{
+    field scruts = SLOT(2);
+    field scrutt = SLOT(3);
+    long phase = SLOT(4).i;
+    bool nondet = SLOT(6).i;
+    int n = (int)SLOT(7).i;
+    (void)n; // only read under OPT_SCOPED_BACKTRACK
+    bool ok = true;
+
+    if(phase == 0)
+    {
+        while(true)
+        {
+            nondet |= scruts.n->nondet;
+            unsigned char tg = scruts.n->symbol->tag;
+            if(tg == FAIL_TAG)
+            {
+                ok = false;
+                goto finish;
+            }
+            else if(tg == FREE_TAG)
+            {
+                save_copy(scruts);
+                set_forward(scruts, SLOT(1));
+                frame_pop();
+                lu_result = (LazyResult){ true, true };
+                RETURN();
+            }
+            else if(tg == FORWARD_TAG)
+            {
+                scruts = child_at(scruts, 0);
+            }
+            else if(tg == FUNCTION_TAG)
+            {
+                SLOT(2) = scruts;
+                SLOT(6).i = nondet;
+                rice_root = scruts;
+                MUSTTAIL return scruts.n->symbol->hnf();
+            }
+            else
+            {
+                break;
+            }
+        }
+        SLOT(2) = scruts;
+        phase = 1;
+        SLOT(4).i = 1;
+    }
+
+    if(phase == 1)
+    {
+        while(true)
+        {
+            nondet |= scrutt.n->nondet;
+            unsigned char tg = scrutt.n->symbol->tag;
+            if(tg == FAIL_TAG)
+            {
+                ok = false;
+                goto finish;
+            }
+            else if(tg == FREE_TAG)
+            {
+                save_copy(scrutt);
+                set_free_constructor(scrutt, scruts);
+                nondet = true;
+            }
+            else if(tg == FORWARD_TAG)
+            {
+                scrutt = child_at(scrutt, 0);
+            }
+            else if(tg == FUNCTION_TAG)
+            {
+                SLOT(3) = scrutt;
+                SLOT(6).i = nondet;
+                rice_root = scrutt;
+                MUSTTAIL return scrutt.n->symbol->hnf();
+            }
+            else
+            {
+                break;
+            }
+        }
+        SLOT(3) = scrutt;
+        if(scruts.n->symbol->tag != scrutt.n->symbol->tag)
+        {
+            ok = false;
+            goto finish;
+        }
+        phase = 2;
+        SLOT(4).i = 2;
+        SLOT(5).i = 0;
+    }
+    else
+    {
+        // phase 2, resumed: child SLOT(5) has just been unified.
+        nondet |= lu_result.nondet;
+        if(!lu_result.ok)
+        {
+            ok = false;
+            goto finish;
+        }
+        SLOT(5).i++;
+    }
+
+    // phase 2: the remaining children, in order.
+    for(long i = SLOT(5).i; i < (long)scruts.n->symbol->arity; i++)
+    {
+        FieldRep rep = child_rep(scruts.n->symbol, (int)i);
+        if(rep != R_PTR)
+        {
+            if(!raw_equal(child_at_v(scruts, i), child_at_v(scrutt, i), rep))
+            {
+                ok = false;
+                goto finish;
+            }
+            continue;
+        }
+        SLOT(5).i = i;
+        SLOT(6).i = nondet;
+        lu_push(child_at_v(scruts, i), child_at_v(scrutt, i));
+        MUSTTAIL return lu_k();
+    }
+
+finish:
+    #if OPT_SCOPED_BACKTRACK
+    if(!ok && undo(n))
+    {
+        // Retry the pair from scratch, as the recursive version did.
+        SLOT(2) = SLOT(0);
+        SLOT(3) = SLOT(1);
+        SLOT(4).i = 0;
+        SLOT(5).i = 0;
+        SLOT(6).i = false;
+        SLOT(7).i = size(bt_stack);
+        MUSTTAIL return lu_k();
+    }
+    #endif
+    frame_pop();
+    lu_result = (LazyResult){ ok, nondet };
+    RETURN();
+}
+
+// x =:<= y: unify the pair on the machine (lu_k), then nseq_k sets root
+// from the result.
+static const unsigned char nseq_reps[] = { R_PTR };
+static RICE_CC void nseq_k(void);
+static const FrameInfo nseq_info =
+    { .code = nseq_k, .size = 1, .reps = nseq_reps, .name = "=:<=" };
 
 RICE_CC void Prelude__nonstrictEq_hnf(void)
 {
     field root = rice_root;
-    field x = child_at(root, 0);
-    field y = child_at(root, 1);
-    LazyResult r = lazy_unify_step(x, y);
-    trail_node(root, r.nondet);
-    if(r.ok)
-    {
+    frame_push(&nseq_info);
+    SLOT(0) = root;
+    lu_push(child_at(root, 0), child_at(root, 1));
+    MUSTTAIL return lu_k();
+}
+
+static RICE_CC void nseq_k(void)
+{
+    field root = SLOT(0);
+    frame_pop();
+    trail_node(root, lu_result.nondet);
+    if(lu_result.ok)
         set_Prelude__True(root, 0);
-    }
     else
-    {
         fail(root);
-    }
+    RETURN();
 }
 
 // ----------------------------------------------------------------------
@@ -794,13 +944,31 @@ RICE_CC void Prelude__nonstrictEq_hnf(void)
 // caller only needed "some value to force", wrong if it specifically
 // needed the result guaranteed non-free; no way to tell which from
 // here.
+// ensureNotFree x: settle x (frame [root, x, nondet]); root forwards to it.
+static RICE_CC void notfree_k(void);
+static const FrameInfo notfree_info =
+    { .code = notfree_k, .size = 3, .reps = eval1_reps, .name = "ensureNotFree" };
+
 RICE_CC void Prelude__ensureNotFree_hnf(void)
 {
     field root = rice_root;
-    field x = child_at(root, 0);
-    x = settle(x, NULL, HNF_SETTLE);
+    frame_push(&notfree_info);
+    SLOT(0) = root;
+    SLOT(1) = child_at(root, 0);
+    SLOT(2).i = false;
+    MUSTTAIL return notfree_k();
+}
+
+static RICE_CC void notfree_k(void)
+{
+    field root = SLOT(0);
+    field x = SLOT(1);
+    bool nondet = SLOT(2).i;
+    EVAL_OR_CONTINUE(x, 1, nondet, 2);
+    frame_pop();
     trail_node(root, false);
     set_forward(root, x);
+    RETURN();
 }
 
 // ----------------------------------------------------------------------
@@ -848,7 +1016,7 @@ static char* readWholeFile(const char* path, const char* what)
     return buf;
 }
 
-RICE_CC void Prelude__prim_USreadFile_hnf(void)
+static void Prelude__prim_USreadFile_impl(void)
 {
     field root = rice_root;
     char* path = toCStr(child_at(root, 0));
@@ -882,15 +1050,15 @@ static void writeToFile(field root, char mode)
     set_Prelude___LP_RP(root, 0);
 }
 
-RICE_CC void Prelude__prim_USwriteFile_hnf(void)  { field root = rice_root; writeToFile(root, 'w'); }
-RICE_CC void Prelude__prim_USappendFile_hnf(void) { field root = rice_root; writeToFile(root, 'a'); }
+static void Prelude__prim_USwriteFile_impl(void)  { field root = rice_root; writeToFile(root, 'w'); }
+static void Prelude__prim_USappendFile_impl(void) { field root = rice_root; writeToFile(root, 'a'); }
 
 // ----------------------------------------------------------------------
 // Deferred stubs: crash the program rather than silently fail.
 // Real exception handling, and the parsing direction of literal show/read.
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__catch_hnf(void) { field root = rice_root; error("catch not implemented yet", root); }
+static void Prelude__catch_impl(void) { field root = rice_root; error("catch not implemented yet", root); }
 
 // ----------------------------------------------------------------------
 // read*Literal: the inverse of show*Literal above -- each is a `ReadS a`
@@ -1023,7 +1191,7 @@ static field oneParse(field value, const char* rest)
     return make_Prelude___CO(pair, make_Prelude___LB_RB(0), 0);
 }
 
-RICE_CC void Prelude__prim_USreadNatLiteral_hnf(void)
+static void Prelude__prim_USreadNatLiteral_impl(void)
 {
     field root = rice_root;
     char* s = toCStr(child_at(root, 0));
@@ -1043,7 +1211,7 @@ RICE_CC void Prelude__prim_USreadNatLiteral_hnf(void)
     free(s);
 }
 
-RICE_CC void Prelude__prim_USreadCharLiteral_hnf(void)
+static void Prelude__prim_USreadCharLiteral_impl(void)
 {
     field root = rice_root;
     char* s = toCStr(child_at(root, 0));
@@ -1055,7 +1223,7 @@ RICE_CC void Prelude__prim_USreadCharLiteral_hnf(void)
     free(s);
 }
 
-RICE_CC void Prelude__prim_USreadStringLiteral_hnf(void)
+static void Prelude__prim_USreadStringLiteral_impl(void)
 {
     field root = rice_root;
     char* s = toCStr(child_at(root, 0));
@@ -1066,7 +1234,7 @@ RICE_CC void Prelude__prim_USreadStringLiteral_hnf(void)
     free(s);
 }
 
-RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(void)
+static void Prelude__prim_USreadFloatLiteral_impl(void)
 {
     field root = rice_root;
     char* s = toCStr(child_at(root, 0));
@@ -1077,3 +1245,29 @@ RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(void)
     overwrite_root(root, result);
     free(s);
 }
+
+// ----------------------------------------------------------------------
+// Machine entry points (runtime/machine.h). Each runs its C-convention
+// implementation above, which may still evaluate subterms with nested
+// eval_hnf calls, then returns to the frame on top of the machine stack.
+// ----------------------------------------------------------------------
+
+RICE_CC void Prelude__returnIO_hnf(void) { Prelude__returnIO_impl(); RETURN(); }
+RICE_CC void Prelude__getChar_hnf(void) { Prelude__getChar_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USputChar_hnf(void) { Prelude__prim_USputChar_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USerror_hnf(void) { Prelude__prim_USerror_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USshowIntLiteral_hnf(void) { Prelude__prim_USshowIntLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(void) { Prelude__prim_USshowFloatLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USshowCharLiteral_hnf(void) { Prelude__prim_USshowCharLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USshowStringLiteral_hnf(void) { Prelude__prim_USshowStringLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__failed_hnf(void) { Prelude__failed_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USioError_hnf(void) { Prelude__prim_USioError_impl(); RETURN(); }
+RICE_CC void Prelude__constrEq_hnf(void) { Prelude__constrEq_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USreadFile_hnf(void) { Prelude__prim_USreadFile_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USwriteFile_hnf(void) { Prelude__prim_USwriteFile_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USappendFile_hnf(void) { Prelude__prim_USappendFile_impl(); RETURN(); }
+RICE_CC void Prelude__catch_hnf(void) { Prelude__catch_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USreadNatLiteral_hnf(void) { Prelude__prim_USreadNatLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USreadCharLiteral_hnf(void) { Prelude__prim_USreadCharLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USreadStringLiteral_hnf(void) { Prelude__prim_USreadStringLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(void) { Prelude__prim_USreadFloatLiteral_impl(); RETURN(); }

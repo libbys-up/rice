@@ -175,7 +175,7 @@ static inline void HNF(union field root)
 #if OPT_TAIL_JUMP
 #define TAIL_DISPATCH(hnf_fn, root) ((void)0)
 #else
-#define TAIL_DISPATCH(hnf_fn, root) (rice_root = (root), hnf_fn())
+#define TAIL_DISPATCH(hnf_fn, root) eval_hnf(root)
 #endif
 
 // Same idea as TAIL_DISPATCH, for the two spots (apply_hnf, runtime.c)
@@ -186,7 +186,7 @@ static inline void HNF(union field root)
 #if OPT_TAIL_JUMP
 #define TAIL_DISPATCH_PTR(root) ((void)0)
 #else
-#define TAIL_DISPATCH_PTR(root) (rice_root = (root), (root).n->symbol->hnf())
+#define TAIL_DISPATCH_PTR(root) eval_hnf(root)
 #endif
 
 // The other half of #2: a genuine trampoline *consumer*, for the places
@@ -279,6 +279,38 @@ static inline field settle(union field root, bool* nondet, void (*force)(field))
     }
 }
 
+// settle() for machine code: chases FORWARD_TAG in *x, accumulating
+// nondet the same way settle() does, and reports whether *x is settled
+// (anything but FUNCTION_TAG/CHOICE_TAG). When it isn't, the caller saves
+// its state in its frame and jumps to x's code instead of forcing it with
+// a nested call -- EVAL_OR_CONTINUE below.
+static inline bool settle_step(union field* x, bool* nondet)
+{
+    while (true)
+    {
+        *nondet |= x->n->nondet;
+        unsigned char t = TAG(*x);
+        if (t == FORWARD_TAG)
+            *x = child_at((*x), 0);
+        else
+            return t != FUNCTION_TAG && t != CHOICE_TAG;
+    }
+}
+
+// The evaluate-and-resume step of a runtime routine written for the
+// machine (src/explicit-stack-plan.md): if `x` still needs evaluating,
+// save it and `nd` in the routine's frame (slots xslot/ndslot) and jump to
+// x's code, which returns into the routine's continuation -- whose first
+// statement is this same macro. Falls through once x is settled.
+#define EVAL_OR_CONTINUE(x, xslot, nd, ndslot)          \
+    if (!settle_step(&(x), &(nd)))                     \
+    {                                                  \
+        SLOT(xslot) = (x);                             \
+        SLOT(ndslot).i = (nd);                         \
+        rice_root = (x);                               \
+        MUSTTAIL return (x).n->symbol->hnf();          \
+    }
+
 // backtracking-optimizations.md's #3, generalized from lazy_unify_step
 // (prelude.c, the original, hand-written instance of this pattern) to
 // every generated `_hnf` function: SCOPED_CUTOFF() records the trail
@@ -314,6 +346,10 @@ static inline field settle(union field root, bool* nondet, void (*force)(field))
 // scoped retry isn't wired up there yet.
 #if OPT_SCOPED_BACKTRACK
 #define SCOPED_CUTOFF() int _cutoff = size(bt_stack)
+// A case block (Rice.Codegen.C.ToC) keeps its function's cutoff in a raw
+// slot of its frame, since it runs as its own C function.
+#define SCOPED_SAVE_CUTOFF(slot) ((slot).i = _cutoff)
+#define SCOPED_LOAD_CUTOFF(slot) int _cutoff = (int)(slot).i
 #define SCOPED_RETRY(scrutinee_var, orig_var) \
   if (undo(_cutoff)) { scrutinee_var = orig_var; continue; }
 // SCOPED_RESAVE(nondet_var, root_node): used right after a SCOPED_RETRY that
@@ -329,6 +365,8 @@ static inline field settle(union field root, bool* nondet, void (*force)(field))
 #define SCOPED_RESAVE(nondet_var, root_node) trail_node(root_node, nondet_var)
 #else
 #define SCOPED_CUTOFF() ((void)0)
+#define SCOPED_SAVE_CUTOFF(slot) ((void)0)
+#define SCOPED_LOAD_CUTOFF(slot) ((void)0)
 #define SCOPED_RETRY(scrutinee_var, orig_var) ((void)0)
 #define SCOPED_RESAVE(nondet_var, root_node) ((void)0)
 #endif
@@ -570,11 +608,11 @@ static Symbol backup_symbol  = { .tag = FAIL_TAG,     .arity = 0, .name = "RET",
 // So, I just want these to pass through to apply_hnf.
 // This is actually a potential chance for optimization in the future.
 __attribute__((always_inline)) 
-static inline RICE_CC void apply1_hnf(void) {apply_hnf();}
+static inline RICE_CC void apply1_hnf(void) { MUSTTAIL return apply_hnf(); }
 __attribute__((always_inline)) 
-static inline RICE_CC void apply2_hnf(void) {apply_hnf();}
+static inline RICE_CC void apply2_hnf(void) { MUSTTAIL return apply_hnf(); }
 __attribute__((always_inline)) 
-static inline RICE_CC void apply3_hnf(void) {apply_hnf();}
+static inline RICE_CC void apply3_hnf(void) { MUSTTAIL return apply_hnf(); }
 
 
 __attribute__((always_inline)) 

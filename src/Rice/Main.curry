@@ -197,8 +197,9 @@ run graph rootModule opts (importedFT, impFcys, impReps) mname =
          when (SPrintICurry `elem` opts) (showICurry icy)
          createDirectoryIfMissing True (takeDirectory hPath)
          timeIO timing (mname ++ ": write .h/.c") $ do
-           writeFile hPath (pPrint (toHeader (addLiftedReps ownReps icy) icy))
-           writeFile cPath (pPrint (toSource icy))
+           let codeReps = addLiftedReps ownReps icy
+           writeFile hPath (pPrint (toHeader codeReps icy))
+           writeFile cPath (pPrint (toSource codeReps icy))
          return newFcy
        else timeIO timing (mname ++ ": readCachedFcy") (readCachedFcy mname)
      return (ft, fcy : impFcys, reps)

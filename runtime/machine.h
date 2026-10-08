@@ -98,6 +98,11 @@ static inline ptrdiff_t machine_depth(void)
 // machine's own evaluation doesn't use the C stack.
 void eval_hnf(union field x);
 
+// Runs machine code `code` with rice_root = x until it returns, the same
+// way eval_hnf runs x's own code. eval_hnf(x) is
+// machine_run(x.n->symbol->hnf, x).
+void machine_run(Code code, union field x);
+
 // Prints the frame stack, top first, for --debug.
 void print_machine_stack(void);
 

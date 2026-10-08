@@ -60,13 +60,13 @@ void machine_grow(size_t words)
     rice_sp = (Frame*)(hi - used);
 }
 
-void eval_hnf(union field x)
+void machine_run(Code code, union field x)
 {
     union field saved_root = rice_root;
     frame_push(&sentinel_info);
     ptrdiff_t depth = machine_depth();
     rice_root = x;
-    x.n->symbol->hnf();
+    code();
     if(machine_depth() != depth || rice_sp->info != &sentinel_info)
     {
         fprintf(stderr, "Error: evaluation stack unbalanced after evaluating %s\n",
@@ -75,6 +75,11 @@ void eval_hnf(union field x)
     }
     frame_pop();
     rice_root = saved_root;
+}
+
+void eval_hnf(union field x)
+{
+    machine_run(x.n->symbol->hnf, x);
 }
 
 void print_machine_stack(void)
