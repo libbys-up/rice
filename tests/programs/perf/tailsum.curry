@@ -1,9 +1,9 @@
--- A deep, genuinely tail-recursive benchmark, specifically to give
--- backtracking-optimizations.md's #2 (OPT_TAIL_JUMP) a fair benchmark
--- data point -- none of old_rice's own SLOW-tagged benchmarks recurse
--- this way (they're combinatorial-search/large-data-structure heavy, not
--- deep-tail-call heavy), so tests/bench.sh's sweep would otherwise never
--- exercise this flag at all.
+-- A deep, genuinely tail-recursive benchmark: ten million iterations
+-- that must run in constant C stack (every tail call, including the
+-- one through `$!`, is a musttail jump on the evaluation machine). None
+-- of old_rice's own SLOW-tagged benchmarks recurse this way (they're
+-- combinatorial-search/large-data-structure heavy, not deep-tail-call
+-- heavy).
 --
 -- Two things this file went through, both worth leaving documented
 -- rather than silently fixed, since they're easy to hit again:
@@ -19,10 +19,8 @@
 --    it's forced. Without `$!`, `acc + n` stays an unevaluated thunk,
 --    and each call nests another one inside it; forcing the whole
 --    chain at the very end needs genuine non-tail recursion (one C
---    stack frame per nested thunk) regardless of anything about
---    sumTail's own tail-call dispatch -- a real bug this file hit
---    once (crashed identically whether OPT_TAIL_JUMP was on or off,
---    since the crash had nothing to do with sumTail's own call chain).
+--    stack frame per nested thunk, before the evaluation machine)
+--    regardless of anything about sumTail's own tail-call dispatch.
 --    `$!` forces the addition *before* building the next call, so the
 --    accumulator never accumulates a thunk chain in the first place.
 sumTail :: Int -> Int -> Int

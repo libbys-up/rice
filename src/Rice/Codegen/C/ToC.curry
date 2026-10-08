@@ -38,7 +38,7 @@
 --- @author Steven Libby
 ------------------------------------------------------------------------------
 
-module Rice.Codegen.C.ToC (toSource, writeMain, StackSize (..), MainMode (..)) where
+module Rice.Codegen.C.ToC (toSource, writeMain, MainMode (..)) where
 
 import Data.Maybe (isJust)
 import Data.Char (ord)
@@ -67,25 +67,6 @@ toSource reps (IProg name imps _ allFuns) = vcat $
 
 isApply :: IQName -> Bool
 isApply (m,n,_) = m == "Prelude" && n == "apply"
-
---- What (if anything) generated `main()` should do about the process's
---- own stack `rlimit` before running anything else -- see `writeMain`,
---- and `Rice.Main`'s `--stack-size` flag that produces this. A stopgap
---- for genuine, non-tail recursion (`foldr` over a long list, etc.) that
---- `OPT_TAIL_JUMP`'s trampoline can't help with -- a real fix needs the
---- graph-reduction machine to stop using the C stack at all (planned
---- alongside an eventual LLVM backend); this just buys headroom within
---- whatever the OS's own hard limit allows in the meantime.
---- `StackSizeMax` requests exactly that hard limit -- runtime.c's
---- `set_stack_size_max` reads it at run time, since it varies by
---- machine and isn't known at compile time.
-data StackSize = StackSizeMB Int | StackSizeMax
- deriving (Show, Eq)
-
-stackSizeStmt :: Maybe StackSize -> [CStmt]
-stackSizeStmt Nothing                = []
-stackSizeStmt (Just StackSizeMax)    = [scall "set_stack_size_max" []]
-stackSizeStmt (Just (StackSizeMB n)) = [scall "set_stack_size" [int (n * 1024 * 1024)]]
 
 --- Which top-level driver generated `main()` should run the root module's
 --- `main` through -- see `writeMain`, and `Rice.Main`'s `--interactive`
@@ -122,8 +103,8 @@ mainDriverCall Interactive = scall "nf_all" [root]
 --- `writeMain`'s `Num[256]`/`makeCrap`, needing a whole-program
 --- `DataTable` this pass doesn't build) -- Phase 1 deliberately excludes
 --- it, see `STATUS.md`.
-writeMain :: String -> Maybe StackSize -> MainMode -> Doc
-writeMain rootModule stackSize mode = vcat
+writeMain :: String -> MainMode -> Doc
+writeMain rootModule mode = vcat
   [ text "#include <stdio.h>"
   , cinclude "node"
   , cinclude "stack"
@@ -135,11 +116,6 @@ writeMain rootModule stackSize mode = vcat
   , text "unsigned long mem;"
   , text ""
   , cfunDefn "int" "main" [] $
-      -- Deliberately the very first thing main() does, before any other
-      -- setup: raising the stack rlimit only helps if it happens before
-      -- anything (bt_stack/memory_init, then the program itself) has
-      -- started using the stack.
-      stackSizeStmt stackSize ++
       [ text "bt_stack" <+> equals <+> call "new_stack" [] <> semi
       , scall "memory_init" []
       , scall "machine_init" []
@@ -205,9 +181,8 @@ funSource reps (IFunction name _ _ _ body) = case body of
 --- cutoff is recorded once, here, before any of its own body could have
 --- pushed anything -- SCOPED_CUTOFF() (runtime.h) is a no-op declaration
 --- when OPT_SCOPED_BACKTRACK is off, so this line is always emitted,
---- identically, regardless of the flag (matching TAIL_DISPATCH's own
---- convention: codegen never forks on an OPT_* flag, only the macros'
---- own expansion does).
+--- identically, regardless of the flag: codegen never forks on an OPT_*
+--- flag, only the macros' own expansion does.
 showBody :: Gen -> IBlock -> G [CStmt]
 showBody gen block = do
   b <- showBlock gen block

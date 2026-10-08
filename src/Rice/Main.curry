@@ -38,7 +38,7 @@ import Rice.Codegen.FieldReps (FieldRepTable, emptyReps, fieldRepTable, interfac
                                 addLiftedReps,
                                 unionReps, lintFieldReps, showFieldReps)
 import Rice.Codegen.C.ToH (toHeader)
-import Rice.Codegen.C.ToC (toSource, writeMain, StackSize (..), MainMode (..))
+import Rice.Codegen.C.ToC (toSource, writeMain, MainMode (..))
 import Rice.Diagnostics (timeIO, timePure)
 
 main :: IO ()
@@ -237,7 +237,7 @@ buildExecutable opts modNames = do
   (_, rootHPath) <- cPaths rootModule
   let mainPath = takeDirectory rootHPath </> "main.c"
   writeFileIfChanged mainPath
-    (pPrint (writeMain rootModule (stackSizeOpt opts) (mainModeOpt opts)))
+    (pPrint (writeMain rootModule (mainModeOpt opts)))
   let cFiles  = map fst cHs
       incDirs = nub (map (takeDirectory . snd) cHs)
       cc      = if SUseGCC `elem` opts then "gcc" else "clang"
@@ -376,7 +376,7 @@ data CompilerOptions = SPrintFlatCurry | SPrintReplace  |
                        STraceOptimize   | SForceRecompile |
                        SForceRecompileModule String |
                        SCompilerTime    | SHelp     |
-                       SStackSize StackSize | SInteractive
+                       SInteractive
  deriving(Show, Eq)
 
 --- Parses --debug's argument into an SDebug level: runtime/debug.h's
@@ -394,27 +394,6 @@ parseDebugLevel s = SDebug $ case map toLower s of
     [(n, "")] | n >= 0 -> n
     _ -> error ("--debug: expected low|med|high or a non-negative " ++
                 "integer, got " ++ show s)
-
---- Parses --stack-size's argument: max|unlimited (case-insensitive --
---- request whatever the OS's own hard limit allows; see runtime.c's
---- set_stack_size_max), or a positive integer number of megabytes.
-parseStackSize :: String -> CompilerOptions
-parseStackSize s = SStackSize $ case map toLower s of
-  "max"       -> StackSizeMax
-  "unlimited" -> StackSizeMax
-  other       -> case reads other of
-    [(n, "")] | n > 0 -> StackSizeMB n
-    _ -> error ("--stack-size: expected max|unlimited or a positive " ++
-                "integer (megabytes), got " ++ show s)
-
---- The stack-size setting `buildExecutable` passes to `writeMain` --
---- last `--stack-size` wins if given more than once, matching --debug's
---- own convention; `Nothing` (no flag at all) leaves generated `main()`
---- exactly as it was before this flag existed, no rlimit call at all.
-stackSizeOpt :: [CompilerOptions] -> Maybe StackSize
-stackSizeOpt opts = case [s | SStackSize s <- opts] of
-  [] -> Nothing
-  ss -> Just (last ss)
 
 --- Which top-level driver `writeMain` (Rice.Codegen.C.ToC) generates --
 --- `Standalone` (the default, no flag needed) for an ordinary program's
@@ -446,8 +425,6 @@ optDescrs = [
                                                      "build with runtime debug output (low|med|high, or a number; see runtime/debug.h)",
   Option []  ["cflags"]     (ReqArg SCFlags "FLAGS")
                                                      "extra, space-separated flags passed straight to the C compiler (e.g. \"-DOPT_EPOCH_TRAIL=1\"; repeatable)",
-  Option []  ["stack-size"] (ReqArg parseStackSize "SIZE")
-                                                     "raise the built program's own stack limit at startup, up to the OS's hard cap (megabytes, or max|unlimited; helps genuine non-tail recursion OPT_TAIL_JUMP can't -- see backtracking-optimizations.md)",
   Option "o" ["optimize"]   (NoArg SPrintOptimize)  "print FlatCurry after optimize, before ANF",
   Option []  ["trace-optimize"] (NoArg STraceOptimize) "print every optimizer rewrite step, per function (for testing)",
   Option []  ["no-optimize"](NoArg SNoOptimize)     "skip Rice.Optimize.Inline (for testing)",

@@ -80,7 +80,7 @@ static void overwrite_root(field root, field value)
 // checking for that).
 static field settleStringNode(field s, char* c)
 {
-    field node = settle(s, NULL, HNF_SETTLE);
+    field node = settle(s, NULL, eval_hnf);
     if(node.n->symbol->tag != Prelude___LB_RB_TAG)
     {
         // `head` is a *reference to the boxed Char node* (child_at(node,0)
@@ -94,7 +94,7 @@ static field settleStringNode(field s, char* c)
         // directly (reading the Node* itself reinterpreted as a raw
         // char), caught by an actual `read` round-trip test producing
         // garbage/truncated output instead of a real parse.
-        field head = settle(child_at(node, 0), NULL, HNF_SETTLE);
+        field head = settle(child_at(node, 0), NULL, eval_hnf);
         *c = (char)child_at_c(head, 0);
     }
     return node;
@@ -160,11 +160,6 @@ static bool strictApply(field root, void (*force)(field))
     return true;
 }
 
-// HNF_SETTLE, not HNF: strictApply inspects x's tag directly right after
-// forcing it, so a deferred tail call (OPT_TAIL_JUMP) needs draining all
-// the way here, not just one hop -- same reasoning as nf/ground_nf
-// (runtime.c), which is also why those two are safe to pass as `force`
-// for $!!/$## below without any change of their own.
 // `f $! x`, on the machine: settle x (head normal form) with frame
 // [root, x, nondet], then reduce `apply f x` with a tail jump. The
 // evaluation of x lives on the machine stack, so a tail-recursive loop
@@ -263,10 +258,10 @@ RICE_CC void Prelude___DL_HT_HT_hnf(void)
 // and discard that FORWARD reference, silencing every action still
 // pending inside it before its side effects ever ran. settle() (same
 // fix as strictApply/cond, above) does this: chases FORWARD_TAG and
-// redispatches with HNF_SETTLE on whatever that lands on, repeating
+// re-evaluates whatever that lands on, repeating
 // until `m` is genuinely settled -- forward_hnf being a no-op means
 // neither half alone is enough (a bare loop would stop cold on a
-// freshly-reached FUNCTION_TAG/CHOICE_TAG; a bare HNF_SETTLE never
+// freshly-reached FUNCTION_TAG/CHOICE_TAG; a bare evaluation never
 // even starts chasing an already-FORWARD_TAG m). No nondet tracking
 // needed here, unlike strictApply/cond: IO actions carry no
 // FAIL/backtracking-stack bookkeeping at all (this function's own
@@ -549,7 +544,7 @@ static void Prelude__prim_USioError_impl(void)
 {
     field root = rice_root;
     field err = child_at(root, 0);
-    // settle(), not a bare HNF_SETTLE: child_at(err,0) right below needs
+    // settle(), not a bare evaluation: child_at(err,0) right below needs
     // err genuinely resolved to a real IOError constructor, not a still-
     // pending tail call or (forward_hnf being a no-op) a FORWARD_TAG left
     // over from wherever err came from -- reading child_at(0) off a
@@ -561,7 +556,7 @@ static void Prelude__prim_USioError_impl(void)
     // and consistent with strictApply/cond's own fix, just above. No
     // nondet tracking needed: error() below is exit(1), never backtracked
     // into, so there's nothing to trail.
-    err = settle(err, NULL, HNF_SETTLE);
+    err = settle(err, NULL, eval_hnf);
     char* msg = toCStr(child_at(err, 0));
     error(msg, root);
 }

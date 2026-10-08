@@ -3,8 +3,6 @@
 #include<stdlib.h>
 #include<string.h>
 #include<stdint.h>
-#include<errno.h>
-#include<sys/resource.h>
 #include "runtime.h"
 
 #include "node.h"
@@ -20,69 +18,6 @@
 // unlike bt_stack/mem) since nothing about it is per-program: every build
 // links this file exactly once.
 unsigned int current_epoch = 0;
-
-// The --stack-size flag (Rice.Main/Rice.Codegen.C.ToC's writeMain): a
-// stopgap for genuine non-tail recursion (foldr over a long list, etc.)
-// that OPT_TAIL_JUMP's trampoline can't help with, since it isn't a tail
-// call to begin with -- the C call stack genuinely grows one frame per
-// element. Only ever raises the *current process's own* limit (never
-// lowers it, and a request no bigger than what's already in effect is a
-// silent no-op) -- this is not the same as a user running `ulimit -s`
-// themselves beforehand, which nothing here requires. Bounded by
-// whatever the OS's own hard limit (RLIM_MAX) currently allows: on
-// Linux that's commonly unlimited or very large; on macOS it defaults to
-// 64MB regardless of how much RAM is actually available, confirmed by
-// testing on this platform -- `set_stack_size_max` reads the real hard
-// limit at run time rather than hardcoding either number, since it
-// isn't known at compile time and varies by machine either way.
-// A failure here is a warning, not fatal: running with less stack than
-// asked for is still better than refusing to run the program at all.
-static void raise_stack_limit(rlim_t want)
-{
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_STACK, &rl) != 0)
-    {
-        fprintf(stderr, "warning: --stack-size: getrlimit failed (%s)\n", strerror(errno));
-        return;
-    }
-    if (rl.rlim_max != RLIM_INFINITY && want > rl.rlim_max)
-    {
-        // Asking setrlimit for more than the hard limit doesn't clamp
-        // to it -- confirmed by testing: it fails outright (EINVAL) and
-        // leaves the limit completely unchanged. Clamping here first is
-        // what makes "give me as much as you'll allow" actually work.
-        want = rl.rlim_max;
-    }
-    if (want <= rl.rlim_cur)
-    {
-        return;
-    }
-    rl.rlim_cur = want;
-    if (setrlimit(RLIMIT_STACK, &rl) != 0)
-    {
-        fprintf(stderr,
-                "warning: --stack-size: couldn't raise the stack limit "
-                "(wanted %llu bytes: %s) -- continuing with the current limit\n",
-                (unsigned long long)want, strerror(errno));
-    }
-}
-
-void set_stack_size(unsigned long bytes)
-{
-    raise_stack_limit((rlim_t)bytes);
-}
-
-void set_stack_size_max(void)
-{
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_STACK, &rl) != 0)
-    {
-        fprintf(stderr, "warning: --stack-size=max: getrlimit failed (%s)\n", strerror(errno));
-        return;
-    }
-    raise_stack_limit(rl.rlim_max);
-}
-
 
 static void CTR_impl(void)
 {
@@ -399,14 +334,8 @@ static RICE_CC void apply_k(void)
         {
             debug(HIGH, "before HNF call\n");
             debug_expr(HIGH, root);
-            // backtracking-optimizations.md's #2: root is now a genuine
-            // tail call (root itself, freshly built as f's own shape,
-            // fully applied) -- under OPT_TAIL_JUMP this returns with
-            // root left as-is instead of dispatching it here, same as a
-            // generated function body's own tail call; apply_hnf's own
-            // caller was reached via the identical TAIL_DISPATCH
-            // mechanism (ToC.curry's `hnfCall "apply"`), so whatever's
-            // waiting further up the chain is what redispatches this.
+            // root is now a fully applied call: reduce it with a tail
+            // jump, which returns wherever apply would have.
             rice_root = root;
             MUSTTAIL return root.n->symbol->hnf();
         }
@@ -450,14 +379,6 @@ static RICE_CC void apply_k(void)
         debug(HIGH, "fully applied child\n");
         debug_expr(HIGH, newf);
         newf.n->missing = 0;
-        // Same reasoning as the under/fully-applied branch's TAIL_DISPATCH_PTR
-        // above -- and safe to defer here even though the very next lines
-        // read `newf` again (`child_at(root,0) = newf`, `apply_hnf(root)`
-        // below): a deferred `newf` left as FUNCTION_TAG gets picked back
-        // up correctly by apply_hnf's own re-entry, since its `f`-
-        // resolution loop (the `while(f.n->missing <= 0)` loop above)
-        // already re-tests TAG(f) every iteration regardless of whether
-        // this call actually ran.
         // newf is a fully applied call. It isn't evaluated here: the
         // re-entered apply's own loop evaluates it as its function, the
         // same order as before, on the machine stack.

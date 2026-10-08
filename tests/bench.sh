@@ -104,20 +104,18 @@ mkdir -p "$SCRATCH"
 RESULTS="$SCRATCH/results.tsv"
 : > "$RESULTS"
 
-# --- the OPT_* combos to compare. A true naive floor (all five off),
+# --- the OPT_* combos to compare. A true naive floor (all four off),
 # then one config per optimization -- naive plus *just that one* flag on
 # -- isolating each optimization's own individual contribution against
-# the same floor, rather than the previous cumulative/exploratory set
-# (which only isolated #4/#5 this way, defaulted #1/#3 on throughout,
-# and had no row at all for #2/OPT_TAIL_JUMP -- added along with the
-# trampoline implementation, after this script was first written).
+# the same floor. (#2, eager tail dispatch, has no switch any more: on
+# the evaluation machine every tail call is a musttail jump.)
 # `default` (today's shipped defaults: #1/#3 on, rest off) and `all-on`
 # (everything except #1: #1+#5 is unsound without a write barrier, and
 # runtime.h refuses to build it -- opt_conflict.md) stay as bonus
 # reference points, not part of the pairwise isolation
-# itself. Not a full 2^5 factorial -- backtracking-optimizations.md's own
+# itself. Not a full 2^4 factorial -- backtracking-optimizations.md's own
 # "Orthogonality" notes already argue the five don't interact in ways a
-# factorial sweep would need to expose, and 32 configs would multiply
+# factorial sweep would need to expose, and 16 configs would multiply
 # this script's already-long runtime for little extra signal.
 CONFIG_NAMES=()
 CONFIG_FLAGS=()
@@ -128,17 +126,16 @@ if [ -n "$CONFIGS_OVERRIDE" ]; then
     CONFIG_FLAGS+=("${e#*=}")
   done
 else
-  NAIVE="-DOPT_NONDET_TRAIL=0 -DOPT_TAIL_JUMP=0 -DOPT_SCOPED_BACKTRACK=0 -DOPT_COPY_COLLAPSE=0 -DOPT_EPOCH_TRAIL=0"
-  CONFIG_NAMES=(naive +nondet-trail +tail-jump +scoped-backtrack +copy-collapse +epoch-trail default all-on)
+  NAIVE="-DOPT_NONDET_TRAIL=0 -DOPT_SCOPED_BACKTRACK=0 -DOPT_COPY_COLLAPSE=0 -DOPT_EPOCH_TRAIL=0"
+  CONFIG_NAMES=(naive +nondet-trail +scoped-backtrack +copy-collapse +epoch-trail default all-on)
   CONFIG_FLAGS=(
     "$NAIVE"
     "$NAIVE -DOPT_NONDET_TRAIL=1"
-    "$NAIVE -DOPT_TAIL_JUMP=1"
     "$NAIVE -DOPT_SCOPED_BACKTRACK=1"
     "$NAIVE -DOPT_COPY_COLLAPSE=1"
     "$NAIVE -DOPT_EPOCH_TRAIL=1"
     ""
-    "-DOPT_NONDET_TRAIL=0 -DOPT_TAIL_JUMP=1 -DOPT_SCOPED_BACKTRACK=1 -DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1"
+    "-DOPT_NONDET_TRAIL=0 -DOPT_SCOPED_BACKTRACK=1 -DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1"
   )
 fi
 

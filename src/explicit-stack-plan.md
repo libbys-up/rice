@@ -399,6 +399,11 @@ Status:
   `FUNCTION_TAG` and treat a `CHOICE_TAG` node as a value, where every
   other settle loop resolves choices. That may be a latent bug, worth a
   test of its own.
+- **Stage 5 (cleanup) done 2026-10-08.** Removed `OPT_TAIL_JUMP`,
+  `TAIL_DISPATCH`/`TAIL_DISPATCH_PTR` and `HNF_SETTLE` (C code that needs a
+  settled value calls `eval_hnf`), `--stack-size` with
+  `set_stack_size`/`raise_stack_limit`, and `StackSize` from `ToC`/`Main`.
+  `tests/bench.sh` has no tail-jump configuration any more.
 
 1. **Machine core** (`runtime/machine.h`/`.c`): `Frame`, `FrameInfo`,
    the growable stack, `PUSH`/`POP`/`RETURN`, the sentinel and the C

@@ -121,17 +121,12 @@ static inline void HNF(union field root)
 // command, e.g. -DOPT_EPOCH_TRAIL=0) rather than one ordinal level, since
 // they're mostly independent of each other and need a real factorial
 // comparison, not a linear one. Defaults are the validated-sound,
-// safe-to-ship set; #2/#4/#5 default off because they aren't validated yet
-// (#2 -- OPT_TAIL_JUMP -- is implemented, just not yet measured for either
-// throughput or the specific thing it exists to guarantee: that a deep
-// tail-recursive Curry function genuinely can't overflow the C stack,
-// independent of what the C compiler's own optimizer decides to do).
-// #5 additionally requires #1 off -- see the #error below.
+// safe-to-ship set; #4/#5 default off because they aren't validated yet.
+// #5 additionally requires #1 off -- see the #error below. (#2, eager tail
+// dispatch, has no switch: on the evaluation machine every tail call is a
+// guaranteed musttail jump.)
 #ifndef OPT_NONDET_TRAIL
 #define OPT_NONDET_TRAIL 1
-#endif
-#ifndef OPT_TAIL_JUMP
-#define OPT_TAIL_JUMP 0
 #endif
 #ifndef OPT_SCOPED_BACKTRACK
 #define OPT_SCOPED_BACKTRACK 1
@@ -152,88 +147,14 @@ static inline void HNF(union field root)
 #error "OPT_EPOCH_TRAIL is unsound with OPT_NONDET_TRAIL (no write barrier yet); add -DOPT_NONDET_TRAIL=0"
 #endif
 
-// backtracking-optimizations.md's #2, the trampolined half: `Rice.Codegen.
-// C.ToC`'s generated `_hnf` bodies call this (as `TAIL_DISPATCH(g_hnf,
-// root)`) instead of writing `g_hnf(root)` directly, right after building
-// the call node for a tail-position call to `g` -- the *only* difference
-// between the two `#if` branches is whether that call actually happens
-// here or is left for something else to notice `root` is still
-// FUNCTION_TAG and redispatch. Off (default): identical to today,
-// `hnf_fn(root)` runs immediately, same as `HNF` -- correct only as far as
-// the C compiler actually eliminates the resulting sibling call, exactly
-// the caveat backtracking-optimizations.md's #2 section describes. On:
-// does nothing here at all -- `root` is left exactly as `set_X` built it
-// (a fresh FUNCTION_TAG node, `hnf_fn` is that node's own `symbol->hnf`),
-// and it's up to whichever loop consumes `root` next to call it -- see
-// HNF_SETTLE below for genuine "I need a real value here" consumers, and
-// this file's own top and `apply_hnf` (runtime.c) for the two other
-// places already structured as a loop that catches this for free.
-// `hnf_fn` is always a statically-known function name here (Rice's own
-// codegen already computed it, at Curry-compile time, as the string
-// `mangle(f) ++ "_hnf"`), so no token-pasting is needed -- just pass it
-// straight through.
-#if OPT_TAIL_JUMP
-#define TAIL_DISPATCH(hnf_fn, root) ((void)0)
-#else
-#define TAIL_DISPATCH(hnf_fn, root) eval_hnf(root)
-#endif
-
-// Same idea as TAIL_DISPATCH, for the two spots (apply_hnf, runtime.c)
-// where the next dispatch isn't a statically-known function -- it's
-// whatever `root.n->symbol->hnf` happens to be once `apply_hnf` has
-// resolved `root` down to a fully-applied function -- so this takes the
-// node itself rather than a function name.
-#if OPT_TAIL_JUMP
-#define TAIL_DISPATCH_PTR(root) ((void)0)
-#else
-#define TAIL_DISPATCH_PTR(root) eval_hnf(root)
-#endif
-
-// The other half of #2: a genuine trampoline *consumer*, for the places
-// that need `root` actually settled right here -- not just "whatever's
-// cheapest" -- because they're about to inspect its tag or fields
-// directly (nf/ground_nf, and a handful of hand-written Prelude
-// primitives -- bindIO, cond, prim_ioError, strictApply's `$!` case --
-// that do the same). Repeatedly redispatches while `root` is still a
-// pending call rather than trusting one `.hnf` call to reach WHNF, the
-// way a plain `HNF` does. This is deliberately narrower than making HNF
-// itself loop: HNF's own doc comment above explains why it must stay a
-// single, non-looping call for FORWARD_TAG chains (nf_all's backtracking
-// loop depends on that); this only ever loops on FUNCTION_TAG, never
-// chases FORWARD_TAG, so it doesn't reopen that problem. When
-// OPT_TAIL_JUMP is off this degenerates to exactly one call, identical to
-// HNF.
-//
-// do/while, not while: `.hnf` must run at least once unconditionally,
-// same as HNF itself -- most callers here don't already know root is
-// FUNCTION_TAG (unlike apply_hnf's own resolution loop, which does).
-// A plain `while(TAG(root)==FUNCTION_TAG)` skips the call entirely for
-// anything that *isn't* already FUNCTION_TAG -- CHOICE_TAG above all,
-// which is the normal case for a value nf/ground_nf haven't looked at
-// yet -- silently never running choose() at all. Caught by actually
-// running the test suite under OPT_TAIL_JUMP=1: `main = A ? B ? C`
-// printed the raw, never-`choose()`d `?(B, A)` node instead of "A".
-__attribute__((always_inline))
-static inline void HNF_SETTLE(union field root)
-{
-#if OPT_TAIL_JUMP
-    do
-    {
-        eval_hnf(root);
-    } while (TAG(root) == FUNCTION_TAG);
-#else
-    eval_hnf(root);
-#endif
-}
-
-// Fully settles `root` to a genuine value for the hand-written Prelude
-// primitives that need one right here (bindIO, cond, prim_ioError,
-// strictApply's $!/$!!/$## -- HNF_SETTLE's own doc comment lists all
-// four): repeatedly chases any FORWARD_TAG indirection and redispatches
-// with `force` on whatever that lands on, until settling on something
-// that's neither FORWARD_TAG, FUNCTION_TAG, nor CHOICE_TAG (a real
-// value, FAIL_TAG, or FREE_TAG). A single HNF_SETTLE call alone doesn't
-// reach this: forward_hnf is a deliberate no-op (this file's own note on
+// Fully settles `root` to a genuine value, from C code that needs one
+// right here and isn't itself machine code (strictApply's $!!/$##,
+// prim_ioError, toCStr): repeatedly chases any FORWARD_TAG indirection
+// and runs `force` (usually eval_hnf) on whatever that lands on, until
+// settling on something that's neither FORWARD_TAG, FUNCTION_TAG, nor
+// CHOICE_TAG (a real value, FAIL_TAG, or FREE_TAG). Machine routines use
+// settle_step/EVAL_OR_CONTINUE below instead. A single evaluation alone
+// doesn't reach this: forward_hnf is a deliberate no-op (this file's own note on
 // it, above), so an already-FORWARD_TAG root -- e.g. the result of some
 // earlier collapse point that wasn't safe to copy, which is the common
 // case, since choose() itself always produces one -- is left completely
@@ -568,12 +489,6 @@ void run_io(union field expr);
 void nf_all(union field expr);
 
 void error(char* msg, union field expr);
-
-// --stack-size (Rice.Codegen.C.ToC's writeMain, runtime.c's own doc
-// comment on the definitions): raise the process's own stack rlimit, up
-// to `bytes` or the OS's hard limit, whichever is smaller.
-void set_stack_size(unsigned long bytes);
-void set_stack_size_max(void);
 
 // functions for manipulating curry strings
 union field toCurryString(char* str);
