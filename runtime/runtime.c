@@ -175,24 +175,24 @@ static inline void check_fill_ptrs(Symbol* sym, int from, int count)
 // which returns into apply_k. Once f is a PART, the frame is popped and
 // the arguments filled in; a now fully applied call is then a tail jump.
 static const unsigned char apply_reps[] = { R_PTR, R_PTR, R_INT };
-static RICE_CC void apply_k(void);
+static RICE_CC void apply_k(union field _root, Frame* sp);
 static const FrameInfo apply_info =
     { .code = apply_k, .size = 3, .reps = apply_reps, .name = "apply" };
 
-RICE_CC void apply_hnf(void)
+RICE_CC void apply_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
     debug(LOW, "HNF apply: \n");
     debug_expr(LOW, root);
-    frame_push(&apply_info);
+    sp = frame_push(sp, &apply_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
     SLOT(2).i = false;
-    MUSTTAIL return apply_k();
+    MUSTTAIL return apply_k(root, sp);
 }
 
-static RICE_CC void apply_k(void)
+static RICE_CC void apply_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
     union field f = SLOT(1);
     bool nondet = SLOT(2).i;
@@ -209,7 +209,7 @@ static RICE_CC void apply_k(void)
         {
             case FAIL_TAG:
                 debug(HIGH, "apply FAIL\n");
-                frame_pop();
+                sp = frame_pop(sp);
                 push_node(root,nondet);
                 fail(root);
                 RETURN();
@@ -219,8 +219,7 @@ static RICE_CC void apply_k(void)
                 // f must be fully applied, or we would have left the loop!
                 SLOT(1) = f;
                 SLOT(2).i = nondet;
-                rice_root = f;
-                MUSTTAIL return f.n->symbol->hnf();
+                MUSTTAIL return f.n->symbol->hnf(f, sp);
 
             case CHOICE_TAG:
                 debug(HIGH, "apply CHOICE\n");
@@ -246,7 +245,7 @@ static RICE_CC void apply_k(void)
                 error("apply: not a function", f);
         }
     }
-    frame_pop();
+    sp = frame_pop(sp);
 
     union field child1 = root.n->children[1];
     union field child2 = root.n->children[2];
@@ -336,8 +335,7 @@ static RICE_CC void apply_k(void)
             debug_expr(HIGH, root);
             // root is now a fully applied call: reduce it with a tail
             // jump, which returns wherever apply would have.
-            rice_root = root;
-            MUSTTAIL return root.n->symbol->hnf();
+            MUSTTAIL return root.n->symbol->hnf(root, sp);
         }
         debug(HIGH, "leaving apply\n");
         debug_expr(HIGH, root);
@@ -388,13 +386,11 @@ static RICE_CC void apply_k(void)
         debug_expr(HIGH, root);
 
         // We're still overapplied so try again
-        rice_root = root;
-        MUSTTAIL return apply_hnf();
+        MUSTTAIL return apply_hnf(root, sp);
     }
 }
 
 
-static void forward_impl(void) { field root = rice_root; (void)root; }
 
 //////////////////////////////////////////////////////////////////////////////
 // code for backtracking
@@ -936,21 +932,23 @@ void error(char* msg, union field n)
 // Each child gets its own frame, so depth follows the data on the machine
 // stack, not the C stack. nf and ground_nf below are C drivers for it.
 static const unsigned char nfx_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
-static RICE_CC void nfx_k(void);
+static RICE_CC void nfx_k(union field _root, Frame* sp);
 static const FrameInfo nfx_info =
     { .code = nfx_k, .size = 4, .reps = nfx_reps, .name = "nf" };
 
-static inline void nfx_push(union field expr, bool ground)
+static inline Frame* nfx_push(Frame* sp, union field expr, bool ground)
 {
-    frame_push(&nfx_info);
+    sp = frame_push(sp, &nfx_info);
     SLOT(0) = expr;
     SLOT(1) = expr;
     SLOT(2).i = -1;
     SLOT(3).i = ground;
+    return sp;
 }
 
-static RICE_CC void nfx_k(void)
+static RICE_CC void nfx_k(union field _root, Frame* sp)
 {
+    (void)_root;
     union field expr    = SLOT(0);
     union field settled = SLOT(1);
     long        state   = SLOT(2).i;
@@ -966,8 +964,7 @@ static RICE_CC void nfx_k(void)
             if(t == CHOICE_TAG || (t == FUNCTION_TAG && settled.n->missing <= 0))
             {
                 SLOT(1) = settled;
-                rice_root = settled;
-                MUSTTAIL return settled.n->symbol->hnf();
+                MUSTTAIL return settled.n->symbol->hnf(settled, sp);
             }
             if(t != FORWARD_TAG)
                 break;
@@ -976,13 +973,13 @@ static RICE_CC void nfx_k(void)
         SLOT(1) = settled;
         if(TAG(settled) == FAIL_TAG)
         {
-            frame_pop();
+            sp = frame_pop(sp);
             fail_nf(settled, expr);
             RETURN();
         }
         if(ground && TAG(settled) == FREE_TAG)
         {
-            frame_pop();
+            sp = frame_pop(sp);
             fail(expr);
             RETURN();
         }
@@ -1006,7 +1003,7 @@ static RICE_CC void nfx_k(void)
             }
             else
             {
-                frame_pop();
+                sp = frame_pop(sp);
                 fail_nf(e, expr);
                 RETURN();
             }
@@ -1023,23 +1020,23 @@ static RICE_CC void nfx_k(void)
         if(ground && e.n == NULL)
             continue;
         SLOT(2).i = i;
-        nfx_push(e, ground);
-        MUSTTAIL return nfx_k();
+        sp = nfx_push(sp, e, ground);
+        MUSTTAIL return nfx_k(e, sp);
     }
-    frame_pop();
+    sp = frame_pop(sp);
     RETURN();
 }
 
-static RICE_CC void nf_code(void)
+static RICE_CC void nf_code(union field root, Frame* sp)
 {
-    nfx_push(rice_root, false);
-    MUSTTAIL return nfx_k();
+    sp = nfx_push(sp, root, false);
+    MUSTTAIL return nfx_k(root, sp);
 }
 
-static RICE_CC void ground_nf_code(void)
+static RICE_CC void ground_nf_code(union field root, Frame* sp)
 {
-    nfx_push(rice_root, true);
-    MUSTTAIL return nfx_k();
+    sp = nfx_push(sp, root, true);
+    MUSTTAIL return nfx_k(root, sp);
 }
 
 // Reduce expr to normal form. If any reachable value fails, expr fails.
@@ -1123,6 +1120,6 @@ void nf_all(union field expr)
 // eval_hnf calls, then returns to the frame on top of the machine stack.
 // ----------------------------------------------------------------------
 
-RICE_CC void CTR_hnf(void) { CTR_impl(); RETURN(); }
-RICE_CC void choice_hnf(void) { choice_impl(); RETURN(); }
-RICE_CC void forward_hnf(void) { forward_impl(); RETURN(); }
+RICE_CC void CTR_hnf(union field root, Frame* sp)     { rice_root = root; CTR_impl(); RETURN(); }
+RICE_CC void choice_hnf(union field root, Frame* sp)  { rice_root = root; choice_impl(); RETURN(); }
+RICE_CC void forward_hnf(union field root, Frame* sp) { (void)root; RETURN(); }

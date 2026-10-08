@@ -228,8 +228,7 @@ static inline bool settle_step(union field* x, bool* nondet)
     {                                                  \
         SLOT(xslot) = (x);                             \
         SLOT(ndslot).i = (nd);                         \
-        rice_root = (x);                               \
-        MUSTTAIL return (x).n->symbol->hnf();          \
+        MUSTTAIL return (x).n->symbol->hnf((x), sp);   \
     }
 
 // backtracking-optimizations.md's #3, generalized from lazy_unify_step
@@ -453,10 +452,10 @@ void set3(union field root, Symbol* sym, union field v0, union field v1, union f
 /// hnf/symbol definitions
 /////////////////////////////////////////////////
 
-RICE_CC void CTR_hnf(void);
-RICE_CC void choice_hnf(void);
-RICE_CC void apply_hnf(void);
-RICE_CC void forward_hnf(void);
+RICE_CC void CTR_hnf(union field root, Frame* sp);
+RICE_CC void choice_hnf(union field root, Frame* sp);
+RICE_CC void apply_hnf(union field root, Frame* sp);
+RICE_CC void forward_hnf(union field root, Frame* sp);
 
 // set a free variable (I think)
 // TODO: figure out if I'm right about this.
@@ -523,11 +522,11 @@ static Symbol backup_symbol  = { .tag = FAIL_TAG,     .arity = 0, .name = "RET",
 // So, I just want these to pass through to apply_hnf.
 // This is actually a potential chance for optimization in the future.
 __attribute__((always_inline)) 
-static inline RICE_CC void apply1_hnf(void) { MUSTTAIL return apply_hnf(); }
+static inline RICE_CC void apply1_hnf(union field root, Frame* sp) { MUSTTAIL return apply_hnf(root, sp); }
 __attribute__((always_inline)) 
-static inline RICE_CC void apply2_hnf(void) { MUSTTAIL return apply_hnf(); }
+static inline RICE_CC void apply2_hnf(union field root, Frame* sp) { MUSTTAIL return apply_hnf(root, sp); }
 __attribute__((always_inline)) 
-static inline RICE_CC void apply3_hnf(void) { MUSTTAIL return apply_hnf(); }
+static inline RICE_CC void apply3_hnf(union field root, Frame* sp) { MUSTTAIL return apply_hnf(root, sp); }
 
 
 __attribute__((always_inline)) 

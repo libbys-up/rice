@@ -40,11 +40,19 @@ typedef struct Frame
 _Static_assert(sizeof(const FrameInfo*) == sizeof(union field),
                "a frame header must be exactly one stack word");
 
-// The machine's registers.
-//   rice_root   the node the running code is rewriting (`root`).
-//   rice_sp     the top frame. The stack grows downward: frames occupy
-//               [rice_sp, rice_stack_hi), the newest at the lowest
-//               address, so popping a frame only needs its own size.
+// The machine's registers are the two arguments of every piece of machine
+// code: `root`, the node being reduced, and `sp`, the top frame. The stack
+// grows downward: frames occupy [sp, rice_stack_hi), the newest at the
+// lowest address, so popping a frame only needs its own size.
+//
+// rice_root and rice_sp are their copies for C code: machine code stores
+// them before calling C code that might run the machine (a C-convention
+// runtime body, nf, ...), and a machine run stores its final sp in
+// rice_sp when it returns to C. Everywhere else they may be stale.
+//
+// A nested run can grow the stack, which moves it, so the machine code
+// that made the C call must reload `sp = rice_sp;` afterwards: machine_run
+// leaves rice_sp at the caller's top frame, wherever it now is.
 extern union field  rice_root;
 extern Frame*       rice_sp;
 extern union field* rice_stack_lo;
@@ -52,45 +60,49 @@ extern union field* rice_stack_hi;
 
 void machine_init(void);
 
-// Makes room for at least `words` more words below the top frame. Moves
-// the stack, so any Frame* other than rice_sp is stale afterwards.
-void machine_grow(size_t words);
+// Makes room for at least `words` more words below the top frame `sp`, and
+// returns the top frame's new address. Moves the stack, so any other
+// Frame* is stale afterwards.
+Frame* machine_grow(Frame* sp, size_t words);
 
 // Pushes a frame with every slot zeroed (a NULL pointer slot is always
-// safe to trace) and returns it.
-static inline Frame* frame_push(const FrameInfo* info)
+// safe to trace) and returns the new top frame. Use as
+// `sp = frame_push(sp, &info);`.
+static inline Frame* frame_push(Frame* sp, const FrameInfo* info)
 {
     size_t words = 1 + (size_t)info->size;
-    if((union field*)rice_sp - rice_stack_lo < (ptrdiff_t)words)
+    if((union field*)sp - rice_stack_lo < (ptrdiff_t)words)
     {
-        machine_grow(words);
+        sp = machine_grow(sp, words);
     }
-    Frame* f = (Frame*)((union field*)rice_sp - words);
+    Frame* f = (Frame*)((union field*)sp - words);
     f->info = info;
     for(unsigned short i = 0; i < info->size; i++)
     {
         f->slots[i].n = NULL;
     }
-    rice_sp = f;
     return f;
 }
 
-static inline void frame_pop(void)
+// Pops the top frame: `sp = frame_pop(sp);`.
+static inline Frame* frame_pop(Frame* sp)
 {
-    rice_sp = (Frame*)((union field*)rice_sp + 1 + rice_sp->info->size);
+    return (Frame*)((union field*)sp + 1 + sp->info->size);
 }
 
-// Slot i of the top frame.
-#define SLOT(i) (rice_sp->slots[i])
+// Slot i of the top frame (the local `sp`).
+#define SLOT(i) (sp->slots[i])
 
-// Return to the top frame's code.
-#define RETURN() MUSTTAIL return rice_sp->info->code()
+// Return to the top frame's code. The root register carries nothing on a
+// return: continuations find their state in their own frames.
+#define NO_ROOT ((union field){ .n = NULL })
+#define RETURN() MUSTTAIL return sp->info->code(NO_ROOT, sp)
 
-// How many words of the stack are in use: a position that survives
-// machine_grow, unlike a Frame*.
-static inline ptrdiff_t machine_depth(void)
+// How many words of the stack are in use below `sp`: a position that
+// survives machine_grow, unlike a Frame*.
+static inline ptrdiff_t machine_depth(Frame* sp)
 {
-    return rice_stack_hi - (union field*)rice_sp;
+    return rice_stack_hi - (union field*)sp;
 }
 
 // Runs the machine on x until x is in head normal form, then returns to

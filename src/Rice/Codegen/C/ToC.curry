@@ -172,8 +172,7 @@ funSource reps (IFunction name _ _ _ body) = case body of
         cs = reverse blocks
     in [ comment (uninstance name) ] ++
        concat [ ds | CaseBlock ds _ <- cs ] ++
-       [ cfunDefn hnfRet (hnf name) []
-           ((text "field" <+> root <+> equals <+> text "rice_root" <> semi) : entry)
+       [ cfunDefn hnfRet (hnf name) hnfParams entry
        , text "" ] ++
        concat [ d ++ [text ""] | CaseBlock _ d <- cs ]
 
@@ -269,7 +268,7 @@ showStmt gen st = case st of
 --- good -- every statement ends its block, so this is always a tail
 --- position. `term` is the final transfer: `RETURN()` or a jump.
 leave :: Gen -> [CStmt] -> [CStmt]
-leave gen term = maybe [] (const [scall "frame_pop" []]) (gRetry gen) ++ term
+leave gen term = maybe [] (const [text "sp" .= call "frame_pop" [text "sp"]]) (gRetry gen) ++ term
 
 --- Return to the frame on top of the machine stack: `root` is in head
 --- normal form.
@@ -279,8 +278,7 @@ returnStmt = [text "RETURN()" <> semi]
 --- A tail call: reduce `root` with `code` (an expression of type `Code`),
 --- which returns to wherever this code would have.
 jumpTo :: CExpr -> [CStmt]
-jumpTo code = [ text "rice_root" .= root
-              , text "MUSTTAIL return" <+> code <> text "()" <> semi ]
+jumpTo code = [ text "MUSTTAIL return" <+> code <> text "(root, sp)" <> semi ]
 
 --- The trail point for a write to `root` that no constructor-case branch
 --- covers (`Nothing`: a function body, or literal-case branch, with no
@@ -353,21 +351,22 @@ enterCase gen v bs = do
   body <- caseBody inner v frees ndS cutS bs
   (k', done') <- get
   put (k', CaseBlock (caseDecls gen k fname slotReps)
-                     [cfunDefn ("static " ++ hnfRet) fname [] body] : done')
+                     [cfunDefn ("static " ++ hnfRet) fname contParams
+                               (text "(void)_root" <> semi : body)] : done')
   return $ leave gen $
-    [ scall "frame_push" [text ("&" ++ fname ++ "_info")]
+    [ text "sp" .= call "frame_push" [text "sp", text ("&" ++ fname ++ "_info")]
     , slot 0 .= root
     , slot 1 .= var v
     , slot 2 .= var v ] ++
     [ slot (3 + i) .= var x | (i, x) <- zip [0 ..] frees ] ++
     [ rawSlot ndS .= int 0
     , scall "SCOPED_SAVE_CUTOFF" [slot cutS]
-    , text "MUSTTAIL return" <+> text fname <> text "()" <> semi ]
+    , text "MUSTTAIL return" <+> text fname <> text "(root, sp)" <> semi ]
 
 --- The prototype, reps array and `FrameInfo` of case block `k`.
 caseDecls :: Gen -> Int -> CName -> [FieldRep] -> [CStmt]
 caseDecls gen k fname slotReps =
-  [ text ("static " ++ hnfRet) <+> text fname <> text "(void)" <> semi
+  [ text ("static " ++ hnfRet) <+> text fname <> cparams contParams <> semi
   , (text "static const unsigned char" <+> text (fname ++ "_reps[]"))
       .= carray (map repLit slotReps)
   , (text "static const FrameInfo" <+> text (fname ++ "_info"))
@@ -483,8 +482,7 @@ funBlock :: Int -> CStmt
 funBlock ndS = ccase (text "FUNCTION_TAG")
   [ slot 2 .= scrutinee
   , rawSlot ndS .= nondetVar
-  , text "rice_root" .= scrutinee
-  , text "MUSTTAIL return" <+> scrutinee <> text ".n->symbol->hnf()" <> semi ]
+  , text "MUSTTAIL return" <+> scrutinee <> text ".n->symbol->hnf(" <> scrutinee <> text ", sp)" <> semi ]
 
 choiceBlock :: CStmt
 choiceBlock = ccase (text "CHOICE_TAG") [scall "choose" [scrutinee], cbreak]

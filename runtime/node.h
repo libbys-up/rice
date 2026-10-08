@@ -53,10 +53,12 @@ typedef enum
 #endif
 
 // A piece of machine code (machine.h): a `_hnf` function, a case block, or
-// a runtime routine. Its input is the machine's registers (rice_root, the
-// top frame), never C arguments, so every piece has this one signature --
+// a runtime routine. It takes the machine's two registers as arguments --
+// the node being reduced and the stack pointer -- so they stay in machine
+// registers across every tail jump. Every piece has this one signature,
 // which is what lets any of them tail-call any other.
-typedef RICE_CC void (*Code)(void);
+struct Frame;
+typedef RICE_CC void (*Code)(union field root, struct Frame* sp);
 
 typedef struct
 {

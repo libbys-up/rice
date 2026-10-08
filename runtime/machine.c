@@ -12,10 +12,13 @@ union field* rice_stack_hi;
 // Initial stack size, in words (1 MiB). It doubles as needed.
 #define INITIAL_STACK_WORDS ((size_t)1 << 17)
 
-// The bottom frame of each machine run. Returning to it returns to the C
-// code that started the run (eval_hnf).
-static RICE_CC void sentinel_code(void)
+// The bottom frame of each machine run. Returning to it records the
+// machine's stack pointer for the C code that started the run
+// (machine_run), then returns to it.
+static RICE_CC void sentinel_code(union field root, Frame* sp)
 {
+    (void)root;
+    rice_sp = sp;
     return;
 }
 
@@ -36,10 +39,10 @@ void machine_init(void)
     rice_sp = (Frame*)rice_stack_hi;
 }
 
-void machine_grow(size_t words)
+Frame* machine_grow(Frame* sp, size_t words)
 {
     size_t old_cap = (size_t)(rice_stack_hi - rice_stack_lo);
-    size_t used    = (size_t)machine_depth();
+    size_t used    = (size_t)machine_depth(sp);
     size_t new_cap = old_cap * 2;
     while(new_cap - used < words)
     {
@@ -53,27 +56,27 @@ void machine_grow(size_t words)
     }
     // Frames sit at the high end; keep them there.
     union field* hi = lo + new_cap;
-    memcpy(hi - used, (union field*)rice_sp, used * sizeof(union field));
+    memcpy(hi - used, (union field*)sp, used * sizeof(union field));
     free(rice_stack_lo);
     rice_stack_lo = lo;
     rice_stack_hi = hi;
-    rice_sp = (Frame*)(hi - used);
+    return (Frame*)(hi - used);
 }
 
 void machine_run(Code code, union field x)
 {
     union field saved_root = rice_root;
-    frame_push(&sentinel_info);
-    ptrdiff_t depth = machine_depth();
-    rice_root = x;
-    code();
-    if(machine_depth() != depth || rice_sp->info != &sentinel_info)
+    Frame* base = frame_push(rice_sp, &sentinel_info);
+    ptrdiff_t depth = machine_depth(base);
+    code(x, base);
+    // sentinel_code stored the machine's final sp in rice_sp.
+    if(machine_depth(rice_sp) != depth || rice_sp->info != &sentinel_info)
     {
         fprintf(stderr, "Error: evaluation stack unbalanced after evaluating %s\n",
                 x.n->symbol->name);
         exit(1);
     }
-    frame_pop();
+    rice_sp = frame_pop(rice_sp);
     rice_root = saved_root;
 }
 
@@ -84,7 +87,7 @@ void eval_hnf(union field x)
 
 void print_machine_stack(void)
 {
-    printf("machine stack (%td words):\n", machine_depth());
+    printf("machine stack (%td words):\n", machine_depth(rice_sp));
     for(Frame* f = rice_sp; (union field*)f < rice_stack_hi;
         f = (Frame*)((union field*)f + 1 + f->info->size))
     {

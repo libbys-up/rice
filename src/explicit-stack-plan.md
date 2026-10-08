@@ -433,6 +433,33 @@ Status:
   registers, and `eval_hnf`'s sentinel push for the C-nested callers that
   remain.
 
+  **Follow-up, 2026-10-08.** Measured interleaved (`abtime.py`-style:
+  run variants alternately, keep each one's best of 7). Separate
+  `bench.sh` runs drifted by up to 35% on this machine, which made the
+  numbers above unreliable. Findings:
+
+  - Frame pushes are not the cost. Removing slot zeroing changed nothing.
+    Pushing frames only on suspension ("lazy frames": state passed in
+    argument registers, with a per-frame resume stub) gained 0–7%. The
+    first attempt, with one generic resume (a copy loop plus an indirect
+    jump), was 28–44% *slower*, because suspension is the common path.
+    Not adopted: the gain is small, and eager frames keep a case's live
+    variables in its frame, which the GC needs. Saved as a stash ("lazy
+    frames experiment").
+  - `preserve_none` is worth only 0–6%.
+  - **Passing `root` and `sp` as arguments** to every piece of machine
+    code (`Code` is `void (*)(union field root, Frame* sp)`), instead of
+    the globals `rice_root`/`rice_sp`: **9–14% faster**. Against the
+    pre-machine code the overhead is now 5–26% (cent +17%, primesort +5%,
+    reverse_builtin +14%, sort +8%, tailsum +26%), down from 17–46%. The
+    globals remain only for C code: machine code syncs them before
+    calling C that may run the machine, and **reloads `sp = rice_sp`
+    afterwards, because a nested run can grow, and so move, the stack**.
+    `DeepNf` caught that.
+  - A profile of `sort` shows most remaining time in `calloc`. Rice's own
+    code is spread across case blocks and `apply`. A case block is still a
+    separate C function whose variables pass through its frame.
+
 1. **Machine core** (`runtime/machine.h`/`.c`): `Frame`, `FrameInfo`,
    the growable stack, `PUSH`/`POP`/`RETURN`, the sentinel and the C
    driver `eval_hnf`. `HNF(x)` becomes `eval_hnf(x)` everywhere it's

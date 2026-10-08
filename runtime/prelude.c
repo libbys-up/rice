@@ -165,27 +165,27 @@ static bool strictApply(field root, void (*force)(field))
 // evaluation of x lives on the machine stack, so a tail-recursive loop
 // written with $! (an accumulator) runs in constant C stack.
 static const unsigned char eval1_reps[] = { R_PTR, R_PTR, R_INT };
-static RICE_CC void strict_k(void);
+static RICE_CC void strict_k(union field _root, Frame* sp);
 static const FrameInfo strict_info =
     { .code = strict_k, .size = 3, .reps = eval1_reps, .name = "$!" };
 
-RICE_CC void Prelude___DL_EX_hnf(void)
+RICE_CC void Prelude___DL_EX_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    frame_push(&strict_info);
+    sp = frame_push(sp, &strict_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 1);
     SLOT(2).i = false;
-    MUSTTAIL return strict_k();
+    MUSTTAIL return strict_k(NO_ROOT, sp);
 }
 
-static RICE_CC void strict_k(void)
+static RICE_CC void strict_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
     field x = SLOT(1);
     bool nondet = SLOT(2).i;
     EVAL_OR_CONTINUE(x, 1, nondet, 2);
-    frame_pop();
+    sp = frame_pop(sp);
     trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
     {
@@ -193,24 +193,25 @@ static RICE_CC void strict_k(void)
         RETURN();
     }
     set_apply1(root, child_at(root, 0), x);
-    rice_root = root;
-    MUSTTAIL return apply_hnf();
+    MUSTTAIL return apply_hnf(root, sp);
 }
-RICE_CC void Prelude___DL_EX_EX_hnf(void)
+RICE_CC void Prelude___DL_EX_EX_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    if(!strictApply(root, nf))
+    rice_sp = sp;
+    bool applied = strictApply(root, nf);
+    sp = rice_sp;
+    if(!applied)
         RETURN();
-    rice_root = root;
-    MUSTTAIL return apply_hnf();
+    MUSTTAIL return apply_hnf(root, sp);
 }
-RICE_CC void Prelude___DL_HT_HT_hnf(void)
+RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    if(!strictApply(root, ground_nf))
+    rice_sp = sp;
+    bool applied = strictApply(root, ground_nf);
+    sp = rice_sp;
+    if(!applied)
         RETURN();
-    rice_root = root;
-    MUSTTAIL return apply_hnf();
+    MUSTTAIL return apply_hnf(root, sp);
 }
 
 // ----------------------------------------------------------------------
@@ -273,43 +274,43 @@ RICE_CC void Prelude___DL_HT_HT_hnf(void)
 // normal form -- the same "after the whole dispatch" point as before.
 static const unsigned char bind_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
 static const unsigned char commit_reps[] = { R_INT };
-static RICE_CC void bind_k(void);
-static RICE_CC void commit_k(void);
+static RICE_CC void bind_k(union field _root, Frame* sp);
+static RICE_CC void commit_k(union field _root, Frame* sp);
 static const FrameInfo bind_info =
     { .code = bind_k, .size = 4, .reps = bind_reps, .name = "bindIO" };
 static const FrameInfo commit_info =
     { .code = commit_k, .size = 1, .reps = commit_reps, .name = "bindIO commit" };
 
-RICE_CC void Prelude__bindIO_hnf(void)
+RICE_CC void Prelude__bindIO_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    frame_push(&bind_info);
+    sp = frame_push(sp, &bind_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
     SLOT(2).i = false;
     SLOT(3).i = size(bt_stack);
-    MUSTTAIL return bind_k();
+    MUSTTAIL return bind_k(NO_ROOT, sp);
 }
 
-static RICE_CC void bind_k(void)
+static RICE_CC void bind_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
     field m = SLOT(1);
     bool nondet = SLOT(2).i;
     EVAL_OR_CONTINUE(m, 1, nondet, 2);
     long cutoff = SLOT(3).i;
-    frame_pop();
-    frame_push(&commit_info);
+    sp = frame_pop(sp);
+    sp = frame_push(sp, &commit_info);
     SLOT(0).i = cutoff;
     set_apply1(root, child_at(root, 1), m);
-    rice_root = root;
-    MUSTTAIL return apply_hnf();
+    MUSTTAIL return apply_hnf(root, sp);
 }
 
-static RICE_CC void commit_k(void)
+static RICE_CC void commit_k(union field _root, Frame* sp)
 {
+    (void)_root;
     long cutoff = SLOT(0).i;
-    frame_pop();
+    sp = frame_pop(sp);
     pop_to(bt_stack, (int)cutoff);
     RETURN();
 }
@@ -437,27 +438,27 @@ static void Prelude__prim_USshowStringLiteral_impl(void)
 // value instead of relying on in-place mutation the caller can't see.
 // `x & y`: settle x (frame [root, x, nondet]); fail if it failed,
 // False if it's False, otherwise root becomes y.
-static RICE_CC void and_k(void);
+static RICE_CC void and_k(union field _root, Frame* sp);
 static const FrameInfo and_info =
     { .code = and_k, .size = 3, .reps = eval1_reps, .name = "&" };
 
-RICE_CC void Prelude___AN_hnf(void)
+RICE_CC void Prelude___AN_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    frame_push(&and_info);
+    sp = frame_push(sp, &and_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
     SLOT(2).i = false;
-    MUSTTAIL return and_k();
+    MUSTTAIL return and_k(NO_ROOT, sp);
 }
 
-static RICE_CC void and_k(void)
+static RICE_CC void and_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
     field x = SLOT(1);
     bool nondet = SLOT(2).i;
     EVAL_OR_CONTINUE(x, 1, nondet, 2);
-    frame_pop();
+    sp = frame_pop(sp);
     trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
         fail(root);
@@ -491,37 +492,35 @@ static void Prelude__failed_impl(void)
 
 // Prelude.apply f x: rewrite root to the runtime's own apply node and
 // reduce it with a tail jump.
-RICE_CC void Prelude__apply_hnf(void)
+RICE_CC void Prelude__apply_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
     set_apply1(root, child_at(root, 0), child_at(root, 1));
-    rice_root = root;
-    MUSTTAIL return apply_hnf();
+    MUSTTAIL return apply_hnf(root, sp);
 }
 
 // `cond c x` (a guarded rule): settle c (frame [root, c, nondet]);
 // root becomes x if c is True, and fails otherwise.
-static RICE_CC void cond_k(void);
+static RICE_CC void cond_k(union field _root, Frame* sp);
 static const FrameInfo cond_info =
     { .code = cond_k, .size = 3, .reps = eval1_reps, .name = "cond" };
 
-RICE_CC void Prelude__cond_hnf(void)
+RICE_CC void Prelude__cond_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    frame_push(&cond_info);
+    sp = frame_push(sp, &cond_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
     SLOT(2).i = false;
-    MUSTTAIL return cond_k();
+    MUSTTAIL return cond_k(NO_ROOT, sp);
 }
 
-static RICE_CC void cond_k(void)
+static RICE_CC void cond_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
     field c = SLOT(1);
     bool nondet = SLOT(2).i;
     EVAL_OR_CONTINUE(c, 1, nondet, 2);
-    frame_pop();
+    sp = frame_pop(sp);
     trail_node(root, nondet);
     if(c.n->symbol->tag == Prelude__True_TAG)
         set_forward(root, child_at(root, 1));
@@ -721,13 +720,13 @@ static LazyResult lu_result;
 
 static const unsigned char lu_reps[] =
     { R_PTR, R_PTR, R_PTR, R_PTR, R_INT, R_INT, R_INT, R_INT };
-static RICE_CC void lu_k(void);
+static RICE_CC void lu_k(union field _root, Frame* sp);
 static const FrameInfo lu_info =
     { .code = lu_k, .size = 8, .reps = lu_reps, .name = "=:<= pair" };
 
-static inline void lu_push(field s, field t)
+static inline Frame* lu_push(Frame* sp, field s, field t)
 {
-    frame_push(&lu_info);
+    sp = frame_push(sp, &lu_info);
     SLOT(0) = s;
     SLOT(1) = t;
     SLOT(2) = s;
@@ -736,10 +735,12 @@ static inline void lu_push(field s, field t)
     SLOT(5).i = 0;
     SLOT(6).i = false;
     SLOT(7).i = size(bt_stack);
+    return sp;
 }
 
-static RICE_CC void lu_k(void)
+static RICE_CC void lu_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field scruts = SLOT(2);
     field scrutt = SLOT(3);
     long phase = SLOT(4).i;
@@ -763,7 +764,7 @@ static RICE_CC void lu_k(void)
             {
                 save_copy(scruts);
                 set_forward(scruts, SLOT(1));
-                frame_pop();
+                sp = frame_pop(sp);
                 lu_result = (LazyResult){ true, true };
                 RETURN();
             }
@@ -775,8 +776,8 @@ static RICE_CC void lu_k(void)
             {
                 SLOT(2) = scruts;
                 SLOT(6).i = nondet;
-                rice_root = scruts;
-                MUSTTAIL return scruts.n->symbol->hnf();
+                MUSTTAIL return scruts.n->symbol->hnf(scruts, sp);
+
             }
             else
             {
@@ -813,8 +814,8 @@ static RICE_CC void lu_k(void)
             {
                 SLOT(3) = scrutt;
                 SLOT(6).i = nondet;
-                rice_root = scrutt;
-                MUSTTAIL return scrutt.n->symbol->hnf();
+                MUSTTAIL return scrutt.n->symbol->hnf(scrutt, sp);
+
             }
             else
             {
@@ -858,8 +859,8 @@ static RICE_CC void lu_k(void)
         }
         SLOT(5).i = i;
         SLOT(6).i = nondet;
-        lu_push(child_at_v(scruts, i), child_at_v(scrutt, i));
-        MUSTTAIL return lu_k();
+        sp = lu_push(sp, child_at_v(scruts, i), child_at_v(scrutt, i));
+        MUSTTAIL return lu_k(NO_ROOT, sp);
     }
 
 finish:
@@ -873,10 +874,10 @@ finish:
         SLOT(5).i = 0;
         SLOT(6).i = false;
         SLOT(7).i = size(bt_stack);
-        MUSTTAIL return lu_k();
+        MUSTTAIL return lu_k(NO_ROOT, sp);
     }
     #endif
-    frame_pop();
+    sp = frame_pop(sp);
     lu_result = (LazyResult){ ok, nondet };
     RETURN();
 }
@@ -884,23 +885,23 @@ finish:
 // x =:<= y: unify the pair on the machine (lu_k), then nseq_k sets root
 // from the result.
 static const unsigned char nseq_reps[] = { R_PTR };
-static RICE_CC void nseq_k(void);
+static RICE_CC void nseq_k(union field _root, Frame* sp);
 static const FrameInfo nseq_info =
     { .code = nseq_k, .size = 1, .reps = nseq_reps, .name = "=:<=" };
 
-RICE_CC void Prelude__nonstrictEq_hnf(void)
+RICE_CC void Prelude__nonstrictEq_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    frame_push(&nseq_info);
+    sp = frame_push(sp, &nseq_info);
     SLOT(0) = root;
-    lu_push(child_at(root, 0), child_at(root, 1));
-    MUSTTAIL return lu_k();
+    sp = lu_push(sp, child_at(root, 0), child_at(root, 1));
+    MUSTTAIL return lu_k(NO_ROOT, sp);
 }
 
-static RICE_CC void nseq_k(void)
+static RICE_CC void nseq_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
-    frame_pop();
+    sp = frame_pop(sp);
     trail_node(root, lu_result.nondet);
     if(lu_result.ok)
         set_Prelude__True(root, 0);
@@ -940,27 +941,27 @@ static RICE_CC void nseq_k(void)
 // needed the result guaranteed non-free; no way to tell which from
 // here.
 // ensureNotFree x: settle x (frame [root, x, nondet]); root forwards to it.
-static RICE_CC void notfree_k(void);
+static RICE_CC void notfree_k(union field _root, Frame* sp);
 static const FrameInfo notfree_info =
     { .code = notfree_k, .size = 3, .reps = eval1_reps, .name = "ensureNotFree" };
 
-RICE_CC void Prelude__ensureNotFree_hnf(void)
+RICE_CC void Prelude__ensureNotFree_hnf(union field root, Frame* sp)
 {
-    field root = rice_root;
-    frame_push(&notfree_info);
+    sp = frame_push(sp, &notfree_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
     SLOT(2).i = false;
-    MUSTTAIL return notfree_k();
+    MUSTTAIL return notfree_k(NO_ROOT, sp);
 }
 
-static RICE_CC void notfree_k(void)
+static RICE_CC void notfree_k(union field _root, Frame* sp)
 {
+    (void)_root;
     field root = SLOT(0);
     field x = SLOT(1);
     bool nondet = SLOT(2).i;
     EVAL_OR_CONTINUE(x, 1, nondet, 2);
-    frame_pop();
+    sp = frame_pop(sp);
     trail_node(root, false);
     set_forward(root, x);
     RETURN();
@@ -1247,22 +1248,22 @@ static void Prelude__prim_USreadFloatLiteral_impl(void)
 // eval_hnf calls, then returns to the frame on top of the machine stack.
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__returnIO_hnf(void) { Prelude__returnIO_impl(); RETURN(); }
-RICE_CC void Prelude__getChar_hnf(void) { Prelude__getChar_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USputChar_hnf(void) { Prelude__prim_USputChar_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USerror_hnf(void) { Prelude__prim_USerror_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USshowIntLiteral_hnf(void) { Prelude__prim_USshowIntLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(void) { Prelude__prim_USshowFloatLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USshowCharLiteral_hnf(void) { Prelude__prim_USshowCharLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USshowStringLiteral_hnf(void) { Prelude__prim_USshowStringLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__failed_hnf(void) { Prelude__failed_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USioError_hnf(void) { Prelude__prim_USioError_impl(); RETURN(); }
-RICE_CC void Prelude__constrEq_hnf(void) { Prelude__constrEq_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USreadFile_hnf(void) { Prelude__prim_USreadFile_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USwriteFile_hnf(void) { Prelude__prim_USwriteFile_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USappendFile_hnf(void) { Prelude__prim_USappendFile_impl(); RETURN(); }
-RICE_CC void Prelude__catch_hnf(void) { Prelude__catch_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USreadNatLiteral_hnf(void) { Prelude__prim_USreadNatLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USreadCharLiteral_hnf(void) { Prelude__prim_USreadCharLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USreadStringLiteral_hnf(void) { Prelude__prim_USreadStringLiteral_impl(); RETURN(); }
-RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(void) { Prelude__prim_USreadFloatLiteral_impl(); RETURN(); }
+RICE_CC void Prelude__returnIO_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__returnIO_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__getChar_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__getChar_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USputChar_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USputChar_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USerror_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USerror_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowIntLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowIntLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowFloatLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowCharLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowCharLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowStringLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowStringLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__failed_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__failed_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USioError_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USioError_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__constrEq_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__constrEq_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadFile_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadFile_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USwriteFile_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USwriteFile_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USappendFile_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USappendFile_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__catch_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__catch_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadNatLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadNatLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadCharLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadCharLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadStringLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadStringLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadFloatLiteral_impl(); sp = rice_sp; RETURN(); }

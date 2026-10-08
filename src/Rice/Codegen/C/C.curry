@@ -321,9 +321,19 @@ hnf :: IQName -> CName
 hnf n = mangle n ++ "_hnf"
 
 --- The return type of every `_hnf` function: machine code
---- (`runtime/machine.h`) takes no C arguments and reads `rice_root`.
+--- (`runtime/machine.h`).
 hnfRet :: CType
 hnfRet = "RICE_CC void"
+
+--- The parameters of every piece of machine code: the machine's two
+--- registers, the node being reduced and the stack pointer.
+hnfParams :: [(CType, CName)]
+hnfParams = [("union field", "root"), ("Frame*", "sp")]
+
+--- The same for a continuation, which finds its node in its frame
+--- instead.
+contParams :: [(CType, CName)]
+contParams = [("union field", "_root"), ("Frame*", "sp")]
 
 tag :: IQName -> CName
 tag n = mangle n ++ "_TAG"

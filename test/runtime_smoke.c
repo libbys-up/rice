@@ -169,15 +169,16 @@ int main(void)
         static const unsigned char test_reps[] = { R_INT, R_PTR };
         static const FrameInfo test_info =
             { .code = NULL, .size = 2, .reps = test_reps, .name = "test" };
-        ptrdiff_t base = machine_depth();
+        Frame* sp = rice_sp;
+        ptrdiff_t base = machine_depth(sp);
         const long N = 100000;
         for(long i = 0; i < N; i++)
         {
-            Frame* f = frame_push(&test_info);
-            f->slots[0].i = i;
+            sp = frame_push(sp, &test_info);
+            sp->slots[0].i = i;
         }
-        int intact = machine_depth() - base == N * 3;
-        Frame* f = rice_sp;
+        int intact = machine_depth(sp) - base == N * 3;
+        Frame* f = sp;
         for(long i = N - 1; i >= 0 && intact; i--)
         {
             intact = f->info == &test_info && f->slots[0].i == i && f->slots[1].n == NULL;
@@ -186,9 +187,9 @@ int main(void)
         check(intact, "machine: 100000 frames survive stack growth intact");
         for(long i = 0; i < N; i++)
         {
-            frame_pop();
+            sp = frame_pop(sp);
         }
-        check(machine_depth() == base, "machine: popping every frame returns to the start");
+        check(machine_depth(sp) == base, "machine: popping every frame returns to the start");
     }
 
     printf("\n%s\n", failures == 0 ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
