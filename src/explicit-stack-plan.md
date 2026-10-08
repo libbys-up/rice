@@ -405,6 +405,34 @@ Status:
   `set_stack_size`/`raise_stack_limit`, and `StackSize` from `ToC`/`Main`.
   `tests/bench.sh` has no tail-jump configuration any more.
 
+  **Measured cost** (`tests/bench.sh --configs=default= --runs=3`, best of
+  three, Apple M-series, 2026-10-08), `3cac484` (just before the machine)
+  vs `8520e15`. Allocation counts are identical for every program that
+  ran in both, so both do the same graph work and the difference is pure
+  control-flow cost:
+
+  | Program | before (s) | after (s) | change |
+  |---|---|---|---|
+  | cent | 0.447 | 0.569 | +27% |
+  | primes | 5.213 | 6.127 | +18% |
+  | primesort | 1.071 | 1.299 | +21% |
+  | queens_det | 5.330 | 6.505 | +22% |
+  | reverse_builtin | 0.393 | 0.484 | +23% |
+  | sort | 1.513 | 2.134 | +41% |
+  | tak | 14.317 | 14.964 | +5% |
+  | tailsum | 0.660 | 0.876 | +33% |
+  | buildFold, bf_test, reverse_foldr, reverse_prim, sum_square | crash | 0.17–1.03 | now run |
+
+  Likely the largest cost: every case pushes a frame and reloads its
+  variables from it, even when the scrutinee is already evaluated (the
+  common case). A frame is only needed when the case actually suspends to
+  evaluate. Generating the dispatch inline, and pushing the frame (and
+  jumping to a resume block) only on the `FUNCTION_TAG` path, should
+  recover most of it. Same for `apply`, `$!` and the other routines.
+  Other candidates: `rice_sp`/`rice_root` as globals rather than
+  registers, and `eval_hnf`'s sentinel push for the C-nested callers that
+  remain.
+
 1. **Machine core** (`runtime/machine.h`/`.c`): `Frame`, `FrameInfo`,
    the growable stack, `PUSH`/`POP`/`RETURN`, the sentinel and the C
    driver `eval_hnf`. `HNF(x)` becomes `eval_hnf(x)` everywhere it's
