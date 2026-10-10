@@ -26,7 +26,7 @@ AR      ?= ar
 # This is experimental, not verified to work.
 # I'll probably replace Boehm with a custom GC later.
 
-SRC := runtime.c stack.c machine.c
+SRC := runtime.c stack.c machine.c heap.c
 OBJ := $(SRC:.c=.o)
 LIB := libriceruntime.a
 

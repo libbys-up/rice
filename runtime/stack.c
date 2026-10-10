@@ -1,4 +1,5 @@
 #include<stddef.h>
+#include<stdio.h>
 #include<stdbool.h>
 #include<stdlib.h>
 #include<string.h>
@@ -9,12 +10,15 @@
 #include "runtime.h"
 #include "memory.h"
 
+// The trail is runtime-owned memory, not part of the garbage-collected
+// heap: malloc, not alloc. (Its entries point into the heap and are GC
+// roots; the array itself never moves under the collector.)
 Stack* new_stack()
 {
-    Stack* s = (Stack*)alloc(sizeof(Stack));
+    Stack* s = (Stack*)malloc(sizeof(Stack));
     s->size = 0;
     s->capacity = INIT_CAPACITY;
-    s->array = (FieldPair*)alloc(sizeof(FieldPair)*INIT_CAPACITY);
+    s->array = (FieldPair*)malloc(sizeof(FieldPair)*INIT_CAPACITY);
     return s;
 }
 
@@ -23,19 +27,13 @@ void stack_push(Stack* s, union field from, union field rep, bool choice)
 {
     if(s->size == s->capacity)
     {
-        int size = s->capacity*sizeof(FieldPair);
-        FieldPair* new_array = (FieldPair*)alloc(2*size);
-        memcpy(new_array, s->array, size);
         s->capacity *= 2;
-#ifdef GC
-        // GC_MALLOC'd memory is collector-managed; calling the ordinary
-        // free() on it is undefined behavior. Just drop the old array --
-        // the collector reclaims it once nothing references it, same as
-        // any other GC_MALLOC'd block that goes out of scope.
-#else
-        free(s->array);
-#endif
-        s->array = new_array;
+        s->array = (FieldPair*)realloc(s->array, s->capacity * sizeof(FieldPair));
+        if(s->array == NULL)
+        {
+            fprintf(stderr, "Error: can't grow the backtracking stack\n");
+            exit(1);
+        }
     }
     s->array[s->size].choice = choice;
     s->array[s->size].lhs = from;
