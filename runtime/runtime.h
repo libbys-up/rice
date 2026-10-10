@@ -9,6 +9,7 @@
 #include "memory.h"
 #include "prim.h"
 #include "machine.h"
+#include "gc.h"
 
 #define FAIL_TAG     0
 #define FUNCTION_TAG 1
@@ -178,6 +179,8 @@ static inline void HNF(union field root)
 // them, the way a single case-dispatch loop's own local already does.
 static inline field settle(union field root, bool* nondet, void (*force)(field))
 {
+    // force() runs the machine, so a collection may move root.
+    GC_ROOT(root);
     while (true)
     {
         if (nondet != NULL)
@@ -195,6 +198,7 @@ static inline field settle(union field root, bool* nondet, void (*force)(field))
         }
         else
         {
+            GC_UNROOT(1);
             return root;
         }
     }
@@ -748,7 +752,7 @@ static inline void set_apply3(union field root, union field f, union field v1, u
 {
     root.n->symbol = &apply_symbol;
     root.n->missing = -3;
-    root.n->children[3].a = (union field*)alloc(sizeof(union field) * 1);
+    root.n->children[3].a = alloc_spill(1);
     child_at(root,0) = f;
     child_at(root,1) = v3;
     child_at(root,2) = v2;
@@ -765,7 +769,7 @@ static inline union field make_apply3(union field f, union field v1, union field
 #endif
     n.n->symbol = &apply_symbol;
     n.n->missing = -3;
-    n.n->children[3].a = (union field*)alloc(sizeof(union field) * 1);
+    n.n->children[3].a = alloc_spill(1);
     child_at(n,0) = f;
     child_at(n,1) = v3;
     child_at(n,2) = v2;

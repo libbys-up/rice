@@ -2,6 +2,7 @@
 #define MEMORY_H
 
 #include<stdlib.h>
+#include "node.h"
 
 #ifdef GC
 // Experimental Boehm build (Makefile): kept until the copying collector
@@ -27,6 +28,11 @@ extern size_t rice_heap_since_gc; // bytes allocated since the last collection
 void  memory_init(void);
 void* rice_alloc_slow(size_t size);
 
+// For the collector: start a fresh to-space, returning the old chunk list,
+// and later free that list.
+void* heap_begin_collection(void);
+void  heap_end_collection(void* from_space);
+
 // Allocates `size` bytes of zeroed memory, 8-byte aligned.
 static inline void* alloc(size_t size)
 {
@@ -38,6 +44,17 @@ static inline void* alloc(size_t size)
     rice_heap_next = p + size;
     rice_heap_since_gc += size;
     return p;
+}
+
+// A node's spill array (its children past the third), with one header
+// word in front of it, at a[-1]: zero until the collector copies the
+// array, then the copy's address. A node and its trail snapshot can share
+// one spill array (save_snapshot copies the node, not the array), and the
+// header lets the collector keep that sharing.
+static inline union field* alloc_spill(size_t n)
+{
+    union field* a = (union field*)alloc((n + 1) * sizeof(union field));
+    return a + 1;
 }
 
 #endif

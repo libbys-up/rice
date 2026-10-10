@@ -194,6 +194,38 @@ Status:
   forwarding address once copied), allocated through one helper,
   `alloc_spill`.
 
+- **Stage 2, 2026-10-09.** `runtime/gc.{h,c}`: a copying collector with
+  an explicit work list rather than a linear Cheney scan. Spill arrays
+  carry no type information, so the to-space can't be walked; each copied
+  node is pushed, and each copied spill array is traced once, with its
+  first owner's layout. `GC_SAFE_POINT(root, sp)` is the first statement
+  of every `_hnf`: generated (`ToC.showBody`) and all 32 runtime entry
+  points. C roots: `settle`, `settleStringNode`, `toCStr`, `strictApply`
+  and the `$!!`/`$##` entries, `constrEq`, `prim_ioError`, the seven
+  `toCStr` callers, `writeToFile`, `nf_all`, `run_io`, `machine_run`.
+  From-space is poisoned with `0xAB` under `GC_STRESS` or `DEBUG`.
+
+  Results: correct output, and much lower peak memory on the deep tests
+  (`foldr (+) 0 [1..10^6]` 1.7 GB → 306 MB, `$!!` on a million elements
+  1.6 GB → 469 MB, two million IO steps 2.5 GB → 442 MB; what remains is
+  genuinely live, like a million pending frames). Under
+  `RICE_CFLAGS=-DGC_STRESS tests/run.sh`, a collection at every safe point:
+  56 pass and no crash or wrong output; 11 time out at 15 s (the five
+  deep tests, and `fib`, `fib_det`, `half`, `queens_perm`, `schedule`,
+  `sieve`, which run long when every function entry copies the heap).
+
+  Normal threshold: full suite 67/67, slow 28/28, no-scoped-retry 37/37.
+  Timing, interleaved, against stage 1 (bump allocation, no collection):
+  cent −13%, primesort −22%, sort −21%, tailsum −11%, all *faster*, and
+  peak memory drops (sort 6.5 GB → 78 MB, tailsum 2.4 GB → 78 MB). The
+  exception is **reverse_builtin, +49%**: it builds a 4M-element list that
+  stays live (663 MB at its last collection). Each of its four collections
+  copies everything built so far, about 1.1 GB in total. That's a copying
+  collector's worst case, a live set that keeps growing. Options for
+  later: a larger growth factor than 2× (fewer collections, more memory),
+  or generations. `-DGC_STATS` prints every collection's live size to
+  stderr.
+
 1. **Allocator only.** Chunked bump allocation replaces `calloc`; no
    collection yet. Move `bt_stack` to `malloc`. This alone should show the
    allocation-speed effect. Measure with the interleaved timer.

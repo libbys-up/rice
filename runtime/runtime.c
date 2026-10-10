@@ -52,7 +52,7 @@ void set_free_constructor(union field n, union field like)
     n.n->children[3].a = NULL;
     if(sym->arity > 3)
     {
-        n.n->children[3].a = (union field*)alloc((sym->arity - 3) * sizeof(union field));
+        n.n->children[3].a = alloc_spill(sym->arity - 3);
     }
     for(unsigned int i = 0; i < sym->arity; i++)
     {
@@ -94,7 +94,7 @@ union field set_copy(union field new_node, union field node)
     int size = (arity-3)*sizeof(union field);
     if(arity > 3)
     {
-        new_node.n->children[3].a = (union field*)alloc(size);
+        new_node.n->children[3].a = alloc_spill(arity - 3);
         memcpy(new_node.n->children[3].a, node.n->children[3].a, size);
     }
     return new_node;
@@ -119,10 +119,9 @@ union field set_copy_free(union field new_node, union field node)
 #endif
     new_node.n->missing = node.n->missing;
     new_node.n->nondet = true;
-    int size = (arity-3)*sizeof(union field);
     if(arity > 3)
     {
-        new_node.n->children[3].a = (union field*)alloc(size);
+        new_node.n->children[3].a = alloc_spill(arity - 3);
     }
     for(int i = 0; i < arity; i++)
     {
@@ -181,6 +180,7 @@ static const FrameInfo apply_info =
 
 RICE_CC void apply_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     debug(LOW, "HNF apply: \n");
     debug_expr(LOW, root);
     sp = frame_push(sp, &apply_info);
@@ -1064,7 +1064,9 @@ void ground_nf(union field expr)
 // program. See Rice.Codegen.C.ToC.writeMain / Rice.Main's --interactive.
 void run_io(union field expr)
 {
+    GC_ROOT(expr);  // nf runs the machine
     nf(expr);
+    GC_UNROOT(1);
     if(TAG(expr) == FAIL_TAG)
     {
         fprintf(stderr, "Program failed.\n");
@@ -1076,6 +1078,8 @@ void run_io(union field expr)
 void nf_all(union field expr)
 {
     bool solution = false;
+    // Every nf runs the machine; expr is the same root throughout.
+    GC_ROOT(expr);
     nf(expr);
     debug(HIGH, "MAYBE SOLUTION 1: ");
     debug_expr(HIGH, expr);
@@ -1106,6 +1110,7 @@ void nf_all(union field expr)
         }
         //printf("stack size: %zu\n", bt_stack->size);
     }
+    GC_UNROOT(1);
     if(!solution)
     {
         printf("No solutions found\n");
@@ -1120,6 +1125,6 @@ void nf_all(union field expr)
 // eval_hnf calls, then returns to the frame on top of the machine stack.
 // ----------------------------------------------------------------------
 
-RICE_CC void CTR_hnf(union field root, Frame* sp)     { rice_root = root; CTR_impl(); RETURN(); }
-RICE_CC void choice_hnf(union field root, Frame* sp)  { rice_root = root; choice_impl(); RETURN(); }
-RICE_CC void forward_hnf(union field root, Frame* sp) { (void)root; RETURN(); }
+RICE_CC void CTR_hnf(union field root, Frame* sp)     { GC_SAFE_POINT(root, sp); rice_root = root; CTR_impl(); RETURN(); }
+RICE_CC void choice_hnf(union field root, Frame* sp)  { GC_SAFE_POINT(root, sp); rice_root = root; choice_impl(); RETURN(); }
+RICE_CC void forward_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); (void)root; RETURN(); }

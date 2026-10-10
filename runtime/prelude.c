@@ -94,7 +94,9 @@ static field settleStringNode(field s, char* c)
         // directly (reading the Node* itself reinterpreted as a raw
         // char), caught by an actual `read` round-trip test producing
         // garbage/truncated output instead of a real parse.
+        GC_ROOT(node);  // settle runs the machine
         field head = settle(child_at(node, 0), NULL, eval_hnf);
+        GC_UNROOT(1);
         *c = (char)child_at_c(head, 0);
     }
     return node;
@@ -114,7 +116,11 @@ static field settleStringNode(field s, char* c)
 char* toCStr(field string)
 {
     char c;
-    field node = settleStringNode(string, &c);
+    // Each step runs the machine; string is read again for the second pass.
+    field node = string;
+    GC_ROOT(string);
+    GC_ROOT(node);
+    node = settleStringNode(string, &c);
     int len = 0;
     while(node.n->symbol->tag != Prelude___LB_RB_TAG)
     {
@@ -131,6 +137,7 @@ char* toCStr(field string)
         cstr[i] = c;
         node = settleStringNode(child_at(node, 1), &c);
     }
+    GC_UNROOT(2);
     return cstr;
 }
 
@@ -149,7 +156,10 @@ static bool strictApply(field root, void (*force)(field))
     field f = child_at(root, 0);
     field x = child_at(root, 1);
     bool nondet = false;
+    GC_ROOT(root);  // force runs the machine
+    GC_ROOT(f);
     x = settle(x, &nondet, force);
+    GC_UNROOT(2);
     trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
     {
@@ -171,6 +181,7 @@ static const FrameInfo strict_info =
 
 RICE_CC void Prelude___DL_EX_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     sp = frame_push(sp, &strict_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 1);
@@ -197,8 +208,11 @@ static RICE_CC void strict_k(union field _root, Frame* sp)
 }
 RICE_CC void Prelude___DL_EX_EX_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     rice_sp = sp;
+    GC_ROOT(root);
     bool applied = strictApply(root, nf);
+    GC_UNROOT(1);
     sp = rice_sp;
     if(!applied)
         RETURN();
@@ -206,8 +220,11 @@ RICE_CC void Prelude___DL_EX_EX_hnf(union field root, Frame* sp)
 }
 RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     rice_sp = sp;
+    GC_ROOT(root);
     bool applied = strictApply(root, ground_nf);
+    GC_UNROOT(1);
     sp = rice_sp;
     if(!applied)
         RETURN();
@@ -283,6 +300,7 @@ static const FrameInfo commit_info =
 
 RICE_CC void Prelude__bindIO_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     sp = frame_push(sp, &bind_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
@@ -353,7 +371,9 @@ static void Prelude__prim_USputChar_impl(void)
 static void Prelude__prim_USerror_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* msg = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     error(msg, root);
 }
 
@@ -394,7 +414,9 @@ static void Prelude__prim_USshowCharLiteral_impl(void)
 static void Prelude__prim_USshowStringLiteral_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* s = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     size_t len = strlen(s);
     // Worst case every byte expands to a 4-byte decimal escape, plus the
     // two surrounding quotes and the terminator.
@@ -444,6 +466,7 @@ static const FrameInfo and_info =
 
 RICE_CC void Prelude___AN_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     sp = frame_push(sp, &and_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
@@ -494,6 +517,7 @@ static void Prelude__failed_impl(void)
 // reduce it with a tail jump.
 RICE_CC void Prelude__apply_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     set_apply1(root, child_at(root, 0), child_at(root, 1));
     MUSTTAIL return apply_hnf(root, sp);
 }
@@ -506,6 +530,7 @@ static const FrameInfo cond_info =
 
 RICE_CC void Prelude__cond_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     sp = frame_push(sp, &cond_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
@@ -555,8 +580,11 @@ static void Prelude__prim_USioError_impl(void)
     // and consistent with strictApply/cond's own fix, just above. No
     // nondet tracking needed: error() below is exit(1), never backtracked
     // into, so there's nothing to trail.
+    GC_ROOT(root);  // settle and toCStr run the machine
+    GC_ROOT(err);
     err = settle(err, NULL, eval_hnf);
     char* msg = toCStr(child_at(err, 0));
+    GC_UNROOT(2);
     error(msg, root);
 }
 
@@ -677,8 +705,12 @@ static void Prelude__constrEq_impl(void)
     field root = rice_root;
     field x = child_at(root, 0);
     field y = child_at(root, 1);
+    GC_ROOT(root);  // nf runs the machine
+    GC_ROOT(x);
+    GC_ROOT(y);
     nf(x);
     nf(y);
+    GC_UNROOT(3);
     // Decided after unifying (unify_step reports what the outcome read),
     // but before root is written. unify_step's own free-variable bindings
     // are trailed separately, so the order of the two frames doesn't matter.
@@ -891,6 +923,7 @@ static const FrameInfo nseq_info =
 
 RICE_CC void Prelude__nonstrictEq_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     sp = frame_push(sp, &nseq_info);
     SLOT(0) = root;
     sp = lu_push(sp, child_at(root, 0), child_at(root, 1));
@@ -947,6 +980,7 @@ static const FrameInfo notfree_info =
 
 RICE_CC void Prelude__ensureNotFree_hnf(union field root, Frame* sp)
 {
+    GC_SAFE_POINT(root, sp);
     sp = frame_push(sp, &notfree_info);
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
@@ -1015,7 +1049,9 @@ static char* readWholeFile(const char* path, const char* what)
 static void Prelude__prim_USreadFile_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* path = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     char* content = readWholeFile(path, "readFile");
     free(path);
     overwrite_root(root, toCurryString(content));
@@ -1026,8 +1062,10 @@ static void Prelude__prim_USreadFile_impl(void)
 // same fopen mode letter fwrite/fopen themselves use.
 static void writeToFile(field root, char mode)
 {
+    GC_ROOT(root);  // toCStr runs the machine
     char* path = toCStr(child_at(root, 0));
     char* content = toCStr(child_at(root, 1));
+    GC_UNROOT(1);
     char fmode[2] = { mode, '\0' };
     FILE* f = fopen(path, fmode);
     if(f == NULL)
@@ -1190,7 +1228,9 @@ static field oneParse(field value, const char* rest)
 static void Prelude__prim_USreadNatLiteral_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* s = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     field result;
     if (!isAsciiDigit(s[0]))
     {
@@ -1210,7 +1250,9 @@ static void Prelude__prim_USreadNatLiteral_impl(void)
 static void Prelude__prim_USreadCharLiteral_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* s = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     CharParse r = tryParseCharLiteral(s);
     field result = r.ok
       ? oneParse(make_Prelude__Char((field)(unsigned long)(unsigned char)r.value, 0), r.rest)
@@ -1222,7 +1264,9 @@ static void Prelude__prim_USreadCharLiteral_impl(void)
 static void Prelude__prim_USreadStringLiteral_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* s = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     StringParse r = tryParseStringLiteral(s);
     field result = r.ok ? oneParse(toCurryString(r.value), r.rest) : noParse();
     overwrite_root(root, result);
@@ -1233,7 +1277,9 @@ static void Prelude__prim_USreadStringLiteral_impl(void)
 static void Prelude__prim_USreadFloatLiteral_impl(void)
 {
     field root = rice_root;
+    GC_ROOT(root);  // toCStr runs the machine
     char* s = toCStr(child_at(root, 0));
+    GC_UNROOT(1);
     FloatParse r = tryParseFloatLiteral(s);
     field result = r.ok
       ? oneParse(make_Prelude__Float((field)(double)r.value, 0), r.rest)
@@ -1248,22 +1294,22 @@ static void Prelude__prim_USreadFloatLiteral_impl(void)
 // eval_hnf calls, then returns to the frame on top of the machine stack.
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__returnIO_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__returnIO_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__getChar_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__getChar_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USputChar_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USputChar_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USerror_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USerror_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowIntLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowIntLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowFloatLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowCharLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowCharLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowStringLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USshowStringLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__failed_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__failed_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USioError_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USioError_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__constrEq_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__constrEq_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadFile_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadFile_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USwriteFile_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USwriteFile_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USappendFile_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USappendFile_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__catch_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__catch_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadNatLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadNatLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadCharLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadCharLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadStringLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadStringLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(union field root, Frame* sp) { rice_root = root; rice_sp = sp; Prelude__prim_USreadFloatLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__returnIO_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__returnIO_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__getChar_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__getChar_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USputChar_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USputChar_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USerror_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USerror_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowIntLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowIntLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowFloatLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowCharLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowCharLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USshowStringLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowStringLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__failed_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__failed_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USioError_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USioError_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__constrEq_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__constrEq_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadFile_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadFile_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USwriteFile_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USwriteFile_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USappendFile_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USappendFile_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__catch_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__catch_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadNatLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadNatLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadCharLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadCharLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadStringLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadStringLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadFloatLiteral_impl(); sp = rice_sp; RETURN(); }

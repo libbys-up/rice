@@ -66,9 +66,11 @@ Frame* machine_grow(Frame* sp, size_t words)
 void machine_run(Code code, union field x)
 {
     union field saved_root = rice_root;
+    GC_ROOT(x);  // for the error message below
     Frame* base = frame_push(rice_sp, &sentinel_info);
     ptrdiff_t depth = machine_depth(base);
     code(x, base);
+    GC_UNROOT(1);
     // sentinel_code stored the machine's final sp in rice_sp.
     if(machine_depth(rice_sp) != depth || rice_sp->info != &sentinel_info)
     {

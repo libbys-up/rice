@@ -186,7 +186,10 @@ showBody :: Gen -> IBlock -> G [CStmt]
 showBody gen block = do
   b <- showBlock gen block
   return $
-    [ scall "SCOPED_CUTOFF" []
+    -- A safe point (src/gc-plan.md): the only live pointers here are
+    -- root, the frames, the trail and C roots, so a collection may run.
+    [ scall "GC_SAFE_POINT" [root, text "sp"]
+    , scall "SCOPED_CUTOFF" []
     , scall "debug"      [text "LOW", dquotes (text ("HNF " ++ gLabel gen ++ ":\\n"))]
     , scall "debug_expr" [text "LOW", root]
     ] ++ b

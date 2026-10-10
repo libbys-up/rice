@@ -1,15 +1,21 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "memory.h"
 
 // Chunked bump allocation (src/gc-plan.md). Chunks come from calloc, so
 // every allocation starts zeroed: code relies on fresh nodes having NULL
-// children. Nothing is freed yet; the copying collector will free whole
-// chunks.
+// children. The collector (gc.c) copies everything live into fresh chunks
+// and frees the old ones whole.
 
 char*  rice_heap_next  = NULL;
 char*  rice_heap_limit = NULL;
 size_t rice_heap_since_gc = 0;
+#ifdef GC_STRESS
+size_t rice_heap_threshold = 0;
+#else
+size_t rice_heap_threshold = (size_t)64 << 20;
+#endif
 
 #define CHUNK_BYTES ((size_t)4 << 20)
 
@@ -55,4 +61,30 @@ void* rice_alloc_slow(size_t size)
     rice_heap_next  = p + size;
     rice_heap_limit = p + CHUNK_BYTES;
     return p;
+}
+
+void* heap_begin_collection(void)
+{
+    Chunk* old = chunks;
+    chunks = NULL;
+    rice_heap_next  = new_chunk(CHUNK_BYTES);
+    rice_heap_limit = rice_heap_next + CHUNK_BYTES;
+    return old;
+}
+
+void heap_end_collection(void* from_space)
+{
+    Chunk* c = (Chunk*)from_space;
+    while (c != NULL)
+    {
+        Chunk* next = c->next;
+#if defined(GC_STRESS) || DEBUG > 0
+        // A stale pointer into freed space then reads this pattern, which
+        // tag dispatch and CHECK_LAYOUT reject, instead of old data that
+        // happens to still look right.
+        memset(c + 1, 0xAB, c->size);
+#endif
+        free(c);
+        c = next;
+    }
 }

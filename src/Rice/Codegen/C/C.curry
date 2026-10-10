@@ -212,10 +212,10 @@ alloc_n n = case n of
   1 -> text "(Node*)alloc(sizeof(Node))"
   _ -> text "(Node*)alloc" <> parens (int n <+> text "* sizeof(Node)")
 
+--- A node's spill array of `n` children (`runtime/memory.h`'s
+--- `alloc_spill`, which adds the collector's header word).
 alloc_f :: Int -> CExpr
-alloc_f n = case n of
-  1 -> text "(field*)alloc(sizeof(field))"
-  _ -> text "(field*)alloc" <> parens (int n <+> text "* sizeof(field)")
+alloc_f n = text "alloc_spill" <> parens (int n)
 
 --- A C function's signature line, no trailing `;` or body.
 sig :: CType -> CName -> [(CType,CName)] -> Doc
