@@ -184,6 +184,11 @@ run_one() {
   # change, like a --debug trace.
   local no_golden=0
   grep -qE 'rice-golden: none' "$src" && no_golden=1
+  # `-- rice-maxrss: N` caps the run's peak resident memory at N MB
+  # (src/gc-plan.md, stage 3): a run that otherwise passes but went over
+  # is a failure, which is how a garbage collector regression shows up.
+  local maxrss_mb
+  maxrss_mb="$(grep -m1 -oE 'rice-maxrss: [0-9]+' "$src" | awk '{print $2}')"
   ( cd "$work" && timeout "$COMPILE_TIMEOUT" "$RICE" $flags "$name.curry" ) >"$build_log" 2>&1
   local build_ok=0
   [ -x "$work/$name" ] && build_ok=1
@@ -202,7 +207,16 @@ run_one() {
   fi
 
   local out_log="$work/out.log"
-  ( cd "$work" && timeout "$run_timeout" "./$name" ) >"$out_log" 2>&1
+  local time_log="$work/time.log"
+  if [ -n "$maxrss_mb" ]; then
+    # time outside timeout: if timeout killed time instead, the program
+    # would be left running. time's children's rusage covers the program,
+    # which timeout waits for.
+    ( cd "$work" && /usr/bin/time $TIME_RUSAGE_FLAG -o "$time_log" \
+        timeout "$run_timeout" "./$name" ) >"$out_log" 2>&1
+  else
+    ( cd "$work" && timeout "$run_timeout" "./$name" ) >"$out_log" 2>&1
+  fi
   local run_code=$?
 
   if [ "$run_code" -eq 124 ] || [ "$run_code" -eq 137 ]; then
@@ -235,6 +249,29 @@ run_one() {
       [ "$VERBOSE" -eq 1 ] && tail -20 "$out_log" | sed 's/^/      | /'
     fi
     return
+  fi
+
+  if [ -n "$maxrss_mb" ]; then
+    local rss_mb
+    rss_mb="$(peak_rss_mb "$time_log")"
+    if [ -z "$rss_mb" ]; then
+      fail=$((fail+1))
+      fails_list+=("$rel (couldn't read peak memory from $time_log)")
+      echo "FAIL  $rel  (couldn't read peak memory)"
+      return
+    fi
+    [ "$VERBOSE" -eq 1 ] && echo "      peak memory ${rss_mb} MB (limit ${maxrss_mb} MB)"
+    if [ "$rss_mb" -gt "$maxrss_mb" ]; then
+      if [ "$expected_fail" -eq 1 ]; then
+        xfail=$((xfail+1))
+        [ "$VERBOSE" -eq 1 ] && echo "XFAIL $rel  (peak memory ${rss_mb} MB > ${maxrss_mb} MB, as expected: $reason)"
+      else
+        fail=$((fail+1))
+        fails_list+=("$rel (peak memory ${rss_mb} MB, limit ${maxrss_mb} MB)")
+        echo "FAIL  $rel  (peak memory ${rss_mb} MB > ${maxrss_mb} MB)"
+      fi
+      return
+    fi
   fi
 
   if [ "$expected_fail" -eq 1 ]; then

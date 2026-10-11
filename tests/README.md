@@ -53,6 +53,8 @@ tests/
                      a program -- and isn't copied in at all)
     regressions/    programs written during this project's own debugging
                      sessions, to guard against the exact bugs they found
+    gc/             programs that would exhaust memory without a working
+                     collector, each with a `rice-maxrss` limit
     external/       hand-written programs covering language features not
                      well exercised elsewhere, informed by kics2's/pakcs's
                      own test suites (see "On the external/ programs" below)
@@ -82,6 +84,19 @@ A test can carry these as comments anywhere in its source:
 - `-- rice-golden: none`: only the exit status is checked, never the
   output, for output that legitimately changes with any codegen change
   (like a `--debug` trace).
+- `-- rice-maxrss: N`: the run's peak resident memory must stay at or
+  under N MB, measured with `/usr/bin/time` (`-l` on macOS, `-v` with GNU
+  time). Going over is a failure even if the output is right; an `XFAIL`
+  test that goes over counts as its expected failure. This is how a
+  garbage collector regression shows up (`src/gc-plan.md`, stage 3).
+
+Don't run two `run.sh` invocations with different `RICE_CFLAGS` at the
+same time: every program links the same `runtime/*.o`, which are rebuilt
+whenever their flags change, so one run can link the other's objects.
+For the same reason, don't run `make` in `runtime/`: it rebuilds those
+objects with the Makefile's flags (`-g`, no `-O2`) but leaves `rice`'s
+`*.o.flags` records alone, so every later program links unoptimized
+runtime code. If that happens, `rm runtime/*.o runtime/*.o.flags`.
 
 Every compile also gets `--lint-fieldreps` (`src/field-reps-plan.md`), so
 a lint failure is a compile failure.

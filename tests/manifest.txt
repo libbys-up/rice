@@ -92,3 +92,6 @@ perf/tailsum.curry  SLOW  10,000,000-deep genuinely tail-recursive accumulator -
 # .curry's own comment covers what that leaves unexercised (a failed
 # read/write is still fatal, not a catchable IOError) even though
 # readFile/writeFile/appendFile themselves are real implementations.
+
+# --- gc/: memory-bounded tests (`-- rice-maxrss: N`, src/gc-plan.md stage 3) ---
+gc/nondet_pending.curry  XFAIL  peak memory over its limit: under a pending choice every rewrite of the loop's root is trailed, and the trail keeps each snapshot (and what it points to) alive; dropping all but the oldest snapshot per node between backtracking stop points needs the collector to know the trail heights held in frames

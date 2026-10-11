@@ -39,3 +39,23 @@ matches_filter() {
   done
   return 1
 }
+
+# --- peak memory, for run.sh's `-- rice-maxrss: N`. BSD time (macOS) takes
+# -l and reports bytes; GNU time takes -v and reports kilobytes.
+if [ "$(uname)" = "Darwin" ]; then
+  TIME_RUSAGE_FLAG=-l
+else
+  TIME_RUSAGE_FLAG=-v
+fi
+
+# Prints the peak resident set size in MB (rounded up) from a time -o
+# file, or nothing if it isn't there.
+peak_rss_mb() {
+  local log="$1"
+  [ -f "$log" ] || return
+  if [ "$TIME_RUSAGE_FLAG" = "-l" ]; then
+    awk '/maximum resident set size/ {print int(($1 + 1048575) / 1048576); exit}' "$log"
+  else
+    awk -F: '/Maximum resident set size/ {print int(($2 + 1023) / 1024); exit}' "$log"
+  fi
+}

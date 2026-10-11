@@ -226,6 +226,51 @@ Status:
   or generations. `-DGC_STATS` prints every collection's live size to
   stderr.
 
+- **Stage 3, 2026-10-10.** `tests/run.sh` takes `-- rice-maxrss: N`
+  (peak RSS in MB, via `/usr/bin/time`), and `tests/programs/gc/` has
+  four memory-bounded tests. Writing them found two leaks:
+
+  * **Forwarding chains (fixed).** A long IO loop kept every step alive:
+    each step's bindIO node ends up forwarding to the next, and `run_io`
+    roots the first, so the live set grew ~48 bytes per step (`io_loop`:
+    927 MB, 234 MB live at the end). The collector now skips FORWARD
+    nodes on heap-internal pointers (`trace_child`) when no reader can
+    tell them from their target: not `nondet`, and not on the trail
+    (`GC_TRAILED`, a bit in `Node`'s padding, set for the length of a
+    collection). Roots keep pointing at the node itself, since their code
+    may be about to rewrite it. `io_loop` now peaks at 78 MB (from 927 MB)
+    and runs 34% faster (4.36 s -> 2.88 s, interleaved, best of 5). The
+    five benchmarks are unchanged (within 1%).
+  * **Trail retention (open; `gc/nondet_pending` is XFAIL).** Under a
+    pending choice, a tail-recursive loop whose accumulator depends on
+    the choice rewrites its root in place every iteration, and each
+    rewrite is trailed. Every snapshot keeps that iteration's list cell
+    and accumulator alive: 200k iterations peak at 824 MB. Treating the
+    trail as weak (drop entries whose node is unreachable, to a fixed
+    point through the snapshots) was tried and reverted: it dropped 6% of
+    entries here and none anywhere else in the suite, at the cost of a
+    hash over the trail per collection. Keeping only the *oldest* entry
+    per node between two points where `undo` can stop is necessary but
+    not enough: the oldest snapshot of the loop's root still points at
+    the list's head, whose *current* contents (the first cons) keep the
+    whole consumed list reachable. The design that works traces liveness
+    per "view" (the heap after undoing each trail segment), drops dead
+    entries, overwrites dead current contents, and compacts the trail:
+    see `~/curry/papers/unif/proofs/LEAKS.md` (design, soundness argument,
+    and model-level testing). It needs the collector to know every live
+    trail height: a frame rep for trail heights (an `R_TRAIL` beside
+    `R_INT`) in the bindIO/commit, `lu`, `nseq` and generated case-block
+    frames (`SCOPED_SAVE_CUTOFF`), plus registration for C code that
+    holds one across an evaluation.
+
+  Results: full 70/70 (+1 XFAIL), slow 83/83, no-scoped-retry 37/37,
+  `OPT_NONDET_TRAIL=0` regressions 37/37. Under `GC_STRESS` nothing
+  crashes or prints wrong output; the same long tests time out as in
+  stage 2, plus the `gc/` tests. Copies of those with inputs of a few
+  thousand give correct output under `GC_STRESS`. Stress costs about 1 ms
+  per safe point even with a tiny live set (a fresh zeroed chunk and a
+  poisoned old one each time), so anything long times out there.
+
 1. **Allocator only.** Chunked bump allocation replaces `calloc`; no
    collection yet. Move `bt_stack` to `malloc`. This alone should show the
    allocation-speed effect. Measure with the interleaved timer.

@@ -75,6 +75,9 @@ typedef struct Node
 {
     int missing;
     bool nondet;
+    // Scratch bits for the collector (gc.c), clear outside a collection.
+    // Fits in the padding after nondet.
+    unsigned char gc_bits;
 #if OPT_EPOCH_TRAIL
     // Allocation-order stamp for backtracking-optimizations.md's #5: set
     // once, when this exact memory is first allocated (never touched by

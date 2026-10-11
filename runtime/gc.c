@@ -17,6 +17,16 @@
 //    layout of the owner that reached it first (both owners have the same
 //    symbol: an in-place rewrite always allocates a fresh array).
 //  * A node's scan traces only slots 0-2; slots 3 and up are the array's.
+//  * A pointer from one heap node to another skips FORWARD nodes that no
+//    reader can tell apart from their target (trace_child): otherwise a
+//    loop that forwards each step's node to the next (an IO loop, through
+//    bindIO) keeps the whole chain alive from its first node.
+
+// Set on the trail's nodes for the length of a collection: trace_child
+// must not skip such a FORWARD node, since undo will turn it back into
+// something else. A copy inherits the bit; clear_trailed clears it on the
+// copies.
+#define GC_TRAILED 1
 
 static Symbol gc_moved_symbol =
     { .tag = 255, .arity = 0, .name = "<gc-moved>", .hnf = &CTR_hnf };
@@ -121,6 +131,64 @@ static inline void trace(union field* f)
         f->n = copy_node(f->n);
 }
 
+// --- forwarding chains -----------------------------------------------------
+
+static void mark_trailed(void)
+{
+    for (size_t i = 0; i < bt_stack->size; i++)
+        if (bt_stack->array[i].lhs.n != NULL)
+            bt_stack->array[i].lhs.n->gc_bits |= GC_TRAILED;
+}
+
+static void clear_trailed(void)
+{
+    for (size_t i = 0; i < bt_stack->size; i++)
+        if (bt_stack->array[i].lhs.n != NULL)
+            bt_stack->array[i].lhs.n->gc_bits &= ~GC_TRAILED;
+}
+
+// A FORWARD node that reads exactly like its target: not nondet (readers
+// OR that flag in as they pass through) and not on the trail (undo would
+// turn it back into something else). Moved nodes have gc_moved_symbol, so
+// a chain stops at the first node already copied.
+static bool elidable(Node* n)
+{
+    return n->missing >= 0 && n->symbol->tag == FORWARD_TAG && !n->nondet &&
+           n->children[0].n != NULL && !(n->gc_bits & GC_TRAILED);
+}
+
+// trace for a pointer inside a heap node: skips elidable FORWARD nodes.
+// Only heap-internal pointers do this. Roots (the root argument, frame
+// slots, C roots, the trail) can name a node their code is about to
+// rewrite, so they keep pointing at the node itself.
+static inline void trace_child(union field* f)
+{
+    Node* n = f->n;
+    if (n == NULL)
+        return;
+    if (elidable(n))
+    {
+        // A cycle of forwards would never end; give up on long chains.
+        Node* t = n;
+        size_t steps = 0;
+        while (elidable(t) && steps++ < ((size_t)1 << 20))
+            t = t->children[0].n;
+        if (!elidable(t))
+        {
+            // Point every node on the chain at its end, so another
+            // pointer into the middle of it doesn't walk it again.
+            for (Node* m = n; m != t; )
+            {
+                Node* next = m->children[0].n;
+                m->children[0].n = t;
+                m = next;
+            }
+            n = t;
+        }
+    }
+    f->n = copy_node(n);
+}
+
 // --- scanning ------------------------------------------------------------
 
 static void scan_node(Node* c)
@@ -128,20 +196,20 @@ static void scan_node(Node* c)
     if (c->missing < 0)  // apply: child 0 the function, then the arguments
     {
         int nargs = -c->missing;
-        trace(&c->children[0]);
+        trace_child(&c->children[0]);
         for (int i = 1; i <= nargs && i < 3; i++)
-            trace(&c->children[i]);
+            trace_child(&c->children[i]);
         return;
     }
     Symbol* s = c->symbol;
     switch (s->tag)
     {
         case FORWARD_TAG:
-            trace(&c->children[0]);
+            trace_child(&c->children[0]);
             return;
         case CHOICE_TAG:  // slot 2 is the raw side
-            trace(&c->children[0]);
-            trace(&c->children[1]);
+            trace_child(&c->children[0]);
+            trace_child(&c->children[1]);
             return;
         default:
             break;
@@ -149,7 +217,7 @@ static void scan_node(Node* c)
     int filled = filled_arity((union field){ .n = c });
     for (int i = 0; i < filled && i < 3; i++)
         if (child_rep(s, i) == R_PTR)
-            trace(&c->children[i]);
+            trace_child(&c->children[i]);
 }
 
 static void scan_spill(SpillItem it)
@@ -157,7 +225,7 @@ static void scan_spill(SpillItem it)
     if (it.missing < 0)  // an apply node's arguments: all pointers
     {
         for (int j = 0; j < it.len; j++)
-            trace(&it.a[j]);
+            trace_child(&it.a[j]);
         return;
     }
     int filled = (int)it.sym->arity - (it.missing > 0 ? it.missing : 0);
@@ -165,7 +233,18 @@ static void scan_spill(SpillItem it)
     {
         int i = j + 3;
         if (i < filled && child_rep(it.sym, i) == R_PTR)
-            trace(&it.a[j]);
+            trace_child(&it.a[j]);
+    }
+}
+
+static void drain(void)
+{
+    while (node_n > 0 || spill_n > 0)
+    {
+        if (node_n > 0)
+            scan_node(node_work[--node_n]);
+        else
+            scan_spill(spill_work[--spill_n]);
     }
 }
 
@@ -176,6 +255,7 @@ union field gc_collect(union field root, Frame* sp)
     unsigned long saved_mem = mem;  // copies aren't program allocations
     void* from_space = heap_begin_collection();
     live_bytes = 0;
+    mark_trailed();
 
     trace(&root);
 
@@ -199,13 +279,8 @@ union field gc_collect(union field root, Frame* sp)
     for (size_t i = 0; i < gc_nroots; i++)
         trace(gc_roots[i]);
 
-    while (node_n > 0 || spill_n > 0)
-    {
-        if (node_n > 0)
-            scan_node(node_work[--node_n]);
-        else
-            scan_spill(spill_work[--spill_n]);
-    }
+    drain();
+    clear_trailed();
 
     heap_end_collection(from_space);
     mem = saved_mem;
@@ -216,8 +291,8 @@ union field gc_collect(union field root, Frame* sp)
 #endif
     debug(LOW, "gc: %zu bytes live\n", live_bytes);
 #ifdef GC_STATS
-    fprintf(stderr, "gc: %zu bytes live, next at %zu allocated\n",
-            live_bytes, rice_heap_threshold);
+    fprintf(stderr, "gc: %zu bytes live, next at %zu allocated, %zu trail entries\n",
+            live_bytes, rice_heap_threshold, bt_stack->size);
 #endif
     return root;
 }
