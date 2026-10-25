@@ -21,6 +21,9 @@ tests/.run/
 # tests/bench.sh's per-config scratch dirs and results.tsv
 tests/.bench/
 
+# tests/optbench.sh's results and builds
+tests/.optbench/
+
 # LaTeX build byproducts (src/*.tex compiled locally; the .pdf itself is
 # committed as the actual deliverable, these auxiliary files aren't)
 src/*.aux

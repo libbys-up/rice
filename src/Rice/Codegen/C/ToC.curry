@@ -176,12 +176,13 @@ funSource reps (IFunction name _ _ _ body) = case body of
        , text "" ] ++
        concat [ d ++ [text ""] | CaseBlock _ d <- cs ]
 
---- backtracking-optimizations.md's #3: every function's trail-stack
---- cutoff is recorded once, here, before any of its own body could have
---- pushed anything -- SCOPED_CUTOFF() (runtime.h) is a no-op declaration
---- when OPT_SCOPED_BACKTRACK is off, so this line is always emitted,
---- identically, regardless of the flag: codegen never forks on an OPT_*
---- flag, only the macros' own expansion does.
+--- `REWRITE_STAMP()` (runtime.h) records the epoch that nodes built by
+--- this body get under the write barrier, for a body (or literal-case
+--- branch) that writes `root` with no enclosing constructor case. Such a
+--- write is deterministic, so the stamp only depends on `root`'s own flag
+--- and age, and nothing between here and the write forces anything.
+--- Like every OPT_* macro, it expands to nothing when its flag is off:
+--- codegen never forks on an OPT_* flag, only the macros' expansion does.
 showBody :: Gen -> IBlock -> G [CStmt]
 showBody gen block = do
   b <- showBlock gen block
@@ -189,7 +190,7 @@ showBody gen block = do
     -- A safe point (src/gc-plan.md): the only live pointers here are
     -- root, the frames, the trail and C roots, so a collection may run.
     [ scall "GC_SAFE_POINT" [root, text "sp"]
-    , scall "SCOPED_CUTOFF" []
+    , scall "REWRITE_STAMP" []
     , scall "debug"      [text "LOW", dquotes (text ("HNF " ++ gLabel gen ++ ":\\n"))]
     , scall "debug_expr" [text "LOW", root]
     ] ++ b
@@ -229,7 +230,7 @@ dedupBy key = go []
 
 showDecl :: IVarDecl -> CStmt
 showDecl (IVarDecl  v) = fieldDecl v
-showDecl (IFreeDecl v) = text "field" <+> var v <+> equals <+> call "free_var" [] <> semi
+showDecl (IFreeDecl v) = text "field" <+> var v <+> equals <+> stamped (call "free_var" []) <> semi
 
 showAsgn :: IAssign -> CStmt
 showAsgn (INodeAssign v ixs e) = children (var v) ixs .= showExpr e
@@ -240,8 +241,8 @@ showAsgn (IVarAssign  v e)     = var v .= showExpr e
 --- session that added this) the main real-world way a program actually
 --- fails. With an enclosing case's own scrutinee variable in scope
 --- (`Just v`, from `showConsBranch`), try SCOPED_RETRY first: if
---- `undo(_cutoff)` finds and flips a choice point in this function's own
---- scope, resetting `_scrutinee` back to `v` and looping lets the SAME
+--- `undo(_cutoff)` finds and flips a choice point made since that case
+--- began, resetting `_scrutinee` back to `v` and looping lets the SAME
 --- case-dispatch loop (already present, already handling FORWARD_TAG the
 --- same way) redispatch whatever undo restored, without ever touching
 --- `root` at all. With no enclosing case (`Nothing` -- a function that's
@@ -250,13 +251,14 @@ showAsgn (IVarAssign  v e)     = var v .= showExpr e
 --- A failed retry pops the `trail_node(root, nondet)` frame that
 --- `showConsBranch` already pushed for this branch, so SCOPED_RESAVE
 --- re-saves `root` before `fail` (see runtime.h) -- otherwise `fail(root)`
---- would be an unlogged write.
+--- would be an unlogged write. It always trails, whatever `nondet` says
+--- (backtracking_proofs.md, #3 rule 1).
 showStmt :: Gen -> IStatement -> G [CStmt]
 showStmt gen st = case st of
   IExempt ->
     return $
       maybe [] (const [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
-                      , scall "SCOPED_RESAVE" [nondetVar, root] ]) ctx ++
+                      , scall "SCOPED_RESAVE" [root] ]) ctx ++
       uncaseTrail ctx ++
       scall "fail" [root] : debugLeave (gLabel gen) ++ leave gen returnStmt
   IReturn e ->
@@ -338,8 +340,20 @@ writeBack v
 ---   2           the dispatch loop's current scrutinee (`_scrutinee`)
 ---   3 ..        every other variable the branches use (`caseFreeVars`)
 ---   nondet      the loop's `nondet` flag (raw)
----   cutoff      the function's SCOPED_CUTOFF (raw)
+---   cutoff      the trail's height when the case began (raw, #3)
 --- with reps from `gReps`, so the GC can trace it.
+---
+--- The loop's `nondet` starts at `root`'s own flag, not false
+--- (backtracking_proofs.md, nondet tracking rules 2 and 3). Flags are
+--- sticky: a node rewritten nondeterministically before stays that way
+--- for its later rewrites. For a nested case this also carries the
+--- enclosing case's flag in, since that case's `trail_node` set `root`'s
+--- flag if it read anything nondeterministic.
+---
+--- The retry cutoff is per case, not per function: a retry only redoes
+--- this case's dispatch, so it may only flip choices made since this case
+--- began. A choice an enclosing case's dispatch read is older than that
+--- (backtracking_proofs.md, #3 rule 2).
 enterCase :: Gen -> IVarIndex -> [IConsBranch] -> G [CStmt]
 enterCase gen v bs = do
   (k, done) <- get
@@ -362,7 +376,7 @@ enterCase gen v bs = do
     , slot 1 .= var v
     , slot 2 .= var v ] ++
     [ slot (3 + i) .= var x | (i, x) <- zip [0 ..] frees ] ++
-    [ rawSlot ndS .= int 0
+    [ rawSlot ndS .= nondet root
     , scall "SCOPED_SAVE_CUTOFF" [slot cutS]
     , text "MUSTTAIL return" <+> text fname <> text "(root, sp)" <> semi ]
 
@@ -467,12 +481,13 @@ declBlock (IBlock decls asgns st) =
 --- `IExempt`'s "this scrutinee is fine, just unhandled". SCOPED_RETRY
 --- goes first, before `root` is touched at all: `undo()` only walks the
 --- trail stack, so it doesn't need `root` mutated first, and if it finds
---- nothing to flip, falling through to the unmodified trail_node/fail
---- sequence is exactly today's behavior either way.
+--- nothing to flip, we fail `root`. With #3 on, that write is always
+--- trailed (`SCOPED_FAIL_TRAIL`, runtime.h), since the retry may have
+--- popped entries the write depends on.
 failBlock :: Gen -> CStmt
 failBlock gen = ccase (text "FAIL_TAG")
   ( [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
-    , scall "trail_node" [root, nondetVar]
+    , scall "SCOPED_FAIL_TRAIL" [nondetVar, root]
     , scall "fail" [root]
     ] ++ debugLeave (gLabel gen) ++ leave gen returnStmt
   )
@@ -490,9 +505,11 @@ funBlock ndS = ccase (text "FUNCTION_TAG")
 choiceBlock :: CStmt
 choiceBlock = ccase (text "CHOICE_TAG") [scall "choose" [scrutinee], cbreak]
 
+--- `follow_forward` (runtime.h) is one hop, or path compression under
+--- OPT_PATH_COMPRESS.
 forwardBlock :: CStmt
 forwardBlock = ccase (text "FORWARD_TAG")
-  [ scrutinee .= children scrutinee [0], cbreak ]
+  [ scrutinee .= call "follow_forward" [scrutinee], cbreak ]
 
 --- `bs` is always non-empty (`ICaseCons`'s own well-formedness contract --
 --- there's no value to scrutinize a zero-constructor type's variable at
@@ -514,11 +531,15 @@ freeCaseBlock v (IConsBranch first _ _ : restBs) =
   rest = [c | IConsBranch c _ _ <- restBs]
   pushChoice c = scall "push_choice" [scrutinee, call ("make_" ++ mangle c ++ "_free") []]
 
+--- A branch is a rewrite of `root`, trailed before its body runs. The
+--- stamp for the nodes the body builds is read right after, from the
+--- flag `trail_node` just set (see `REWRITE_STAMP`, runtime.h).
 showConsBranch :: Gen -> IVarIndex -> IConsBranch -> G CStmt
 showConsBranch gen v (IConsBranch c _ b) = do
   body <- showBlock gen b
   return (ccase (text (tag c))
-                (writeBack v : scall "trail_node" [root, nondetVar] : body))
+                (writeBack v : scall "trail_node" [root, nondetVar] :
+                 scall "REWRITE_STAMP" [] : body))
 
 ------------------------------------------------------------------------------
 -- Literal cases
@@ -572,9 +593,9 @@ showExpr :: IExpr -> CExpr
 showExpr (IVar v)           = var v
 showExpr (IVarAccess v ixs) = children (var v) ixs
 showExpr (ILit l)           = toUnion (litCType l) (litValue l)
-showExpr (IOr e1 e2)        = call "make_choice" [showExpr e1, showExpr e2]
+showExpr (IOr e1 e2)        = stamped (call "make_choice" [showExpr e1, showExpr e2])
 showExpr (IFCall f es)
-  | isApply f = call ("make_apply" ++ show (length es - 1)) (map showExpr es)
+  | isApply f = stamped (call ("make_apply" ++ show (length es - 1)) (map showExpr es))
   | otherwise = primOrComb f es
 showExpr (ICCall c es)
   | isStrConst c = call "toCurryString" [text (strConst c)]
@@ -588,10 +609,17 @@ primOrComb f es = case lookupPrim f of
   Nothing -> showComb f es
 
 showComb :: IQName -> [IExpr] -> CExpr
-showComb f es = call ("make_" ++ mangle f) (map showExpr es ++ [int 0])
+showComb f es = stamped (call ("make_" ++ mangle f) (map showExpr es ++ [int 0]))
 
 showPart :: IQName -> Int -> [IExpr] -> CExpr
-showPart f m es = call ("make_" ++ mangle f) (missingArgs es m)
+showPart f m es = stamped (call ("make_" ++ mangle f) (missingArgs es m))
+
+--- A node built for `root`'s new value takes the rewrite's stamp under
+--- the write barrier (`STAMPED`, runtime.h; backtracking_proofs.md). A
+--- string constant's cells don't: they're constructors, which are never
+--- rewritten, so their stamp is never read.
+stamped :: CExpr -> CExpr
+stamped e = call "STAMPED" [e]
 
 missingArgs :: [IExpr] -> Int -> [CExpr]
 missingArgs es m = map showExpr es ++ replicate m nullf ++ [int m]

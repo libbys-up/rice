@@ -18,6 +18,38 @@
 // because nothing about it is specific to one program.
 unsigned int current_epoch = 0;
 
+#if OPT_STATS
+OptStats opt_stats;
+#endif
+
+// Print the OPT_STATS counters to stderr (one `name value` per line,
+// for tests/optbench.sh). A no-op without OPT_STATS.
+void print_opt_stats(void)
+{
+#if OPT_STATS
+#define PRINT_STAT(name) fprintf(stderr, "stat %s %lu\n", #name, opt_stats.name)
+    PRINT_STAT(trail_decisions);
+    PRINT_STAT(trailed_rewrites);
+    PRINT_STAT(skipped_nondet);
+    PRINT_STAT(skipped_epoch);
+    PRINT_STAT(barrier_lowered);
+    PRINT_STAT(trail_pushes);
+    PRINT_STAT(choice_points);
+    PRINT_STAT(undos);
+    PRINT_STAT(undo_restores);
+    PRINT_STAT(scoped_retries);
+    PRINT_STAT(scoped_hits);
+    PRINT_STAT(copy_collapses);
+    PRINT_STAT(forward_collapses);
+    PRINT_STAT(forward_hops);
+    PRINT_STAT(compressions);
+    PRINT_STAT(compress_hops_skipped);
+    PRINT_STAT(max_trail);
+    fprintf(stderr, "stat allocations %lu\n", mem);
+#undef PRINT_STAT
+#endif
+}
+
 static void CTR_impl(void)
 {
     field root = rice_root;
@@ -185,7 +217,7 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
             case FAIL_TAG:
                 debug(HIGH, "apply FAIL\n");
                 sp = frame_pop(sp);
-                push_node(root,nondet);
+                (void)push_node(root,nondet);
                 fail(root);
                 RETURN();
 
@@ -203,8 +235,7 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
 
             case FORWARD_TAG:
                 debug(HIGH, "apply FORWARD\n");
-                nondet |= f.n->nondet;
-                f = child_at(f,0);
+                f = follow_forward(f);
                 break;
 
             case FREE_TAG:
@@ -231,7 +262,7 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
 
     nondet |= f.n->nondet;
 
-    push_node(root,nondet);
+    nondet = push_node(root,nondet);
 
     // number of arguments that we're applying
     int nargs = -root.n->missing;
@@ -255,6 +286,9 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
         //hold the old array of children.
         //we'll need to move this to a bigger array
         set_copy(root,f);
+        // set_copy took f's flag, but root's has to cover everything this
+        // rewrite read (the forwards on the way to f too), and stay sticky.
+        root.n->nondet = nondet;
 
         // f's node stores its arguments forward,
         // with the missing ones in its last `missing` slots.
@@ -318,6 +352,10 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
         // Other parts of the program might also reference that
         // old partial application.
         union field newf = copy(f);
+#if OPT_WRITE_BARRIER
+        // newf is a call built for root's new value (runtime.h's rewrite_stamp).
+        newf.n->epoch = rewrite_stamp(root);
+#endif
         debug_expr(LOW, newf);
 
         // copy arguments.
@@ -413,7 +451,8 @@ void push_choice(union field left, union field right)
 // The point here is that we keep all of the information, so I can fully undo this later.
 // ?(left, right, false) reduces to FORWARD(left) and backtracks to ?(left,right,true)
 // ?(left, right, true) reduces to FORWARD(right) and backtracks to ?(left,right,false)
-// For the nondet optimization only FORWARD(left) is marked as non-deterministic.
+// Both sides mark root nondet and trail it: a choice is nondeterministic
+// even in its last alternative (backtracking_proofs.md, nondet tracking rule 4).
 //
 // if we reduce to left, then we will backtrack later
 // so our backtracking condition is side == 0
@@ -483,10 +522,12 @@ bool undo(int cutoff)
     debug(HIGH, "full trail\n");
     debug_trail(HIGH);
     debug(HIGH, "undoing\n");
+    STAT(undos);
     TrailEntry* frame;
     do
     {
         frame = trail_pop(trail);
+        STAT(undo_restores);
         if(frame->lhs.n != NULL)
         {
             memcpy(frame->lhs.n, frame->rhs.n, sizeof(Node));
@@ -1099,6 +1140,7 @@ void run_io(union field expr)
     GC_ROOT(expr);  // nf runs the machine
     nf(expr);
     GC_UNROOT(1);
+    print_opt_stats();
     if(TAG(expr) == FAIL_TAG)
     {
         fprintf(stderr, "Program failed.\n");
@@ -1146,6 +1188,7 @@ void nf_all(union field expr)
         printf("No solutions found\n");
     }
     printf("total memory allocations: %ld\n", mem);
+    print_opt_stats();
 }
 
 

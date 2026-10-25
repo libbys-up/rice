@@ -149,10 +149,17 @@ static inline void HNF(union field root)
  * Each one is its own 0/1 flag so we can turn them on and off independently
  * (-DOPT_EPOCH_TRAIL=1 on the command line, or rice's RICE_CFLAGS).
  *  * OPT_NONDET_TRAIL (#1): only trail a rewrite if it read something nondeterministic.
- *  * OPT_SCOPED_BACKTRACK (#3): when a case fails, retry choices made inside this function first.
+ *  * OPT_SCOPED_BACKTRACK (#3): when a case fails, retry choices made since the case began first.
  *  * OPT_COPY_COLLAPSE (#4): collapse to a copy of a finished value instead of a FORWARD.
  *  * OPT_EPOCH_TRAIL (#5): don't trail nodes created after the last choice point.
- * #4 and #5 are off by default, because we haven't shown they're sound yet.
+ *  * OPT_PATH_COMPRESS: when a case reads a forward, retarget it past the
+ *    deterministic forwards behind it (follow_forward below).
+ *  * OPT_WRITE_BARRIER: stamp nodes built by a deterministic rewrite as old
+ *    as the node they're built for (rewrite_stamp below).
+ *    It's required when #1 and #5 are both on, and on by default then.
+ * Every subset of these is proved to give the baseline's answers on a model
+ * of the machine (backtracking_proofs.md), given the barrier when #1 and #5 are both on.
+ * #4, #5 and path compression are off by default until we've measured them.
  * There's no flag for #2 (eager tail dispatch): every tail call on the machine is a musttail jump.
  */
 #ifndef OPT_NONDET_TRAIL
@@ -167,15 +174,65 @@ static inline void HNF(union field root)
 #ifndef OPT_EPOCH_TRAIL
 #define OPT_EPOCH_TRAIL 0
 #endif
-
-/* #1 and #5 are each sound alone, but not together.
- * #1 leaves an old node's deterministic rewrite untrailed,
- * so it can end up pointing at a young node whose rewrite #5 didn't trail.
- * Fixing this needs a write barrier (opt_conflict.md, option A).
- */
-#if OPT_NONDET_TRAIL && OPT_EPOCH_TRAIL
-#error "OPT_EPOCH_TRAIL is unsound with OPT_NONDET_TRAIL (no write barrier yet); add -DOPT_NONDET_TRAIL=0"
+#ifndef OPT_PATH_COMPRESS
+#define OPT_PATH_COMPRESS 0
 #endif
+#ifndef OPT_WRITE_BARRIER
+#define OPT_WRITE_BARRIER (OPT_NONDET_TRAIL && OPT_EPOCH_TRAIL)
+#endif
+
+/* #1 and #5 are each sound alone, but not together without the barrier.
+ * #1 leaves an old node's deterministic rewrite untrailed,
+ * so it can end up pointing at a young node whose rewrite #5 didn't trail
+ * (opt_conflict.md, counterexamples/StaleApply.curry).
+ * The barrier makes that young node look as old as the node it hangs from.
+ * #5 without #1 is proved with the barrier off, so it's only on by default with both.
+ */
+// -DOPT_ALLOW_UNSOUND=1 builds the combination anyway,
+// only to check that the regression tests catch it (stale_mk.curry and friends).
+#if OPT_NONDET_TRAIL && OPT_EPOCH_TRAIL && !OPT_WRITE_BARRIER && !OPT_ALLOW_UNSOUND
+#error "OPT_NONDET_TRAIL with OPT_EPOCH_TRAIL needs OPT_WRITE_BARRIER"
+#endif
+#if OPT_WRITE_BARRIER && !OPT_EPOCH_TRAIL
+#error "OPT_WRITE_BARRIER only means something with OPT_EPOCH_TRAIL"
+#endif
+
+static inline field follow_forward(field r);
+
+/* Counters for measuring the optimizations (tests/optbench.sh).
+ * Build with -DOPT_STATS=1 and every run prints them to stderr when it ends
+ * (print_opt_stats, runtime.c).  Without it, STAT(...) is nothing.
+ */
+#ifndef OPT_STATS
+#define OPT_STATS 0
+#endif
+#if OPT_STATS
+typedef struct
+{
+    unsigned long trail_decisions;      // rewrites that asked needs_trail
+    unsigned long trailed_rewrites;     // ... and got a trail entry
+    unsigned long skipped_nondet;       // ... and #1 said no
+    unsigned long skipped_epoch;        // ... and #5 said no
+    unsigned long barrier_lowered;      // nodes' stamps the barrier lowered (per rewrite)
+    unsigned long trail_pushes;         // every trail entry, of any kind
+    unsigned long choice_points;        // trail entries undo() stops at
+    unsigned long undos;                // calls to undo() that popped something
+    unsigned long undo_restores;        // entries undo() copied back
+    unsigned long scoped_retries;       // SCOPED_RETRYs tried (#3)
+    unsigned long scoped_hits;          // ... that found a choice to flip
+    unsigned long copy_collapses;       // collapses done as a copy (#4)
+    unsigned long forward_collapses;    // collapses done as a FORWARD
+    unsigned long forward_hops;         // FORWARD nodes followed by readers
+    unsigned long compressions;         // forwards retargeted (path compression)
+    unsigned long compress_hops_skipped;// hops those retargetings skipped
+    unsigned long max_trail;            // the trail's high water mark
+} OptStats;
+extern OptStats opt_stats;
+#define STAT(name) (opt_stats.name++)
+#else
+#define STAT(name) ((void)0)
+#endif
+void print_opt_stats(void);
 
 /* Settle root to an actual value, for C code that isn't machine code
  * (strictApply's $!! and $##, prim_ioError, toCStr).
@@ -207,7 +264,7 @@ static inline field settle(union field root, bool* nondet, void (*force)(field))
         unsigned char t = TAG(root);
         if(t == FORWARD_TAG)
         {
-            root = child_at(root, 0);
+            root = follow_forward(root);
         }
         else if(t == FUNCTION_TAG || t == CHOICE_TAG)
         {
@@ -235,7 +292,7 @@ static inline bool settle_step(union field* x, bool* nondet)
         unsigned char t = TAG(*x);
         if(t == FORWARD_TAG)
         {
-            *x = child_at((*x), 0);
+            *x = follow_forward(*x);
         }
         else
         {
@@ -263,10 +320,13 @@ static inline bool settle_step(union field* x, bool* nondet)
 
 /* Scoped backtracking (#3).
  * When a case in a generated function fails, we first try to undo choices
- * that were made since this function started, before failing root.
- *  * SCOPED_CUTOFF() records the trail's height when the function starts.
- *  * SCOPED_SAVE_CUTOFF / SCOPED_LOAD_CUTOFF keep the cutoff in a frame slot,
- *    because a case block runs as its own C function.
+ * that were made since that case started, before failing root.
+ *  * SCOPED_SAVE_CUTOFF(slot) records the trail's height when the case starts,
+ *    in a frame slot, because a case block runs as its own C function.
+ *    SCOPED_LOAD_CUTOFF(slot) reads it back.
+ *    The cutoff is per case, not per function: the retry only redoes this case's dispatch,
+ *    so it can't flip a choice that an enclosing case's dispatch read
+ *    (backtracking_proofs.md, #3 rule 2; ScopedStaleDispatch.curry).
  *  * SCOPED_RETRY(scrutinee, orig) is used where a case's scrutinee is FAIL
  *    or a constructor the case doesn't handle.
  *    If undo() finds a choice to flip, we reset the scrutinee and `continue`
@@ -282,12 +342,13 @@ static inline bool settle_step(union field* x, bool* nondet)
  * or in a literal case (its scrutinee is a raw value, which undo() can't restore).
  */
 #if OPT_SCOPED_BACKTRACK
-#define SCOPED_CUTOFF() int _cutoff = trail_size(trail)
-#define SCOPED_SAVE_CUTOFF(slot) ((slot).i = _cutoff)
+#define SCOPED_SAVE_CUTOFF(slot) ((slot).i = trail_size(trail))
 #define SCOPED_LOAD_CUTOFF(slot) int _cutoff = (int)(slot).i
 #define SCOPED_RETRY(scrutinee_var, orig_var)   \
+    STAT(scoped_retries);                       \
     if(undo(_cutoff))                           \
     {                                           \
+        STAT(scoped_hits);                      \
         scrutinee_var = orig_var;               \
         continue;                               \
     }                                           \
@@ -298,15 +359,23 @@ static inline bool settle_step(union field* x, bool* nondet)
  * For an unhandled constructor, the branch has already trailed root.
  * But the failed retry's undo() popped that entry (it was the newest one in scope),
  * so we have to trail root again, or nothing could ever restore it.
- * The FAIL case doesn't need this: its SCOPED_RETRY runs before it trails root.
+ *
+ * SCOPED_FAIL_TRAIL is the trail for the FAIL case's fail(root),
+ * which runs after its SCOPED_RETRY.
+ *
+ * Both always trail, whatever nondet says (backtracking_proofs.md, #3 rule 1).
+ * The proof of #3 needs the next undo to restore a scope's fail write,
+ * and the flag here is only this case's own, which can be false
+ * while the case's root depends on a choice (ScopedNestedND.curry).
  */
-#define SCOPED_RESAVE(nondet_var, root_node) trail_node(root_node, nondet_var)
+#define SCOPED_RESAVE(root_node) save_copy(root_node)
+#define SCOPED_FAIL_TRAIL(nondet_var, root_node) save_copy(root_node)
 #else
-#define SCOPED_CUTOFF() ((void)0)
 #define SCOPED_SAVE_CUTOFF(slot) ((void)0)
 #define SCOPED_LOAD_CUTOFF(slot) ((void)0)
 #define SCOPED_RETRY(scrutinee_var, orig_var) ((void)0)
-#define SCOPED_RESAVE(nondet_var, root_node) ((void)0)
+#define SCOPED_RESAVE(root_node) ((void)0)
+#define SCOPED_FAIL_TRAIL(nondet_var, root_node) trail_node(root_node, nondet_var)
 #endif
 
 // The trail can be used pretty much anywhere, so it almost has
@@ -341,7 +410,8 @@ void save_snapshot(union field n);
  *   * (OPT_EPOCH_TRAIL): root was created after the last choice point,
  *     so backtracking past that choice point makes it unreachable anyway.
  *     (This is the WAM's trail condition, using time stamps.)
- * Each is sound alone, but not together (see the #error above).
+ * Each is sound alone, and together with the write barrier (see the #error above).
+ * `nondet` must already include root's own flag (trail_node does that).
  */
 __attribute__((always_inline))
 static inline bool needs_trail(union field root, bool nondet)
@@ -349,6 +419,7 @@ static inline bool needs_trail(union field root, bool nondet)
 #if OPT_NONDET_TRAIL
     if(!nondet)
     {
+        STAT(skipped_nondet);
         return false;
     }
 #else
@@ -357,17 +428,23 @@ static inline bool needs_trail(union field root, bool nondet)
 #if OPT_EPOCH_TRAIL
     if(root.n->epoch >= current_epoch)
     {
+        STAT(skipped_epoch);
         return false;
     }
 #else
     (void)root; // avoid unused pointer compiler warning
 #endif
+    STAT(trailed_rewrites);
     return true;
 }
 
 /* Trail `root` before an in-place rewrite, if needs_trail says to.
- * We set root's nondet flag whether or not we pushed an entry,
- * because the early backtracking and copy collapse optimizations read the flag.
+ * `nondet` says whether the rewrite read anything nondeterministic.
+ * Root's own flag counts too: flags are sticky, so once a node has been
+ * rewritten nondeterministically, every later rewrite of it counts as
+ * nondeterministic (backtracking_proofs.md, nondet tracking rule 2).
+ * We set root's flag whether or not we pushed an entry,
+ * because readers, early backtracking, copy collapse and the barrier read it.
  * The snapshot is taken before the flag changes, so undo() restores both.
  * This is only for rewriting a node with its own result.
  * Choice points and free variable bindings always trail
@@ -376,28 +453,29 @@ static inline bool needs_trail(union field root, bool nondet)
 __attribute__((always_inline))
 static inline void trail_node(union field root, bool nondet)
 {
+    nondet |= root.n->nondet;
+    STAT(trail_decisions);
     if(needs_trail(root, nondet))
     {
         save_snapshot(root);
     }
-    if(nondet)
-    {
-        root.n->nondet = true;
-    }
+    root.n->nondet = nondet;
 }
 
 /* apply_hnf's version of trail_node.
- * Here root's flag is set to `nondet` first, instead of OR'd.
  * The snapshot keeps root's own epoch.
  * copy() stamps the new node with the current epoch,
  * and undo() restores the whole node with memcpy,
  * so without this an old node would come back looking young,
  * and its next rewrite would wrongly skip the trail.
+ * Returns the flag root ends up with, which apply_hnf puts back
+ * after set_copy overwrites root with f's contents.
  */
 __attribute__((always_inline))
-static inline void push_node(union field root, bool nondet)
+static inline bool push_node(union field root, bool nondet)
 {
-    root.n->nondet = nondet;
+    nondet |= root.n->nondet;
+    STAT(trail_decisions);
     if(needs_trail(root, nondet))
     {
         union field saved = copy(root);
@@ -406,6 +484,94 @@ static inline void push_node(union field root, bool nondet)
 #endif
         trail_push(trail, root, saved, false);
     }
+    root.n->nondet = nondet;
+    return nondet;
+}
+
+/* The write barrier (backtracking_proofs.md, "The write barrier").
+ * Under #1, a deterministic rewrite of an old node isn't trailed.
+ * If the new value points at nodes built for it,
+ * a later nondeterministic rewrite of one of those would be skipped by #5 (young),
+ * and backtracking would leave the old node reaching the stale value.
+ *
+ * So a node built for a deterministic rewrite's new value takes root's stamp,
+ * not the current epoch.  It looks as old as the node it hangs from,
+ * and #5 trails its rewrites exactly when it would trail root's.
+ * Nothing extra is trailed.
+ * A nondeterministic rewrite (root's flag set) stamps with the current epoch as usual.
+ * The MIN matters: a node built in a dead branch can carry a stamp above
+ * the current epoch, and a new node must never be stamped later than now.
+ *
+ * Call it after the rewrite's trail_node, which sets root's flag.
+ * Generated code does that with REWRITE_STAMP() and wraps each node it
+ * builds in STAMPED(...).  Raising a stamp is never safe; lowering one only adds trail entries.
+ *
+ * The runtime's own C rewrites build only constructors (strings, boxes, lists),
+ * apart from apply_hnf's over-applied call (runtime.c).
+ * A constructor is never rewritten, so its stamp is never read.
+ */
+#if OPT_WRITE_BARRIER
+__attribute__((always_inline))
+static inline unsigned int rewrite_stamp(union field root)
+{
+    if(root.n->nondet || root.n->epoch >= current_epoch)
+    {
+        return current_epoch;
+    }
+    STAT(barrier_lowered);
+    return root.n->epoch;
+}
+
+__attribute__((always_inline))
+static inline union field stamp_node(union field n, unsigned int stamp)
+{
+    n.n->epoch = stamp;
+    return n;
+}
+
+#define REWRITE_STAMP() unsigned int _stamp = rewrite_stamp(root)
+#define STAMPED(e) stamp_node((e), _stamp)
+#else
+#define REWRITE_STAMP() ((void)0)
+#define STAMPED(e) (e)
+#endif
+
+/* Follow FORWARD node r one hop, for a case that's reading it.
+ *
+ * With path compression, we keep going past every forward behind r whose
+ * nondet flag is clear, and retarget r straight to where they lead.
+ * Later readers of r then skip those hops.
+ *  * We only skip unflagged forwards.  Under #1 an unflagged node is never trailed,
+ *    so undo never changes a hop we skipped, and r still leads to the right place.
+ *    The flags we skip would add nothing to the reader's nondet either.
+ *  * Retargeting r is a deterministic write (nondet false) through the ordinary trail decision.
+ *    With no trailing optimization it's trailed, under #1 it isn't (unless r's own flag is set),
+ *    and under #5 alone it is when r is older than the current epoch.
+ *    The entry saves r's one-hop target, so undo puts r back before any hop it skipped.
+ *  * r keeps its own flag and epoch.
+ * (backtracking_proofs.md, "Path compression").
+ */
+static inline field follow_forward(field r)
+{
+    STAT(forward_hops);
+    field a = child_at(r, 0);
+#if OPT_PATH_COMPRESS
+    field b = a;
+    while(TAG(b) == FORWARD_TAG && !b.n->nondet)
+    {
+        STAT(compress_hops_skipped);
+        b = child_at(b, 0);
+    }
+    if(b.n != a.n)
+    {
+        STAT(compressions);
+        trail_node(r, false);
+        child_at(r, 0) = b;
+    }
+    return b;
+#else
+    return a;
+#endif
 }
 
 // when reducing a node to normal form, if the child is FAIL, then the root
@@ -608,6 +774,7 @@ static inline void collapse(union field root, union field target)
 {
     if(collapse_safe(target))
     {
+        STAT(copy_collapses);
         // root's nondet flag is about root's own history
         // (for example, the branch may have just trailed root, which sets it),
         // not about target's value, so we keep it across the copy.
@@ -618,6 +785,7 @@ static inline void collapse(union field root, union field target)
     }
     else
     {
+        STAT(forward_collapses);
         set_forward(root, target);
     }
 }
@@ -625,6 +793,7 @@ static inline void collapse(union field root, union field target)
 __attribute__((always_inline))
 static inline void collapse(union field root, union field target)
 {
+    STAT(forward_collapses);
     set_forward(root, target);
 }
 #endif

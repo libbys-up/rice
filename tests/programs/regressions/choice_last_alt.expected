@@ -1,0 +1,4 @@
+SOLUTION: (Z, True)
+SOLUTION: (S(Z), True)
+SOLUTION: (Z, False)
+SOLUTION: (S(Z), False)

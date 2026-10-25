@@ -166,6 +166,38 @@ see `STATUS.md`'s dated write-ups for point-in-time findings instead.
 both need (`$RICEHOME`/`rice` resolution, manifest lookup, substring
 filtering) — sourced by both rather than duplicated.
 
+## `optbench.sh` — what each backtracking optimization buys
+
+`bench.sh` times the SLOW benchmarks under a few configs. `optbench.sh`
+is built around the optimizations instead (#1, #3, #4, #5 and path
+compression, `backtracking_proofs.md`):
+
+```
+tests/optbench.sh                      # every config, every program, 3 timed runs
+tests/optbench.sh --no-time            # counts and correctness only (faster)
+tests/optbench.sh --configs=naive,all  # just these configs
+tests/optbench.sh barrier young        # just these programs
+```
+
+- **Configs**: `naive` (everything off), `+x` (one optimization added
+  to naive), `all`, and `-x` (one removed from all), plus `default`,
+  `+nondet+epoch` and `+epoch+barrier`. `+x` is what an optimization does
+  alone, `-x` what it still adds once the others are on.
+- **Counts**: each program is also built with `-DOPT_STATS=1`, which
+  makes the runtime count trail entries, rewrites each filter skipped,
+  stamps the barrier lowered, scoped-retry hits, copies, forward hops and
+  compressions (`OptStats`, runtime.h) and print them to stderr. They're
+  exact, so they show effects too small to time.
+- **Correctness**: every config's output is compared against the
+  program's golden, or naive's output without one. A mismatch fails the
+  run, so this is also a differential test of the flag combinations.
+- **Programs**: `programs/optbench/` has one program per optimization
+  (its header says which, and what to expect), plus some nondeterministic
+  old_rice benchmarks (`EXTRA` in the script).
+
+Results go to `tests/.optbench/` (`results.tsv`, and `report.md` with
+one table per metric, made by `optbench_report.py`).
+
 ## On the `external/` programs
 
 kics2's own test suite (`$KICS2HOME/testsuite/`) is almost entirely built on

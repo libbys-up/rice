@@ -39,6 +39,14 @@ void trail_push(Trail* s, union field from, union field rep, bool choice)
     s->array[s->size].lhs = from;
     s->array[s->size].rhs = rep;
     s->array[s->size].epoch = current_epoch;
+#if OPT_STATS
+    opt_stats.trail_pushes++;
+    opt_stats.choice_points += choice;
+    if(s->size + 1 > opt_stats.max_trail)
+    {
+        opt_stats.max_trail = s->size + 1;
+    }
+#endif
     debug(HIGH, "pushing ");
     debug_trail_entry(HIGH, &s->array[s->size]);
     debug(HIGH, "\n");

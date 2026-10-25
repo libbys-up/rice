@@ -110,9 +110,8 @@ RESULTS="$SCRATCH/results.tsv"
 # the same floor. (#2, eager tail dispatch, has no switch any more: on
 # the evaluation machine every tail call is a musttail jump.)
 # `default` (today's shipped defaults: #1/#3 on, rest off) and `all-on`
-# (everything except #1: #1+#5 is unsound without a write barrier, and
-# runtime.h refuses to build it -- opt_conflict.md) stay as bonus
-# reference points, not part of the pairwise isolation
+# (everything, path compression included; #1+#5 turns on the write
+# barrier) stay as bonus reference points, not part of the pairwise isolation
 # itself. Not a full 2^4 factorial -- backtracking-optimizations.md's own
 # "Orthogonality" notes already argue the five don't interact in ways a
 # factorial sweep would need to expose, and 16 configs would multiply
@@ -135,7 +134,7 @@ else
     "$NAIVE -DOPT_COPY_COLLAPSE=1"
     "$NAIVE -DOPT_EPOCH_TRAIL=1"
     ""
-    "-DOPT_NONDET_TRAIL=0 -DOPT_SCOPED_BACKTRACK=1 -DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1"
+    "-DOPT_NONDET_TRAIL=1 -DOPT_SCOPED_BACKTRACK=1 -DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1 -DOPT_PATH_COMPRESS=1"
   )
 fi
 
