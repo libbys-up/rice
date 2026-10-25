@@ -1,194 +1,185 @@
-# Current state
+# Current state (2026-10-11)
 
-## Status: suite is clean. Thirteen commits made, nothing pushed.
+Work in progress: the garbage collector, stage 6 of the evaluation-stack
+plan. Design, staging and measurements: `src/gc-plan.md`. Leak analysis,
+soundness arguments and model-level checks:
+`~/curry/papers/unif/proofs/LEAKS.md`. (This file's previous contents,
+about the scoped-retry fixes, are in git history at `cf250f0`.)
 
-`tests/run.sh --slow`: **39 pass, 9 xfail, 0 fail, 4 skip.** On branch
-`phase1-codegen-and-runtime`, commits (newest first): `ce6f1e4`
-(regression test for the cond/prim_ioError/bindIO fix), `f0d50b2` (that
-fix, below), `08475d8` (regression test for the strictApply fix),
-`847094a` (the strictApply fix, below), `182c170` (a dedicated
-nondeterministic-permutation regression test for #4), `997aef7`/
-`cf9b51f`/`59658ef`/`3d3feee`/`81c26fa`/`c073eff` (scoped retry +
-nf/ground_nf work, see below).
+## Where things stand
 
-You (the user) are separately working on a soundness proof for scoped
-retry. Everything below is what got found and fixed while chasing why
-`tests/run.sh` wouldn't go fully green, plus what came out of a
-follow-up discussion about `#4` (copy-instead-of-forward at collapse
-points) and whether `choose()` itself could copy instead of forward.
-None of it is the scoped-retry proof itself.
+Branch `phase1-codegen-and-runtime`, nothing pushed. Collector commits,
+newest first:
 
-## Fix 3 (most recent): `HNF_SETTLE` callers silently not forcing an already-forwarded argument
+- `950fb38`: skips forwarding chains (leak 1), adds `-- rice-maxrss: N`
+  to `tests/run.sh`, and adds `tests/programs/gc/`.
+- `b120628`: the precise copying collector.
+- `2687b36`: bump allocation from heap chunks.
 
-Found while chasing a laziness counter-example for the `choose()`
-question below -- kept failing to distinguish anything, and tracing why
-led here. `strictApply` (`runtime/prelude.c`, backs `seq`/`$!`/`$!!`/
-`$##`) called `force(x)` once and read `x`'s tag/`nondet` directly.
-`forward_hnf` is a deliberate no-op, so if `x` was already
-`FORWARD_TAG` -- e.g. the result of some earlier collapse point that
-wasn't safe to copy, the *common* case, since `choose()` itself always
-produces one -- a single `force()` call never even reached whatever it
-pointed to: `seq` could silently fail to notice a failure, or (found
-along the way) fail to notice a divergence it should have hung on.
+Stages 1 (allocator), 2 (collector) and 3 (memory-bounded tests) are
+done. Stage 4 (cleanup) hasn't started.
 
-Fix: new `settle()` helper (`runtime.h`), generalizing `bindIO`'s own
-already-correct chase-and-reforce loop (just above `strictApply` in the
-same file) to take `force` as a parameter. A first version of the fix
-chased and reforced correctly but still only checked `x`'s own final
-`nondet` flag -- caught empirically (the repro below gave "No solutions
-found" instead of "SOLUTION: 1"): `nondet` lives on whichever node a
-choice actually touched (the choice node itself), not on a different
-node reached only by chasing *through* it. Fixed by accumulating
-`nondet` at every hop, exactly like a generated case-dispatch loop's
-own `nondet |= _scrutinee.n->nondet`.
+Suites at `950fb38`:
 
-Verified (`strictApply`): `debug_repros/strictapply_forward.curry`
-(also `tests/programs/regressions/`) now gives exactly `SOLUTION: 1`,
-not the bogus doubled result a scratch build reverted to the old
-`strictApply` confirms; a genuine divergence now correctly hangs where
-it used to silently terminate; an ordinary terminating `seq` is
-unchanged.
+| Run | Result |
+|---|---|
+| `tests/run.sh` | 70 pass, 4 xfail, 0 fail |
+| `tests/run.sh --slow` | 83 pass, 0 fail |
+| `RICE_CFLAGS=-DOPT_SCOPED_BACKTRACK=0 tests/run.sh regressions` | 37/37 |
+| `RICE_CFLAGS=-DGC_STRESS tests/run.sh` | no crashes or wrong output; 14 long tests time out |
 
-`cond_hnf` had its own, worse version of the same gap: it chased
-`FORWARD_TAG` but never redispatched with `HNF_SETTLE` on whatever it
-chased *to*, so landing on a still-unresolved `CHOICE_TAG`/`FUNCTION_TAG`
-just stopped the loop there, cold. Confirmed empirically:
-`cond (False ? True) 99` gave `No solutions found` instead of
-`SOLUTION: 99` -- *neither* alternative of the choice ever got resolved
-via `choose()` at all, so `cond` fell through to its own
-`else: fail(root)` every time, including on the exploration where the
-guard is genuinely `True`. Fixed the same way, now
-`debug_repros/cond_forward.curry` (also `tests/programs/regressions/`).
+Benchmarks: `cent`, `primesort`, `sort` and `tailsum` are 11-22% faster
+than without collection, with peak memory under 80 MB (was up to
+6.5 GB). `reverse_builtin` is 49% slower (see below).
 
-`prim_ioError_hnf` didn't chase `FORWARD_TAG` at all -- fixed
-defensively (its only caller, `ioError`, already forces its argument via
-`$##`'s own now-fixed `strictApply`, so this isn't independently
-observable, just cheap and consistent). `bindIO_hnf` was already
-correct (its own hand-rolled loop already redispatched properly) --
-refactored onto `settle()` anyway for consistency, behavior unchanged;
-the suite's IO-heavy tests (`tryPrint` etc.) confirm no regression.
+## Leak 1: forwarding chains (fixed, `950fb38`)
 
-`tests/run.sh --slow`: 39 pass, 9 xfail, 0 fail, 4 skip (the extra pass
-is the new `cond_forward` regression test).
+**What.** A long IO loop kept every step alive. Each step's `bindIO`
+node ends up forwarding to the next, and `run_io` roots the first, so a
+chain of FORWARD nodes grew one link per step. `gc/io_loop` peaked at
+927 MB.
 
-## Aside: does `choose()` copying instead of forwarding help eliminate forwarding nodes?
+**Fix.** `gc.c`'s `trace_child` skips a FORWARD node on any pointer
+*stored in a heap node* (including trail snapshots) if:
 
-Discussed, not implemented (no code changes from this). Short answer:
-no.
-- **Sharing**: sound, by the same argument as `#4` -- `undo()`
-  overwrites `root`'s entire content unconditionally regardless of
-  what it held before, and anything that later tries to `#4`-collapse
-  `root` itself sees `root.nondet == true` and correctly refuses.
-- **Practicality**: `choices[side]` is always still `FUNCTION_TAG` at
-  the exact instant `choose()` runs (alternatives are lazy by
-  construction), so a non-eager safety check would never fire.
-- **Laziness**: tried to show eager-forcing-first is dangerous
-  (`(loop ? True) \`seq\` False`); this is *how* the `strictApply` bug
-  above was found -- the real, buggy `choose()` "not hanging" here was
-  actually the `strictApply` bug masking the real question. Once
-  `strictApply` was fixed to fully settle, both the real (lazy) and a
-  scratch eager-copy `choose()` patch hang identically, since `seq`,
-  correctly implemented, needs the chosen alternative's own WHNF
-  anyway. No genuine consumer found that stops at "the choice
-  committed" without needing the alternative's value.
-- **Conclusion**: sound but not practically useful -- doesn't
-  eliminate forwarding, since it still falls back to forwarding
-  whenever the alternative isn't already, independently resolved --
-  the common case.
+1. its nondet flag is clear, and
+2. it is on no trail entry. The `GC_TRAILED` bit, in `Node`'s padding,
+   is set on every trail `lhs` for the length of a collection.
 
-## Fix 1: two soundness defects in scoped retry (`backtracking-optimizations.md` #3, generalized)
+Roots (the `root` argument, frame slots, C roots, the trail) still
+point at the node itself. `io_loop` now peaks at 78 MB and runs 34%
+faster. The five benchmarks are unchanged.
 
-`SCOPED_CUTOFF()`/`SCOPED_RETRY(...)` in every generated `_hnf` was giving
-silently wrong output (`cent`, `debug_repros/cent_tiny.curry`, and a
-lost-solution case, `debug_repros/nested.curry`). Full write-up with heap
-and trail graphs: `src/scoped-retry-failures.tex` (+ `.pdf`). Two
-independent defects, both violating "the trail has a frame for every cell
-overwritten since the choice point":
+**Verified.** The argument is in `LEAKS.md`. It rests on three runtime
+properties: evaluation never writes a FORWARD node, readers chase
+forwards, and `undo` writes only trailed nodes. Those were checked by
+reading the code, not proved.
 
-1. **`undo(cutoff)` popped a frame outside its scope.** It is a
-   `do { pop } while(...)`, so with `size(bt_stack) == cutoff` (empty scope,
-   e.g. a callee reached through `TAIL_DISPATCH`/`collapse` after its logical
-   parent pushed a frame) it still popped and restored an ancestor's frame.
-   Fix: `runtime/runtime.c` `undo` returns false if `size <= cutoff`.
-   (Also protects `lazy_unify_step`'s original hand-written use.)
-2. **A failed retry in an `IExempt` branch dropped `root`'s own frame.**
-   `showConsBranch` emits `if(nondet) save_copy(root)` first; the body then
-   did `SCOPED_RETRY; fail(root)`. A failed retry pops that just-pushed
-   frame, so `fail(root)` was an unlogged write (and reset `root`'s `nondet`
-   bit). Fix: new `SCOPED_RESAVE(nondet, root)` macro (`runtime/runtime.h`,
-   no-op when `OPT_SCOPED_BACKTRACK=0`), emitted by `showStmt ctx n IExempt`
-   in `src/Rice/Codegen/C/ToC.curry` between `SCOPED_RETRY` and `fail`. The
-   `FAIL_TAG` path was already ordered correctly (retry, then save, then fail).
+- Rocq lemmas (`GcLeaks.v`) show that skipping a forward commutes with
+  `undo` and that following forwards ends at the same place.
+- The model's fuzzer (`GcBench.v`) collects before every step and
+  poisons whatever it considers dead. 400 seeds under each of 7 flag
+  sets: no differences.
+- Dropping condition 2 is caught (4 seeds under all optimizations).
+- Dropping condition 1 never changed a result in the model. It is kept
+  because of the argument: readers OR in the flag, and losing it could
+  leave a dependent write untrailed under #1.
 
-`OPT_SCOPED_BACKTRACK` stays default **1**.
+## Leak 2: the trail keeps snapshots alive (open)
 
-**Not proven sound** -- only that these two defects were sufficient to
-explain every failure found. Not argued: `ICaseLit` (retry not wired up
-there), the free-variable path, or a case where defect 1's stray pop would
-land on a *choice* frame instead of an ordinary one. Also: a retry can
-never reach a choice made by an ancestor across a `collapse`/`TAIL_DISPATCH`
-edge (below the callee's cutoff) -- scoped retry stays strictly local by
-construction; recovering that would need the cutoff inherited across those
-edges AND redoing the dispatch that depended on the choice, not just
-re-reading the scrutinee.
+**What.** `gc/nondet_pending` (XFAIL in `tests/manifest.txt`): a loop
+running while a choice is pending peaks at 824 MB for 200k iterations,
+and grows with the loop. Every in-place rewrite of the loop's root
+depends on the choice, so it's trailed. The collector traces every trail
+entry, so every snapshot, and the list cell and accumulator it points
+to, stays alive.
 
-## Fix 2: `nf`/`ground_nf` losing a failure discovered mid-`FORWARD_TAG`-chase
+**Ruled out:**
 
-Independent of fix 1 -- reproduces with `OPT_SCOPED_BACKTRACK=0` too. This
-is what was actually behind `cent.expected`'s `SOLUTION: FAIL` mismatch,
-which fix 1 alone didn't touch (and which "Earlier work this stretch"
-below's *other*, earlier `nf`/`ground_nf` fix -- about walking the
-`FORWARD_TAG` chain to find `settled` at all -- didn't touch either; this
-is a second, later bug in the same two functions).
+- **A weak trail** (drop entries whose node is unreachable): implemented,
+  measured and reverted. It dropped 6% of entries in this test and none
+  elsewhere in the suite, and cost a hash over the trail per collection.
+- **Keeping only the oldest entry per node** between stop points:
+  necessary but not enough. The oldest snapshot still points at the
+  list's head, whose *current* contents (the first cons) keep the whole
+  consumed list reachable.
 
-Both functions chase a `FORWARD_TAG` chain into a local `settled`, calling
-`HNF_SETTLE(settled)` along the way. That hands `settled` itself to
-arbitrary generated code as its own `root` argument, which can call
-`fail(root)` on it directly -- an incomplete `case`, reached right where a
-collapse point's forward chain bottoms out. Neither function checked
-whether `settled` itself came out `FAIL_TAG` after the chase (only ever
-checked its *children*, in the loop just below) -- `FAIL`'s symbol has
-`arity = 0`/`payload = PAYLOAD_NONE`, so it slid past every existing check
-and the function returned without ever mutating `expr`. `expr` was left
-looking like an ordinary forward chain: `nf_all`'s own
-`TAG(expr) != FAIL_TAG` check doesn't chase `FORWARD_TAG`, so it read that
-as a real solution, and `print_final` -- which *does* chase `FORWARD_TAG`
--- printed the word "FAIL" as if it were the answer.
+**Design** (`LEAKS.md`, "Proposed fix"):
 
-Fix: `if(TAG(settled) == FAIL_TAG) fail_nf(settled, expr);` right after
-each forward-chase loop, in both `nf` and `ground_nf`. Must be `fail_nf`
-(saves a copy of `expr` before overwriting), not a bare `fail(expr)` -- a
-first attempt used the bare version and regressed `nested` from `FAIL, 2`
-to `No solutions found`, since `expr` had no trail record and `undo()`
-could never restore it for the next attempt.
+- A *segment* is the stretch of trail between two stop heights. Stop
+  heights are choice entries, every cutoff held for `undo`, and every
+  commit height held for `pop_to`.
+- *View k* is the heap after undoing the top k segments.
+- Liveness is traced per view: roots point at every version of a node,
+  and a version's children are traced in the views where it is visible.
+- Dead entries are dropped, which includes every entry that isn't the
+  lowest for its node in its segment.
+- A node whose current contents are dead but which has a live entry
+  keeps the node; its contents are overwritten with a placeholder.
+- The trail is then compacted, and every live height remapped.
 
-## Verified (real toolchain, after rebuilding rice with both fixes)
-- `nested` prints exactly `SOLUTION: 2` (no `FAIL` line at all).
-- `cent_tiny` prints exactly `3, 3, 0` (no `FAIL` line).
-- `cent`'s output is a byte-for-byte match against `cent.expected`.
-- `tests/run.sh --slow`: 37 pass, 9 xfail, 0 fail, 4 skip.
-- Regression tests added/updated:
-  `tests/programs/regressions/scoped_retry{,_shared_choice,_ancestor_frame}`.
-  All three originally had a `SOLUTION: FAIL` line baked into their
-  `.expected`; re-recorded once fix 2 landed (that line was always bogus,
-  a symptom of fix 2's bug, not a legitimate expected output -- see
-  `scoped_retry.curry`'s own updated doc comment).
+**Verified so far (model only).** `GcLeaks.v` proves that undo leaves
+each node with its deepest entry's snapshot, so dropping a newer entry
+in the same segment changes nothing. `GcBench.v`'s implementation of
+the whole design agrees with the baseline on 400 seeds × 7 flag sets.
+Both deliberately wrong variants (ignoring segments, tracing only the
+current view) are caught. Coverage is thin: only 1,880 entries were
+dropped in total, because the random programs build short trails. The
+model has no per-entry epochs, no `pop_to`, and no `undo(cutoff)`
+stopping mid-trail.
 
-## Build gotcha
-Rebuild rice with `kcpm install` (KiCS2's own `cypm`, aliased on PATH as
-`kcpm` -- note: it's a shell *alias*, so it won't expand inside a `bash -c`
-subshell or other non-interactive wrapper; use the literal
-`cypm --define currybin=/Users/libbys/opt/kics2/bin/kics2 install` there).
-Plain `cypm install` now uses PAKCS and installs a broken `rice`
-(`*** No value found!` on every input). See memory
-`rice-build-needs-kics2-on-path`.
+**To implement in Rice:**
 
-## Earlier work this stretch (all completed, verified, predates this file)
-`--force-recompile`, `--force-recompile-module=NAME`, `--compiler-time`,
-`-h`/`--help`, Prelude `.c`/`.h` staleness check, `.o` caching, `.rimports`
-cache, `--stack-size`, the pairwise benchmark sweep (`tests/bench.sh`), the
-flexible-vs-rigid pattern matching note in `STYLE_GUIDE.md`, and an earlier,
-different `nf`/`ground_nf` fix in `runtime.c` (multi-argument tail-recursive/
-`collapse`-based calls not chasing `FORWARD_TAG` far enough to find
-`settled` in the first place -- distinct from fix 2 above, which is about
-what happens once `settled` is found and turns out to be `FAIL`).
+1. **Find every live trail height.** Add a frame rep for trail heights
+   (`R_TRAIL`, beside `R_INT`). Use it in the `bindIO` and commit frames
+   (`prelude.c`), `lazy_unify_step`'s frame (slot 7), `nseq`'s frame
+   (slot 7), and generated case-block frames (`SCOPED_SAVE_CUTOFF` in
+   `Rice.Codegen.C.ToC`). Audit C-convention code for heights held in
+   locals across an evaluation, and give those a registration like
+   `GC_ROOT`. (`nf_all`'s `undo(0)` needs none.) Generated functions
+   already take `SCOPED_CUTOFF()` after `GC_SAFE_POINT`, so their own
+   cutoff is read after any compaction.
+2. **Trace by view in `gc.c`.** Compute segments from the live heights
+   and choice entries, then trace versions per view instead of tracing
+   the trail as roots.
+3. **Drop and compact.** Drop dead entries, overwrite dead current
+   contents, compact the trail, and remap every live height.
+4. **Handle epochs (D4).** `pop` reloads `current_epoch` from each popped
+   entry and `pop_to(n)` from entry `n`. If a segment's bottom entry is
+   dropped, carry its epoch down or keep a placeholder entry. This only
+   matters under `OPT_EPOCH_TRAIL`.
+5. **Test in Rice** what the model can't: epochs (`OPT_EPOCH_TRAIL=1`),
+   bindIO commits (`pop_to`), and scoped retry stopping mid-trail. Run
+   the suite under `GC_STRESS` with each.
+6. **Un-XFAIL `gc/nondet_pending`.** Also add a test where the loop's
+   root is rewritten many times *across* several choice points, so more
+   than one segment is involved.
+
+## The rest of the collector
+
+- **Stage 4 cleanup.**
+  - Remove the experimental Boehm path (`#ifdef GC` in
+    `runtime/memory.h`, and its Makefile target).
+  - Decide whether the "total memory allocations" counter should count
+    bytes instead.
+- **`reverse_builtin` +49%.** Its 4M-element list stays live, so every
+  collection copies everything built so far (about 1.1 GB copied in
+  total). Options:
+  - a growth factor above 2× (fewer collections, more memory);
+  - generations, which would fix it properly.
+- **`GC_STRESS` is too slow to cover long tests.** It costs about 1 ms
+  per safe point even with a tiny live set: each collection takes a
+  fresh zeroed 4 MB chunk and poisons the old one. So 14 long tests
+  only time out under it. Reusing chunks, or poisoning only what was
+  used, would make the stress run cover them.
+- **Tuning.** Chunk size (4 MB) and the threshold (64 MB, then 2× live)
+  are first guesses.
+- **Safe points only at `_hnf` entries.** Still unconfirmed that no loop
+  allocates unboundedly without entering a function. Write a test that
+  allocates heavily inside one runtime loop.
+- **The proofs side.** `LEAKS.md`, `GcLeaks.v` and `GcBench.v` are
+  uncommitted in the proofs repo. Not proved:
+  - that skipping a forward keeps `deref_nd`;
+  - D2-D4 (the per-view liveness);
+  - an end-to-end simulation of a collecting machine.
+
+## Hazards found along the way
+
+- Two `rice` builds or `tests/run.sh` runs with different `RICE_CFLAGS`
+  must not run at once: they share `runtime/*.o` (and the kics2 lib's
+  `Prelude.o`).
+- Don't run `make` in `runtime/`. It rebuilds the objects with `-g` and
+  no `-O2`, but leaves `rice`'s `*.o.flags`, so later programs link
+  unoptimized code. If it happens: `rm runtime/*.o runtime/*.o.flags`.
+- In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
+  of about 25 seeds with `ulimit -s 65520`.
+
+## Loose ends (not the collector)
+
+- `gc/strict_fold` is slow: about 1.7 µs per element, against 0.06 µs
+  in `tailsum`. Possibly `even`/`map` dispatching through type-class
+  dictionaries. Worth profiling.
+- `=:<=`'s settle loops treat a `CHOICE_TAG` node as a value
+  (`src/explicit-stack-plan.md`). Possibly a latent bug; it needs a test.
+- `git stash` holds the "lazy frames experiment". It can probably be
+  dropped, since the collector relies on eagerly pushed frames.

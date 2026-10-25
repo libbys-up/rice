@@ -4,19 +4,12 @@
 #include<stdlib.h>
 #include "node.h"
 
-#ifdef GC
-// Experimental Boehm build (Makefile): kept until the copying collector
-// replaces it (src/gc-plan.md).
-#include<gc.h>
-#define memory_init() GC_INIT()
-#define alloc(size) GC_MALLOC(size)
-#else
-
-// The heap: chunks of zeroed memory, bump-allocated (heap.c,
-// src/gc-plan.md). Only nodes and nodes' spill arrays live here; runtime
-// data structures (the trail, the evaluation stack, C strings) use malloc.
-// Allocation never collects or moves anything: when a chunk is full, the
-// slow path takes a fresh one. Collection happens only at safe points.
+/* The heap is a linked list of chunks of zeroed memory (see heap.c)
+ * that contains nodes and their spill arrays.
+ * Everything else (the trail, the machine stack, C strings) uses malloc.
+ *
+ * We never collect on allocations, only when we're at a safe point (gc.h).
+ */
 
 // How many allocations so far (nf_all prints this).
 extern unsigned long mem;
@@ -25,7 +18,12 @@ extern char*  rice_heap_next;     // next free byte in the current chunk
 extern char*  rice_heap_limit;    // end of the current chunk
 extern size_t rice_heap_since_gc; // bytes allocated since the last collection
 
+// Set up the heap with its first chunk.
 void  memory_init(void);
+
+// alloc's slow path: only called when the current chunk can't fit `size`.
+// Don't call it directly.  It always takes a new chunk,
+// so the rest of the current chunk would be wasted.
 void* rice_alloc_slow(size_t size);
 
 // For the collector: start a fresh to-space, returning the old chunk list,
@@ -34,29 +32,35 @@ void* heap_begin_collection(void);
 void  heap_end_collection(void* from_space);
 
 // Allocates `size` bytes of zeroed memory, 8-byte aligned.
+// Callers rely on the memory being zeroed (NULL children, spill headers start at 0).
+// If we hit the end of a chunk, then we need to take the slow path.
 static inline void* alloc(size_t size)
 {
+    // round size up to the next multiple of 8
     size = (size + 7) & ~(size_t)7;
     mem++;
     char* p = rice_heap_next;
     if((size_t)(rice_heap_limit - p) < size)
+    {
         return rice_alloc_slow(size);
+    }
     rice_heap_next = p + size;
     rice_heap_since_gc += size;
     return p;
 }
 
-// A node's spill array (its children past the third), with one header
-// word in front of it, at a[-1]: zero until the collector copies the
-// array, then the copy's address. A node and its trail snapshot can share
-// one spill array (save_snapshot copies the node, not the array), and the
-// header lets the collector keep that sharing.
+/* Create a node's spill array to hold all children past the 3rd one.
+ * We add one header word (at a[-1]) to hold the to space address when copying.
+ * It's 0 until the collector copies the array.
+ *
+ * A node and its trail snapshot can share one spill array:
+ * save_snapshot() copies the node, not the array.
+ * The header lets the collector make sure that sharing stays consistent.
+ */
 static inline union field* alloc_spill(size_t n)
 {
     union field* a = (union field*)alloc((n + 1) * sizeof(union field));
     return a + 1;
 }
 
-#endif
-
-#endif
+#endif // MEMORY_H

@@ -108,19 +108,8 @@ it explains *why*, not just *what*. Keep pure scratch-reasoning (the kind in
 `src/Rice/Codegen/CodeGen.txt` and `Scrutinee.txt`) out of the source tree —
 see the Documentation section below.
 
-**Don't narrate bug-fix history in a comment.** A comment should describe the
-code as it stands — an invariant it depends on, a corner case that isn't
-obvious from reading it, a reason a less obvious approach was chosen over a
-more obvious one — for a reader who has never seen any previous, broken
-version and doesn't need to. It should *not* read as "this used to be wrong,
-here's what the bug was, here's how it was found" — that's a changelog entry,
-not documentation of the present code, and it goes stale the moment the
-surrounding code changes again for an unrelated reason. `STATUS.md`'s dated
-sections are where that history belongs (e.g. its "Verification pass"
-write-ups); a source comment isn't the place for it. This is a real,
-widespread problem in the current codebase (`runtime/runtime.c`,
-`Rice.Codegen.C.PrimOps`, `Rice.Optimize.Inline`, among others) — not yet
-cleaned up wholesale, but don't add more of it.
+**Don't narrate bug-fix history in a comment.** See "Three kinds of comments"
+below: history goes in a `.md` file, not in the code.
 
 ### Data types
 
@@ -196,7 +185,7 @@ unmodified function if no replacement exists (`src/Rice/Files/Replace.curry:35-3
 rather than erroring.
 
 `error(...)` (Curry) / `error(msg, expr)` (the C runtime's helper,
-`runtime/runtime.h:242`, defined `runtime.c:661`) is the right tool
+declared in `runtime/runtime.h`, defined in `runtime/runtime.c`) is the right tool
 specifically for "this is deliberately not implemented yet" — the C
 runtime uses it this way consistently for unimplemented externals (`catch`,
 `ensureNotFree`, `read*Literal`, file I/O, etc. in `runtime/prelude.c`).
@@ -221,44 +210,122 @@ pragmas without a reason." Custom `infixl`/`infixr` fixity declarations are
 reserved for genuine DSLs, e.g. `src/Rice/Codegen/C/C.curry:35-42` for the
 C-emission combinators. Don't declare fixity for ordinary project functions.
 
+## Three kinds of comments
+
+This applies to every language in the project, not just C.
+
+We write three kinds of comments, and each one has its own home.
+
+1. **What this code does.** Comments on a function, a struct, or a tricky line,
+   for someone reading that code. These stay in the code. They should be
+   informative about anything surprising: an invariant the code depends on, a
+   corner case, or a reason we didn't do the obvious thing. If a decision would
+   make a new reader stop and ask "why?", answer it here.
+2. **Architecture.** How the pieces fit together, and why the system is
+   designed the way it is: the node representation, the evaluation machine, the
+   trail, the garbage collector. These go in `src/architecture.tex`, which
+   explains the whole design in one place for someone new to the project. A code
+   comment can point to it in a line, but shouldn't repeat it.
+3. **Process.** What we tried that didn't work, old bugs and how we found them,
+   measurements, and things that are no longer true. These go in a `.md` file
+   (`src/runtime-history.md` for the runtime, or the plan document for the
+   piece of work), where future sessions can find them. People reading the code
+   don't need them, and they go stale as soon as the code changes again.
+
+A quick test: if the comment would still be true and useful after the bug it
+describes has been fixed for a year, it's kind 1 or 2. If it starts with "this
+used to", "was tried", "confirmed by", or "before the fix", it's kind 3.
+
+**Voice.** Write comments plainly, in the first person, the way you'd explain
+the code to a student sitting next to you ("we", "I"). Short sentences. Say the
+surprising part directly instead of piling on qualifications. Don't assume the
+reader knows the history of the file.
+
 ## C runtime code (`runtime/`)
 
-- **Naming:** `snake_case` for functions/variables (`stack_push`, `make_choice`),
-  `PascalCase` for types (`Node`, `Symbol`, `Stack`), `ALL_CAPS` for macros and
-  constants (`FAIL_TAG`, `FUNCTION_TAG`, `NO_OPTS`).
+- **Naming:** `snake_case` for functions/variables (`trail_push`, `make_choice`),
+  `PascalCase` for types (`Node`, `Symbol`, `Trail`), `ALL_CAPS` for macros and
+  constants (`FAIL_TAG`, `FUNCTION_TAG`, `GC_MIN_THRESHOLD`). Prefix functions
+  with the thing they work on (`trail_pop`, `frame_push`, `machine_run`) rather
+  than using bare names like `pop` or `size`.
 - **Curry-facing name mangling:** generated/Curry-facing symbols follow a
   `Module_function_hnf` / `make_Module_function` / `set_Module_function` triple,
   with a fixed escape scheme for special characters (`_US` for `_`, `DL` for
-  `$`, `EX` for `!`, etc.) — e.g. `Prelude__DL_EX_hnf` for `$!`
-  (`runtime/prelude.c:116`). Keep new externals consistent with this scheme
-  rather than inventing new escapes.
+  `$`, `EX` for `!`, etc.) — e.g. `Prelude__DL_EX_hnf` for `$!`. Keep new
+  externals consistent with this scheme rather than inventing new escapes.
 - **Formatting:** Allman brace style (opening brace on its own line), 4-space
   indentation, no tabs, anywhere in `runtime/*.c`/`*.h`.
-- **Header guards:** classic `#ifndef X_H` / `#define X_H` / `#endif`, named
-  after the file (`NODE_H`, `RUNTIME_H`, `MACROS_H`, ...). No `#pragma once`.
+- **No space between a keyword and its parenthesis:** write `if(x)`,
+  `while(x)`, `for(...)`, and `switch(x)`, not `if (x)`.
+- **Always use braces** on `if`, `else`, `while` and `for` bodies, even for one
+  statement.
+- **Prefer `if` statements over the ternary operator.** Write
+
+  ```c
+  if(n.n->missing > 0)
+  {
+      return arity - n.n->missing;
+  }
+  return arity;
+  ```
+
+  rather than `return n.n->missing > 0 ? arity - n.n->missing : arity;`.
+  The exception is a macro that has to be an expression; if you need one, ask
+  whether a `static inline` function would do instead (that's why
+  `child_at_v` and `set_child_at` are functions).
+- **There's no `max` or `min`.** C has no standard integer `max`, and a
+  hand-written `max(a - b, 0)` is wrong for unsigned values, because `a - b`
+  wraps around to a huge number before `max` ever sees it. Compare first, then
+  subtract, with an `if`:
+
+  ```c
+  if(arity > 3)
+  {
+      return arity - 3;
+  }
+  return 0;
+  ```
+- **One statement per line, and no one-line functions.** Don't write
+  `static bool f(char c) { return ...; }` or
+  `{ GC_SAFE_POINT(root, sp); rice_root = root; ...; RETURN(); }` on one line.
+  Spread the body out, one statement per line, even when many functions have
+  the same shape. If they really are all the same, say so once in a comment
+  above them.
+- **Prototypes:** declare a function with no parameters as `f(void)`, not `f()`.
+  Under `-std=c11`, `f()` means "unspecified parameters", and the compiler won't
+  check calls to it.
+- **Unused parameters:** machine code has to take `(root, sp)` even when it
+  doesn't use `root`. Name the parameter `_root` and write `(void)_root;` to
+  silence `-Wunused-parameter`.
+- **Header guards:** classic `#ifndef X_H` / `#define X_H` / `#endif // X_H`,
+  named after the file (`NODE_H`, `RUNTIME_H`, `TRAIL_H`, ...). Label every
+  closing `#endif` with what it closes. No `#pragma once`.
 - **File organization:** one file per concern — `node.h` (representation),
-  `stack.h`/`.c` (backtracking stack), `runtime.h`/`.c` (reduction engine),
-  `macros.h`/`debug.h`/`memory.h` (small cross-cutting utilities). Keep new
+  `trail.h`/`.c` (the trail), `machine.h`/`.c` (the evaluation machine),
+  `memory.h`/`heap.c` (allocation), `gc.h`/`.c` (the collector),
+  `runtime.h`/`.c` (the reduction engine), `prelude.c` (Prelude externals),
+  `macros.h`/`debug.h`/`prim.h` (small cross-cutting utilities). Keep new
   runtime code similarly separated rather than growing one of the big files
   further.
-- **Memory:** pluggable at compile time via `-DGC` — either Boehm GC
-  (`GC_MALLOC`) or a `calloc`+counter fallback (`runtime/memory.h:6-13`). Normal
-  node-allocation paths never call `free()` manually; `runtime/stack.c:27-31`
-  is the one place that does, and it's flagged as a bug in `STATUS.md`, not a
-  pattern to imitate.
-- **Error handling:** one central `error(msg, expr)` helper
-  (`runtime/runtime.h:242`, defined `runtime.c:661`) that prints and exits.
-  `runtime/prelude.c` (Phase 2's rewrite of the old `external.c`/
-  `Prelude_external.c`, which had raw `exit()` bypasses — see `STATUS.md`)
-  routes every fatal path, real and stubbed, through it.
+- **Memory:** nodes and spill arrays come from `alloc` (`memory.h`), which
+  returns zeroed memory from the garbage collected heap. Everything else (the
+  trail, the machine stack, C strings) uses `malloc`/`free`. Never `free` a
+  node.
+- **Error handling:** one central `error(msg, expr)` helper (`runtime.c`) that
+  prints and exits. `runtime/prelude.c` routes every fatal path, real and
+  stubbed, through it. Check the result of `malloc`/`realloc` in runtime data
+  structures.
 - **Macros:** used deliberately for the `child_at_N` dispatch table
-  (`runtime/macros.h`), for selecting optimization strategy via `-DTEST=N`
-  (`runtime/runtime.h:61-99`), and for debug logging that compiles to nothing
-  when `DEBUG` is unset (`runtime/debug.h`). Multi-statement macros should be
-  wrapped in `do { ... } while(0)` — `runtime/memory.h:11`'s `alloc(size)`
-  macro currently isn't, which is fragile; new macros should not repeat that.
+  (`runtime/macros.h`), for the backtracking optimization flags
+  (`OPT_*`, `runtime/runtime.h`), and for debug logging that compiles to
+  nothing when `DEBUG` is unset (`runtime/debug.h`). Wrap multi-statement
+  macros in `do { ... } while(0)`, with the `if` inside the loop and no
+  trailing semicolon. The exception is a macro that has to `continue` or
+  `break` out of the caller's loop (`SCOPED_RETRY`), since inside a do-while
+  those would only leave the do-while; end that one with `else ((void)0)`
+  instead, and say why in a comment.
 - **Inlining:** node constructors/setters are `static inline
-  __attribute__((always_inline))` throughout (`runtime/runtime.h:106-501`)
+  __attribute__((always_inline))` throughout `runtime/runtime.h`
   — this is a deliberate performance choice (zero-cost wrappers at every
   call site) and should be kept for any new primitive constructor.
 

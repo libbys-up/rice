@@ -107,16 +107,16 @@ writeMain :: String -> MainMode -> Doc
 writeMain rootModule mode = vcat
   [ text "#include <stdio.h>"
   , cinclude "node"
-  , cinclude "stack"
+  , cinclude "trail"
   , cinclude "runtime"
   , cinclude "memory"
   , cinclude rootModule
   , text ""
-  , text "Stack* bt_stack;"
+  , text "Trail* trail;"
   , text "unsigned long mem;"
   , text ""
   , cfunDefn "int" "main" [] $
-      [ text "bt_stack" <+> equals <+> call "new_stack" [] <> semi
+      [ text "trail" <+> equals <+> call "trail_new" [] <> semi
       , scall "memory_init" []
       , scall "machine_init" []
       , text "field root" <+> equals <+>

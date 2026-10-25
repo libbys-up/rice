@@ -15,7 +15,7 @@
 static inline long prim_mod(long a, long b)
 {
     long r = a % b;
-    if (r != 0 && ((r < 0) != (b < 0)))
+    if(r != 0 && ((r < 0) != (b < 0)))
     {
         r += b;
     }

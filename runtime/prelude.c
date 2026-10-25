@@ -1,23 +1,20 @@
-// Rice's runtime support for `external` prelude function.
-// This supersedes the old external.c/external.h.
-// and use modern conventions, 
-// like 2 underscores between module and function name.
+// Rice's runtime support for the `external` functions in the Prelude.
+// Names use the usual mangling, with 2 underscores between module and function name.
 //
-// now covers completely:
+// This covers:
 //
 //   $!  $!!  $##  bindIO  returnIO  getChar  (&)  failed  error
 //   show{Int,Float,Char,String}Literal
 //   apply  cond  ioError  constrEq ((=:=)'s primitive)
 //   nonstrictEq ((=:<=)'s primitive)
-//   catch  ensureNotFree  read{Char,String,Nat,Float}Literal
+//   ensureNotFree  read{Char,String,Nat,Float}Literal
 //   readFile  writeFile  appendFile
 //
-// The first three groups are real implementations; the last group are
-// error(...) stubs for functionality this file doesn't implement yet.
-// This includes
-//  * real exception handling
-//  * the parsing direction of literal show/read, 
-//  * file I/O.
+// catch is still an error(...) stub, because we don't have exception handling yet.
+//
+// Most of these are written as machine code (see machine.h).
+// The rest are ordinary C functions (the _impl functions),
+// and the _hnf entry points at the bottom of the file call them.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +31,10 @@
 field toCurryString(char* str)
 {
     char* end = str;
-    while(*end != '\0') { end++; }
+    while(*end != '\0')
+    {
+        end++;
+    }
 
     field string = make_Prelude___LB_RB(0);
     while(end != str)
@@ -54,46 +54,29 @@ void setCurryString(field root, char* str)
     set_copy(root, toCurryString(str));
 }
 
-// A primitive rewriting `root` in place with an already-built value.
-// Trails like any other rewrite, at the point of the write (after
-// whatever forcing produced `value`). nondet is false: these primitives
-// don't track it, so under OPT_NONDET_TRAIL this trails nothing, exactly
-// as before; with #1 off it is the baseline trail #5 relies on. set_copy
-// keeps root's own epoch.
+// A primitive rewriting `root` in place with a value it already built.
+// These primitives don't track nondet, so we pass false:
+// with OPT_NONDET_TRAIL on this trails nothing,
+// and with it off, it's the ordinary trail that #5 relies on.
+// set_copy keeps root's own epoch.
 static void overwrite_root(field root, field value)
 {
     trail_node(root, false);
     set_copy(root, value);
 }
 
-// (:)'s children are forward-stored, same as any other ordinary
-// constructor (child 0 the head, child 1 the tail -- Rice.Codegen.C.ToH's
-// setRealChildren; not the reversed convention `apply`'s own missing-
-// argument slots use, runtime.h's own note on that) -- this used to read
-// them backwards, the same bug (and likely just as untested until now)
-// as runtime.c's print_string/print_list/print_tuple.
-// Settles `s` and, if it's a cons cell, its own head too (settle()
-// alone only reaches WHNF, i.e. cons-vs-nil -- toCStr also needs the
-// character payload itself resolved before reading it). Returns the
-// settled list node and, via `*c`, its head's char value (undefined if
-// the list turned out to be empty -- callers only read it after
-// checking for that).
+/* Settle string node `s` (a cons cell or []).
+ * If it's a cons cell, settle its head too, and put the character in *c.
+ * settle() only gets us to head normal form (cons vs. nil),
+ * so the head needs its own settle before we can read the character.
+ * The head is a boxed Char node, so the character itself is the box's child 0.
+ * *c is left alone if the list is empty.
+ */
 static field settleStringNode(field s, char* c)
 {
     field node = settle(s, NULL, eval_hnf);
     if(node.n->symbol->tag != Prelude___LB_RB_TAG)
     {
-        // `head` is a *reference to the boxed Char node* (child_at(node,0)
-        // returns a Node reference, same as any other constructor's own
-        // child), not the raw character value itself -- the actual value
-        // is one level further in, at that node's own child 0
-        // (child_at_c, same as the rest of this file reads a Char's
-        // payload). Originally read as `head.n->children[0].c` (this
-        // file's very first version, before settle() was added here);
-        // rewriting to add settle() briefly regressed this to `head.c`
-        // directly (reading the Node* itself reinterpreted as a raw
-        // char), caught by an actual `read` round-trip test producing
-        // garbage/truncated output instead of a real parse.
         GC_ROOT(node);  // settle runs the machine
         field head = settle(child_at(node, 0), NULL, eval_hnf);
         GC_UNROOT(1);
@@ -102,17 +85,12 @@ static field settleStringNode(field s, char* c)
     return node;
 }
 
-// Every prior caller of this (prim_error, prim_writeFile/appendFile
-// with string-literal arguments, prim_showStringLiteral) happened to
-// only ever receive an already-fully-forced string, so this got away
-// with reading node/character tags directly with no forcing of its own
-// -- until read*Literal's own callers (readsPrec's real, lazy `lexDigits`/
-// `span`-built strings, not literals) turned out to need it and
-// segfaulted walking an unforced spine. settle() (runtime.h) is used at
-// every spine step and on each character, same "chase FORWARD_TAG,
-// redispatch through FUNCTION_TAG/CHOICE_TAG" fix as strictApply/cond/
-// bindIO/(&)/ensureNotFree -- a no-op, and therefore still safe, for
-// the already-forced strings every other caller passes.
+/* Convert a Curry String to a malloc'd C string.  The caller frees it.
+ * The string might not be evaluated yet (read*Literal gets strings built lazily by lex),
+ * so we settle every spine node and every character as we go.
+ * For a string that's already evaluated, settling doesn't do anything.
+ * We walk the string twice: once to get the length, and once to copy the characters.
+ */
 char* toCStr(field string)
 {
     char c;
@@ -206,6 +184,9 @@ static RICE_CC void strict_k(union field _root, Frame* sp)
     set_apply1(root, child_at(root, 0), x);
     MUSTTAIL return apply_hnf(root, sp);
 }
+
+// $!! and $## are C code that runs the machine,
+// so we hand sp to C in rice_sp, and read it back afterwards (machine.h).
 RICE_CC void Prelude___DL_EX_EX_hnf(union field root, Frame* sp)
 {
     GC_SAFE_POINT(root, sp);
@@ -215,9 +196,12 @@ RICE_CC void Prelude___DL_EX_EX_hnf(union field root, Frame* sp)
     GC_UNROOT(1);
     sp = rice_sp;
     if(!applied)
+    {
         RETURN();
+    }
     MUSTTAIL return apply_hnf(root, sp);
 }
+
 RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
 {
     GC_SAFE_POINT(root, sp);
@@ -227,68 +211,42 @@ RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
     GC_UNROOT(1);
     sp = rice_sp;
     if(!applied)
+    {
         RETURN();
+    }
     MUSTTAIL return apply_hnf(root, sp);
 }
 
 // ----------------------------------------------------------------------
-// IO plumbing: Rice's execution model has no separate IO-monad
-// representation (see archetecture.md), so `bindIO m f` is exactly
-// "evaluate m, then apply f to it", which is the same shape as `$!` above,
-// just under a different name and without the FAIL/backtracking-stack
-// bookkeeping IO code never needs. `returnIO x` is just `x` (returnIO's
-// whole job is "wrap a value as an IO action," and there's no wrapper to
-// build here).
+// IO plumbing.
+// We don't have a separate representation for IO actions.
+// `bindIO m f` is just "evaluate m, then apply f to it",
+// which is the same shape as `$!` above.
+// `returnIO x` is just `x`.
 // ----------------------------------------------------------------------
 
-// bindIO :: IO a -> (a -> IO b) -> IO b -- m is the first parameter,
-// f the second, so (matching every other node here, and the "forward
-// storage" convention documented in runtime.h) m is child 0 and f is
-// child 1.
-// IO never backtracks: settling `m` (below) can dispatch a CHOICE_TAG
-// node reached along the way (e.g. `m` itself is `x ? y`, or forcing
-// one of its own arguments hits a choice somewhere inside), which
-// pushes a real frame onto bt_stack via choose(). But apply_hnf below
-// then overwrites `root` in place with f's result, permanently
-// orphaning that choice from the reachable graph -- nothing will ever
-// point back at it again. Left alone, the frame just sits on
-// bt_stack, and a later top-level `undo(0)` (nf_all's "try another
-// solution" loop) finds it, restores it, and re-runs nf() on a graph
-// that never actually changed -- observed directly as a spurious
-// second "SOLUTION: ()" for a plain `do`-block containing a `?`
-// (see the regression test this fix adds). Recording the cutoff
-// before doing any work and discarding (not restoring -- pop_to,
-// unlike undo, never writes rhs back into lhs) everything above it
-// once this call's whole dispatch (including running `f`, via
-// apply_hnf) is done commits every choice made along the way, so
-// nothing pushed during *this* bindIO call is ever visible to undo()
-// again. This is also the soundness bar `catch`'s planned cutoff-based
-// design needs bt_stack to actually meet.
-// A single HNF() call is deliberately non-looping (see runtime.h),
-// but an action built from further nested bindIO/`*>` calls (as any
-// multi-statement `do`-block, or `putStr` recursing over a string,
-// desugars to) WHNF-reduces one step at a time, landing on a FORWARD
-// pointing at the *next* still-unrun action rather than a finished
-// value -- the same reason apply_hnf's own dispatch loop chases
-// FORWARD_TAG itself instead of trusting a single HNF() call. Without
-// fully settling `m`, `f` (commonly `\_ -> next`, ignoring its
-// argument -- the ordinary shape for IO () sequencing) would receive
-// and discard that FORWARD reference, silencing every action still
-// pending inside it before its side effects ever ran. settle() (same
-// fix as strictApply/cond, above) does this: chases FORWARD_TAG and
-// re-evaluates whatever that lands on, repeating
-// until `m` is genuinely settled -- forward_hnf being a no-op means
-// neither half alone is enough (a bare loop would stop cold on a
-// freshly-reached FUNCTION_TAG/CHOICE_TAG; a bare evaluation never
-// even starts chasing an already-FORWARD_TAG m). No nondet tracking
-// needed here, unlike strictApply/cond: IO actions carry no
-// FAIL/backtracking-stack bookkeeping at all (this function's own
-// header comment), so there's nothing to trail either way.
-//
-// On the machine: bind_k settles m with frame [root, m, nondet, cutoff];
-// then the frame becomes a commit frame [cutoff] while `apply f m` runs,
-// and commit_k pops the trail back to the cutoff once root is in head
-// normal form -- the same "after the whole dispatch" point as before.
+/* bindIO m f: m is child 0, and f is child 1.
+ *
+ * Two surprising things here.
+ *
+ * First, we fully settle m, chasing forwards, not just one HNF call.
+ * A do block evaluates one step at a time, so m often lands on a FORWARD
+ * to the next action that hasn't run yet.
+ * f is usually `\_ -> next`, which ignores its argument,
+ * so if we handed it that forward, the pending actions would never run.
+ *
+ * Second, IO never backtracks, so bindIO commits to every choice made while it runs.
+ * Evaluating m can hit a choice (m might be `x ? y`), and choose() pushes a trail entry.
+ * Then we overwrite root with f's result, so nothing can reach that choice anymore.
+ * If we left the entry on the trail, nf_all's undo(0) would find it later,
+ * restore it, and run the same program again (an extra "SOLUTION: ()").
+ * So we record the trail's height before we start, and once root is in head normal form
+ * we drop everything above it with trail_pop_to (which doesn't restore anything).
+ *
+ * On the machine: bind_k settles m with frame [root, m, nondet, cutoff].
+ * Then that frame is replaced by a commit frame [cutoff] while `apply f m` runs,
+ * and commit_k drops the trail back to the cutoff once root is in head normal form.
+ */
 static const unsigned char bind_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
 static const unsigned char commit_reps[] = { R_INT };
 static RICE_CC void bind_k(union field _root, Frame* sp);
@@ -305,7 +263,7 @@ RICE_CC void Prelude__bindIO_hnf(union field root, Frame* sp)
     SLOT(0) = root;
     SLOT(1) = child_at(root, 0);
     SLOT(2).i = false;
-    SLOT(3).i = size(bt_stack);
+    SLOT(3).i = trail_size(trail);
     MUSTTAIL return bind_k(NO_ROOT, sp);
 }
 
@@ -329,7 +287,7 @@ static RICE_CC void commit_k(union field _root, Frame* sp)
     (void)_root;
     long cutoff = SLOT(0).i;
     sp = frame_pop(sp);
-    pop_to(bt_stack, (int)cutoff);
+    trail_pop_to(trail, (int)cutoff);
     RETURN();
 }
 
@@ -346,15 +304,13 @@ static void Prelude__getChar_impl(void)
     set_Prelude__Char(root, (field)(unsigned long)c, 0);
 }
 
-// prim_putChar :: Char# -> IO () -- genuinely dispatched (not one of
-// Rice.Codegen.C.PrimOps' inlined-expression primitives) specifically so
-// this only runs when something actually forces it, same as getChar
-// above: those primitives are all pure, so it's unobservable whether the
-// C expression computing one runs at thunk-construction time or later,
-// but putchar()'s side effect is exactly what bindIO's sequencing (see
-// above) has to control the order of. Argument is the raw (unboxed)
-// char replace_Prim.curry's own `putChar` already unwrapped via a
-// `Char c'` case match before ever calling this.
+/* prim_putChar :: Char# -> IO ()
+ * The argument is the raw char (replace_Prim.curry's putChar already unboxed it).
+ * Unlike the pure primitives in Rice.Codegen.C.PrimOps, which are inlined as C expressions,
+ * this has to be a real function that only runs when something forces it.
+ * putchar's side effect has to happen in the order bindIO runs things,
+ * not whenever the thunk happens to get built.
+ */
 static void Prelude__prim_USputChar_impl(void)
 {
     field root = rice_root;
@@ -378,8 +334,7 @@ static void Prelude__prim_USerror_impl(void)
 }
 
 // ----------------------------------------------------------------------
-// show*Literal: straightforward sprintf + toCurryString. read*Literal
-// (the inverse direction) is not implemented yet.
+// show*Literal: straightforward sprintf + toCurryString.
 // ----------------------------------------------------------------------
 
 static void Prelude__prim_USshowIntLiteral_impl(void)
@@ -423,7 +378,10 @@ static void Prelude__prim_USshowStringLiteral_impl(void)
     char* buf = (char*)malloc(4 * len + 3);
     char* p = buf;
     *p++ = '"';
-    for (size_t i = 0; i < len; i++) { p = appendEscaped(p, s[i], '"'); }
+    for(size_t i = 0; i < len; i++)
+    {
+        p = appendEscaped(p, s[i], '"');
+    }
     *p++ = '"';
     *p = '\0';
     overwrite_root(root, toCurryString(buf));
@@ -439,27 +397,14 @@ static void Prelude__prim_USshowStringLiteral_impl(void)
 // This works like (&&)'s definition (`True && x = x`)
 //
 // failed: fails unconditionally.
-//
-// Was `nf(x)` followed by reading `x.n->symbol->tag` directly -- broken
-// the same way strictApply's own pre-settle() bug was: `nf` takes its
-// argument *by value* (a `field`, holding a pointer to the underlying
-// Node), and internally chases FORWARD_TAG into its own *local*
-// variable, mutating whatever it settles on in place but never writing
-// that back into the caller's own `x`. If `x`'s own node ends up
-// FORWARD_TAG (extremely common -- e.g. a dictionary-method case whose
-// own result is itself a further call, redirected via set_forward
-// rather than becoming a plain True/False constructor directly), the
-// tag check right below sees FORWARD_TAG, matching neither FAIL_TAG nor
-// Prelude__False_TAG, and silently falls through to the "must be True"
-// branch -- discarding a real False. Confirmed directly: `(1 /= 1) &
-// e` incorrectly forwarded to `e` instead of yielding False, traced via
-// `--debug=high` to `/=`'s own dictionary-dispatch chain settling on a
-// FORWARD_TAG node right where this reads its tag. `settle()` (like
-// strictApply, cond, bindIO, prim_ioError already do) is exactly this
-// fix, factored out: chase, re-force, repeat, *returning* the settled
-// value instead of relying on in-place mutation the caller can't see.
-// `x & y`: settle x (frame [root, x, nondet]); fail if it failed,
-// False if it's False, otherwise root becomes y.
+// ----------------------------------------------------------------------
+
+/* `x & y`: settle x (frame [root, x, nondet]).
+ * root fails if x failed, is False if x is False, and otherwise becomes y.
+ * We have to settle x, not just evaluate it once:
+ * x often ends up as a FORWARD (a dictionary method whose result is another call),
+ * and a FORWARD isn't FAIL or False, so we'd wrongly treat it as True.
+ */
 static RICE_CC void and_k(union field _root, Frame* sp);
 static const FrameInfo and_info =
     { .code = and_k, .size = 3, .reps = eval1_reps, .name = "&" };
@@ -484,11 +429,17 @@ static RICE_CC void and_k(union field _root, Frame* sp)
     sp = frame_pop(sp);
     trail_node(root, nondet);
     if(x.n->symbol->tag == FAIL_TAG)
+    {
         fail(root);
+    }
     else if(x.n->symbol->tag == Prelude__False_TAG)
+    {
         set_Prelude__False(root, 0);
+    }
     else
+    {
         set_forward(root, child_at(root, 1));
+    }
     RETURN();
 }
 
@@ -505,7 +456,7 @@ static void Prelude__failed_impl(void)
 // Rice.Codegen.C.ToC has a special-case for every direct call to Prelude.apply
 // into set_apply1+apply_hnf right at the call site
 // (isApply, ToC.curry), which skips this entirely.
-// But we can still crate apply nodes (like `map apply`), so we need to handle it.
+// But we can still create apply nodes (like `map apply`), so we need to handle it.
 //
 // cond :: Bool -> a -> a: FlatCurry's representation of a guarded rule
 // (`f x | c = e` compiles to `f x = cond c e`): succeeds with e if c
@@ -548,9 +499,13 @@ static RICE_CC void cond_k(union field _root, Frame* sp)
     sp = frame_pop(sp);
     trail_node(root, nondet);
     if(c.n->symbol->tag == Prelude__True_TAG)
+    {
         set_forward(root, child_at(root, 1));
+    }
     else
+    {
         fail(root);
+    }
     RETURN();
 }
 
@@ -558,28 +513,18 @@ static RICE_CC void cond_k(union field _root, Frame* sp)
 // ioError :: IOError -> IO _ (`ioError err = prim_ioError $## err`):
 // raises a fatal error carrying the IOError's message. Every IOError
 // constructor (IOError/UserError/FailError/NondetError) wraps exactly one
-// String, so the message is always child 0; this skips replicating
-// Show's per-constructor "i/o error: "/"user error: "/etc. prefix (no
-// `catch` exists yet to make the distinction matter) and just reports the
-// raw message.
+// String, so the message is always child 0. We just report the raw message,
+// without Show's "user error: " style prefix,
+// since there's no `catch` yet to make the difference matter.
 // ----------------------------------------------------------------------
 
 static void Prelude__prim_USioError_impl(void)
 {
     field root = rice_root;
     field err = child_at(root, 0);
-    // settle(), not a bare evaluation: child_at(err,0) right below needs
-    // err genuinely resolved to a real IOError constructor, not a still-
-    // pending tail call or (forward_hnf being a no-op) a FORWARD_TAG left
-    // over from wherever err came from -- reading child_at(0) off a
-    // forward wrapper itself would silently pull the wrapper's own
-    // forward target, not the real IOError's message field. In practice
-    // ioError's own definition (ioError err = prim_ioError $## err)
-    // already forces err to ground normal form before this ever runs, so
-    // this is defensive rather than independently observable -- but cheap
-    // and consistent with strictApply/cond's own fix, just above. No
-    // nondet tracking needed: error() below is exit(1), never backtracked
-    // into, so there's nothing to trail.
+    // We need err to be an actual IOError constructor before we read its message.
+    // ioError's definition already forces err with $##, so this settle is just defensive.
+    // We don't need nondet: error() exits, so nothing ever backtracks into this.
     GC_ROOT(root);  // settle and toCStr run the machine
     GC_ROOT(err);
     err = settle(err, NULL, eval_hnf);
@@ -598,10 +543,8 @@ static void Prelude__prim_USioError_impl(void)
 // unify_step (=:=/constrEq, strict): the caller nf()'s both sides fully
 // first, so the only free variables either side can still contain are
 // genuine, never-bound logic variables, which are bound directly to whatever's on
-// the other side, no narrowing needed. nf() recurses through the whole
-// structure but doesn't collapse FORWARD_TAG chains (archetecture.md's
-// "FORWARD_TAG collapsing" design), so this still has to chase forwards
-// itself at every level, same as every other consumer.
+// the other side, no narrowing needed. nf() doesn't remove FORWARD nodes,
+// so this still has to chase forwards itself at every level, same as every other consumer.
 //
 // *nondet accumulates whether the outcome depends on anything a choice
 // point could still revert, for the caller's trail decision on root (#1):
@@ -618,24 +561,33 @@ static bool raw_equal(field a, field b, FieldRep r)
 {
     switch(r)
     {
-        case R_INT:   return a.i == b.i;
-        case R_CHAR:  return a.c == b.c;
-        case R_FLOAT: return a.f == b.f;
-        case R_PTR:   break;
+        case R_INT:
+            return a.i == b.i;
+        case R_CHAR:
+            return a.c == b.c;
+        case R_FLOAT:
+            return a.f == b.f;
+        case R_PTR:
+            break;
     }
     return false;
 }
 
 // One pending comparison: a pointer pair (rep R_PTR) to unify, or a raw
 // pair to compare by value.
-typedef struct { field x, y; FieldRep rep; } UnifyPair;
+typedef struct
+{
+    field x;
+    field y;
+    FieldRep rep;
+} UnifyPair;
 
 static bool unify_step(field x0, field y0, bool* nondet)
 {
-    // Depth-first, children left to right -- the same order the recursive
-    // version visited them in, so bindings happen in the same order. An
-    // explicit work list keeps deep data (a long list) off the C stack.
-    size_t cap = 64, n = 0;
+    // Depth-first, children left to right.
+    // An explicit work list keeps deep data (a long list) off the C stack.
+    size_t cap = 64;
+    size_t n = 0;
     UnifyPair* work = (UnifyPair*)malloc(cap * sizeof(UnifyPair));
     work[n++] = (UnifyPair){ x0, y0, R_PTR };
     bool ok = true;
@@ -647,15 +599,34 @@ static bool unify_step(field x0, field y0, bool* nondet)
             ok = raw_equal(p.x, p.y, p.rep);
             continue;
         }
-        field x = p.x, y = p.y;
+        field x = p.x;
+        field y = p.y;
         *nondet |= x.n->nondet || y.n->nondet;
-        while(x.n->symbol->tag == FORWARD_TAG) { x = child_at(x, 0); *nondet |= x.n->nondet; }
-        while(y.n->symbol->tag == FORWARD_TAG) { y = child_at(y, 0); *nondet |= y.n->nondet; }
+        while(x.n->symbol->tag == FORWARD_TAG)
+        {
+            x = child_at(x, 0);
+            *nondet |= x.n->nondet;
+        }
+        while(y.n->symbol->tag == FORWARD_TAG)
+        {
+            y = child_at(y, 0);
+            *nondet |= y.n->nondet;
+        }
 
         // one side failed, we can't unify
         if(x.n->symbol->tag == FAIL_TAG || y.n->symbol->tag == FAIL_TAG)
         {
             ok = false;
+            continue;
+        }
+
+        // Both sides are the same node, so they already unify.
+        // This matters for x =:= x with x free:
+        // binding x to itself would make a FORWARD that points at itself,
+        // and anything that read x afterwards would loop forever.
+        // (This isn't an occurs check; we still don't do one.)
+        if(x.n == y.n)
+        {
             continue;
         }
 
@@ -687,7 +658,9 @@ static bool unify_step(field x0, field y0, bool* nondet)
         if(n + arity > cap)
         {
             while(n + arity > cap)
+            {
                 cap *= 2;
+            }
             work = (UnifyPair*)realloc(work, cap * sizeof(UnifyPair));
         }
         for(unsigned int i = arity; i-- > 0; )
@@ -713,7 +686,7 @@ static void Prelude__constrEq_impl(void)
     GC_UNROOT(3);
     // Decided after unifying (unify_step reports what the outcome read),
     // but before root is written. unify_step's own free-variable bindings
-    // are trailed separately, so the order of the two frames doesn't matter.
+    // are trailed separately, so the order of the two entries doesn't matter.
     bool nondet = false;
     bool ok = unify_step(x, y, &nondet);
     trail_node(root, nondet);
@@ -728,7 +701,7 @@ static void Prelude__constrEq_impl(void)
 }
 
 // lazy_unify_step (=:<=/nonstrictEq, "Declarative Programming with Function Patterns"):
-// unlike unify_step, s is only evaluted to HNF.
+// unlike unify_step, s is only evaluated to HNF.
 // A free variable on the s side becomes a FORWARD to t directly
 // (t can stay unevaluated);
 // a free variable on the t side is narrowed
@@ -738,7 +711,11 @@ static void Prelude__constrEq_impl(void)
 // whether to trail" convention (trail_node) as strictApply/cond/(&) above.
 // ----------------------------------------------------------------------
 
-typedef struct { bool ok; bool nondet; } LazyResult;
+typedef struct
+{
+    bool ok;
+    bool nondet;
+} LazyResult;
 
 // On the machine, each pending pair (s, t) has a frame
 //   [s, t, scruts, scrutt, phase, child, nondet, cutoff]
@@ -766,7 +743,7 @@ static inline Frame* lu_push(Frame* sp, field s, field t)
     SLOT(4).i = 0;
     SLOT(5).i = 0;
     SLOT(6).i = false;
-    SLOT(7).i = size(bt_stack);
+    SLOT(7).i = trail_size(trail);
     return sp;
 }
 
@@ -794,9 +771,24 @@ static RICE_CC void lu_k(union field _root, Frame* sp)
             }
             else if(tg == FREE_TAG)
             {
-                save_copy(scruts);
-                set_forward(scruts, SLOT(1));
+                // If t is this same variable (x =:<= x), there's nothing to bind.
+                // Binding x to itself would make a FORWARD that points at itself.
+                // t isn't evaluated yet, so we only look through its forwards.
+                field t = SLOT(1);
+                field target = t;
+                while(target.n->symbol->tag == FORWARD_TAG)
+                {
+                    nondet |= target.n->nondet;
+                    target = child_at(target, 0);
+                }
                 sp = frame_pop(sp);
+                if(target.n == scruts.n)
+                {
+                    lu_result = (LazyResult){ true, nondet };
+                    RETURN();
+                }
+                save_copy(scruts);
+                set_forward(scruts, t);
                 lu_result = (LazyResult){ true, true };
                 RETURN();
             }
@@ -899,13 +891,13 @@ finish:
     #if OPT_SCOPED_BACKTRACK
     if(!ok && undo(n))
     {
-        // Retry the pair from scratch, as the recursive version did.
+        // Retry the pair from scratch.
         SLOT(2) = SLOT(0);
         SLOT(3) = SLOT(1);
         SLOT(4).i = 0;
         SLOT(5).i = 0;
         SLOT(6).i = false;
-        SLOT(7).i = size(bt_stack);
+        SLOT(7).i = trail_size(trail);
         MUSTTAIL return lu_k(NO_ROOT, sp);
     }
     #endif
@@ -937,42 +929,32 @@ static RICE_CC void nseq_k(union field _root, Frame* sp)
     sp = frame_pop(sp);
     trail_node(root, lu_result.nondet);
     if(lu_result.ok)
+    {
         set_Prelude__True(root, 0);
+    }
     else
+    {
         fail(root);
+    }
     RETURN();
 }
 
 // ----------------------------------------------------------------------
-// ensureNotFree :: a -> a -- real kics2 (Prelude.kics2.hs's own
-// external_d_C_ensureNotFree) chases through Choice/Guard nodes and,
-// on a genuinely unbound Free variable, *narrows* it (commits it to one
-// of its type's constructors) before returning. That narrowing needs to
-// know the variable's type -- which constructors to even try -- and
-// this function, called generically as `Prelude__ensureNotFree_hnf`
-// for every type alike, is never given one: unlike an ordinary
-// FREE_TAG case-dispatch branch (runtime.c's generated pattern,
-// `set_X_free`), which the *caller* generates once per concrete type it
-// actually matches against, there is no single `set_X_free` this could
-// call without knowing X. So this is a genuine architectural gap, not
-// just an unwritten function -- but it's also very rarely hit in
-// practice: `$#`/`ensureNotFree` don't appear anywhere in Rice's own
-// replace_Prelude.curry/replace_Prim.curry, nor in the actual
-// __KICS2__-branch Prelude.curry Rice's frontend compiles (only in that
-// file's *other* CPP branches, for other backends) -- reachable here
-// only if a Curry program calls `$#`/`ensureNotFree`/`ensureSpine`
-// itself, not from anything Rice's own pipeline generates.
+// ensureNotFree :: a -> a
 //
-// Handles everything real kics2 does *except* the Free case: chases
-// FORWARD_TAG and redispatches through FUNCTION_TAG/CHOICE_TAG via
-// settle() (same as strictApply/cond/bindIO/prim_ioError), which
-// covers Choice and Guard's own role here (both eventually resolve to
-// a real tag through the ordinary CHOICE_TAG/FUNCTION_TAG dispatch a
-// generated case ordinarily forces anyway). A settled FREE_TAG is
-// passed through unchanged rather than narrowed -- correct whenever the
-// caller only needed "some value to force", wrong if it specifically
-// needed the result guaranteed non-free; no way to tell which from
-// here.
+// This only does part of the job.
+// In KiCS2, ensureNotFree narrows an unbound free variable to one of its type's constructors.
+// We can't do that here: we're called the same way for every type,
+// so we don't know which constructors to try.
+// (A generated FREE case can narrow, because the code generator knows the type there.)
+//
+// So we settle x like everything else does, and pass a free variable through unchanged.
+// That's right when the caller just needed some value forced,
+// and wrong when it really needed the result to not be free.
+// In practice we only get here if a Curry program calls $#, ensureNotFree,
+// or ensureSpine itself; nothing Rice generates does.
+// ----------------------------------------------------------------------
+
 // ensureNotFree x: settle x (frame [root, x, nondet]); root forwards to it.
 static RICE_CC void notfree_k(union field _root, Frame* sp);
 static const FrameInfo notfree_info =
@@ -1012,14 +994,12 @@ static RICE_CC void notfree_k(union field _root, Frame* sp)
 // for now.
 // ----------------------------------------------------------------------
 
-// Reads the whole file at `path` into a fresh, NUL-terminated buffer
-// the caller must free -- same NUL-terminated-C-string convention
-// toCurryString/toCStr already assume throughout this file, so (as
-// elsewhere here) an embedded NUL byte in the file's own content would
-// truncate the Curry string built from it early. `mode` is fopen's own
-// ("r" or "a+"/"w"/...) -- only ever called here with "r", but kept as
-// a parameter rather than hardcoded since the caller already has to
-// pick a fatal-error message either way.
+/* Read the whole file at `path` into a fresh, NUL terminated buffer.
+ * The caller frees it.
+ * `what` is the name of the Curry function, for the error message.
+ * Since we use C strings, an embedded NUL byte in the file
+ * would cut the Curry string short.
+ */
 static char* readWholeFile(const char* path, const char* what)
 {
     FILE* f = fopen(path, "r");
@@ -1029,7 +1009,8 @@ static char* readWholeFile(const char* path, const char* what)
         snprintf(msg, sizeof(msg), "%s: %s: %s", what, path, strerror(errno));
         error(msg, make_Prelude___LP_RP(0));
     }
-    size_t cap = 4096, len = 0;
+    size_t cap = 4096;
+    size_t len = 0;
     char* buf = (char*)malloc(cap);
     size_t n;
     while((n = fread(buf + len, 1, cap - len, f)) > 0)
@@ -1058,8 +1039,8 @@ static void Prelude__prim_USreadFile_impl(void)
     free(content);
 }
 
-// Shared by writeFile ("w", truncate) and appendFile ("a", append) --
-// same fopen mode letter fwrite/fopen themselves use.
+// Shared by writeFile ("w", truncate) and appendFile ("a", append).
+// mode is the fopen mode letter.
 static void writeToFile(field root, char mode)
 {
     GC_ROOT(root);  // toCStr runs the machine
@@ -1070,9 +1051,17 @@ static void writeToFile(field root, char mode)
     FILE* f = fopen(path, fmode);
     if(f == NULL)
     {
+        const char* what;
+        if(mode == 'w')
+        {
+            what = "writeFile";
+        }
+        else
+        {
+            what = "appendFile";
+        }
         char msg[512];
-        snprintf(msg, sizeof(msg), "%s: %s: %s",
-                 mode == 'w' ? "writeFile" : "appendFile", path, strerror(errno));
+        snprintf(msg, sizeof(msg), "%s: %s: %s", what, path, strerror(errno));
         free(path);
         free(content);
         error(msg, root);
@@ -1084,56 +1073,94 @@ static void writeToFile(field root, char mode)
     set_Prelude___LP_RP(root, 0);
 }
 
-static void Prelude__prim_USwriteFile_impl(void)  { field root = rice_root; writeToFile(root, 'w'); }
-static void Prelude__prim_USappendFile_impl(void) { field root = rice_root; writeToFile(root, 'a'); }
+static void Prelude__prim_USwriteFile_impl(void)
+{
+    field root = rice_root;
+    writeToFile(root, 'w');
+}
+
+static void Prelude__prim_USappendFile_impl(void)
+{
+    field root = rice_root;
+    writeToFile(root, 'a');
+}
 
 // ----------------------------------------------------------------------
 // Deferred stubs: crash the program rather than silently fail.
-// Real exception handling, and the parsing direction of literal show/read.
+// We don't have exception handling yet.
 // ----------------------------------------------------------------------
 
-static void Prelude__catch_impl(void) { field root = rice_root; error("catch not implemented yet", root); }
+static void Prelude__catch_impl(void)
+{
+    field root = rice_root;
+    error("catch not implemented yet", root);
+}
 
 // ----------------------------------------------------------------------
-// read*Literal: the inverse of show*Literal above -- each is a `ReadS a`
-// (`String -> [(a, String)]`, the standard Haskell-style "parse a
-// *prefix*, return what's left" convention: `[]` means no parse, one
-// (value, rest) pair means the literal was found at the very start of
-// the input). Every caller in the real Prelude (readsPrec's Char/Int/
-// Float instances) already hands these a string `lex`/`lexDigits` cut
-// down to exactly one token and only keeps a result whose own `rest` is
-// empty, so a real prefix parser (rather than assuming the whole input
-// is one bare literal) is correct for both that internal use and any
-// direct external call.
+// read*Literal: the inverse of show*Literal above.
+// Each is a `ReadS a` (`String -> [(a, String)]`):
+// parse a literal at the start of the input, and return it with whatever is left.
+// `[]` means it didn't parse.
+// The Prelude's callers (readsPrec for Char, Int, and Float) only keep a result
+// whose rest is empty, so parsing a prefix is correct for them,
+// and for any program that calls these directly.
 //
-// Escaping is the exact inverse of appendEscaped's own table (runtime.c,
-// above show*Literal): same named escapes, same decimal \NNN fallback.
+// Escapes are the exact inverse of appendEscaped (runtime.c):
+// the same named escapes, and the same decimal \NNN fallback.
 // ----------------------------------------------------------------------
 
-static bool isAsciiDigit(char c) { return c >= '0' && c <= '9'; }
+static bool isAsciiDigit(char c)
+{
+    return c >= '0' && c <= '9';
+}
 
 // Decodes the escape starting right after the backslash at `p` (not
 // included), writes the decoded byte to `*out`, and returns how many
 // bytes of `p` it consumed -- 0 means unrecognized/malformed.
 static int parseEscape(const char* p, char* out)
 {
-    switch (*p)
+    switch(*p)
     {
-        case '\\': *out = '\\'; return 1;
-        case '\'': *out = '\''; return 1;
-        case '"':  *out = '"';  return 1;
-        case 'a':  *out = '\a'; return 1;
-        case 'b':  *out = '\b'; return 1;
-        case 'f':  *out = '\f'; return 1;
-        case 'n':  *out = '\n'; return 1;
-        case 'r':  *out = '\r'; return 1;
-        case 't':  *out = '\t'; return 1;
-        case 'v':  *out = '\v'; return 1;
+        case '\\':
+            *out = '\\';
+            return 1;
+        case '\'':
+            *out = '\'';
+            return 1;
+        case '"':
+            *out = '"';
+            return 1;
+        case 'a':
+            *out = '\a';
+            return 1;
+        case 'b':
+            *out = '\b';
+            return 1;
+        case 'f':
+            *out = '\f';
+            return 1;
+        case 'n':
+            *out = '\n';
+            return 1;
+        case 'r':
+            *out = '\r';
+            return 1;
+        case 't':
+            *out = '\t';
+            return 1;
+        case 'v':
+            *out = '\v';
+            return 1;
         default:
-            if (isAsciiDigit(*p))
+            if(isAsciiDigit(*p))
             {
-                int val = 0, n = 0;
-                while (n < 3 && isAsciiDigit(p[n])) { val = val * 10 + (p[n] - '0'); n++; }
+                int val = 0;
+                int n = 0;
+                while(n < 3 && isAsciiDigit(p[n]))
+                {
+                    val = val * 10 + (p[n] - '0');
+                    n++;
+                }
                 *out = (char)val;
                 return n;
             }
@@ -1141,20 +1168,31 @@ static int parseEscape(const char* p, char* out)
     }
 }
 
-typedef struct { bool ok; char value; const char* rest; } CharParse;
+typedef struct
+{
+    bool ok;
+    char value;
+    const char* rest;
+} CharParse;
 
 static CharParse tryParseCharLiteral(const char* s)
 {
-    if (s[0] != '\'') return (CharParse){ false, 0, s };
+    if(s[0] != '\'')
+    {
+        return (CharParse){ false, 0, s };
+    }
     const char* p = s + 1;
     char c;
-    if (*p == '\\')
+    if(*p == '\\')
     {
         int n = parseEscape(p + 1, &c);
-        if (n == 0) return (CharParse){ false, 0, s };
+        if(n == 0)
+        {
+            return (CharParse){ false, 0, s };
+        }
         p += 1 + n;
     }
-    else if (*p == '\0' || *p == '\'')
+    else if(*p == '\0' || *p == '\'')
     {
         return (CharParse){ false, 0, s }; // empty '' or unterminated
     }
@@ -1163,28 +1201,48 @@ static CharParse tryParseCharLiteral(const char* s)
         c = *p;
         p += 1;
     }
-    if (*p != '\'') return (CharParse){ false, 0, s };
+    if(*p != '\'')
+    {
+        return (CharParse){ false, 0, s };
+    }
     return (CharParse){ true, c, p + 1 };
 }
 
-typedef struct { bool ok; char* value; const char* rest; } StringParse;
+typedef struct
+{
+    bool ok;
+    char* value;
+    const char* rest;
+} StringParse;
 
 // On success, `value` is a fresh malloc'd, NUL-terminated C string the
 // caller must free.
 static StringParse tryParseStringLiteral(const char* s)
 {
-    if (s[0] != '"') return (StringParse){ false, NULL, s };
-    const char* p = s + 1;
-    size_t cap = 64, len = 0;
-    char* buf = (char*)malloc(cap);
-    while (*p != '"')
+    if(s[0] != '"')
     {
-        if (*p == '\0') { free(buf); return (StringParse){ false, NULL, s }; }
+        return (StringParse){ false, NULL, s };
+    }
+    const char* p = s + 1;
+    size_t cap = 64;
+    size_t len = 0;
+    char* buf = (char*)malloc(cap);
+    while(*p != '"')
+    {
+        if(*p == '\0')
+        {
+            free(buf);
+            return (StringParse){ false, NULL, s };
+        }
         char c;
-        if (*p == '\\')
+        if(*p == '\\')
         {
             int n = parseEscape(p + 1, &c);
-            if (n == 0) { free(buf); return (StringParse){ false, NULL, s }; }
+            if(n == 0)
+            {
+                free(buf);
+                return (StringParse){ false, NULL, s };
+            }
             p += 1 + n;
         }
         else
@@ -1192,32 +1250,48 @@ static StringParse tryParseStringLiteral(const char* s)
             c = *p;
             p += 1;
         }
-        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }
+        if(len + 1 >= cap)
+        {
+            cap *= 2;
+            buf = (char*)realloc(buf, cap);
+        }
         buf[len++] = c;
     }
     buf[len] = '\0';
     return (StringParse){ true, buf, p + 1 };
 }
 
-typedef struct { bool ok; double value; const char* rest; } FloatParse;
+typedef struct
+{
+    bool ok;
+    double value;
+    const char* rest;
+} FloatParse;
 
 static FloatParse tryParseFloatLiteral(const char* s)
 {
-    // Curry Float literal syntax always starts with a digit (the sign,
-    // if any, is handled by readSigned, a layer up) -- checked
-    // explicitly rather than just handing `s` to strtod, which would
-    // also accept a leading sign/"nan"/"inf" text that isn't valid here.
-    if (!isAsciiDigit(s[0])) return (FloatParse){ false, 0, s };
+    // A Curry Float literal always starts with a digit (readSigned handles the sign).
+    // We check that ourselves, because strtod would also accept
+    // a leading sign, "nan", or "inf".
+    if(!isAsciiDigit(s[0]))
+    {
+        return (FloatParse){ false, 0, s };
+    }
     char* end;
     double v = strtod(s, &end);
-    if (end == s) return (FloatParse){ false, 0, s };
+    if(end == s)
+    {
+        return (FloatParse){ false, 0, s };
+    }
     return (FloatParse){ true, v, end };
 }
 
-// Every read*Literal _hnf below shares this shape: parse, then either
-// `[]` (make_Prelude___LB_RB) or a one-element list holding the
-// (value, rest) pair.
-static field noParse(void) { return make_Prelude___LB_RB(0); }
+// Every read*Literal below either returns `[]` (noParse)
+// or a one-element list holding the (value, rest) pair (oneParse).
+static field noParse(void)
+{
+    return make_Prelude___LB_RB(0);
+}
 
 static field oneParse(field value, const char* rest)
 {
@@ -1232,7 +1306,7 @@ static void Prelude__prim_USreadNatLiteral_impl(void)
     char* s = toCStr(child_at(root, 0));
     GC_UNROOT(1);
     field result;
-    if (!isAsciiDigit(s[0]))
+    if(!isAsciiDigit(s[0]))
     {
         result = noParse();
     }
@@ -1240,7 +1314,11 @@ static void Prelude__prim_USreadNatLiteral_impl(void)
     {
         char* p = s;
         long value = 0;
-        while (isAsciiDigit(*p)) { value = value * 10 + (*p - '0'); p++; }
+        while(isAsciiDigit(*p))
+        {
+            value = value * 10 + (*p - '0');
+            p++;
+        }
         result = oneParse(make_Prelude__Int((field)(long)value, 0), p);
     }
     overwrite_root(root, result);
@@ -1254,9 +1332,16 @@ static void Prelude__prim_USreadCharLiteral_impl(void)
     char* s = toCStr(child_at(root, 0));
     GC_UNROOT(1);
     CharParse r = tryParseCharLiteral(s);
-    field result = r.ok
-      ? oneParse(make_Prelude__Char((field)(unsigned long)(unsigned char)r.value, 0), r.rest)
-      : noParse();
+    field result;
+    if(r.ok)
+    {
+        field c = make_Prelude__Char((field)(unsigned long)(unsigned char)r.value, 0);
+        result = oneParse(c, r.rest);
+    }
+    else
+    {
+        result = noParse();
+    }
     overwrite_root(root, result);
     free(s);
 }
@@ -1268,9 +1353,20 @@ static void Prelude__prim_USreadStringLiteral_impl(void)
     char* s = toCStr(child_at(root, 0));
     GC_UNROOT(1);
     StringParse r = tryParseStringLiteral(s);
-    field result = r.ok ? oneParse(toCurryString(r.value), r.rest) : noParse();
+    field result;
+    if(r.ok)
+    {
+        result = oneParse(toCurryString(r.value), r.rest);
+    }
+    else
+    {
+        result = noParse();
+    }
     overwrite_root(root, result);
-    if (r.ok) { free(r.value); }
+    if(r.ok)
+    {
+        free(r.value);
+    }
     free(s);
 }
 
@@ -1281,35 +1377,217 @@ static void Prelude__prim_USreadFloatLiteral_impl(void)
     char* s = toCStr(child_at(root, 0));
     GC_UNROOT(1);
     FloatParse r = tryParseFloatLiteral(s);
-    field result = r.ok
-      ? oneParse(make_Prelude__Float((field)(double)r.value, 0), r.rest)
-      : noParse();
+    field result;
+    if(r.ok)
+    {
+        result = oneParse(make_Prelude__Float((field)(double)r.value, 0), r.rest);
+    }
+    else
+    {
+        result = noParse();
+    }
     overwrite_root(root, result);
     free(s);
 }
 
 // ----------------------------------------------------------------------
-// Machine entry points (runtime/machine.h). Each runs its C-convention
-// implementation above, which may still evaluate subterms with nested
-// eval_hnf calls, then returns to the frame on top of the machine stack.
+// Machine entry points (runtime/machine.h) for the C functions above.
+//
+// They all have the same shape:
+//  * GC_SAFE_POINT: collect if we need to, before we look at root.
+//  * Copy root and sp into rice_root and rice_sp,
+//    because the _impl function is ordinary C code and can't see our registers.
+//  * Run the _impl function.  It might run the machine (toCStr, nf, settle),
+//    and a nested run can move the stack.
+//  * So read sp back out of rice_sp before we RETURN().
 // ----------------------------------------------------------------------
 
-RICE_CC void Prelude__returnIO_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__returnIO_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__getChar_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__getChar_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USputChar_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USputChar_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USerror_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USerror_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowIntLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowIntLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowFloatLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowCharLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowCharLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USshowStringLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USshowStringLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__failed_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__failed_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USioError_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USioError_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__constrEq_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__constrEq_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadFile_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadFile_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USwriteFile_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USwriteFile_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USappendFile_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USappendFile_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__catch_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__catch_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadNatLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadNatLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadCharLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadCharLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadStringLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadStringLiteral_impl(); sp = rice_sp; RETURN(); }
-RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); rice_root = root; rice_sp = sp; Prelude__prim_USreadFloatLiteral_impl(); sp = rice_sp; RETURN(); }
+RICE_CC void Prelude__returnIO_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__returnIO_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__getChar_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__getChar_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USputChar_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USputChar_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USerror_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USerror_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USshowIntLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USshowIntLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USshowFloatLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USshowFloatLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USshowCharLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USshowCharLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USshowStringLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USshowStringLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__failed_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__failed_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USioError_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USioError_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__constrEq_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__constrEq_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USreadFile_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USreadFile_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USwriteFile_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USwriteFile_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USappendFile_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USappendFile_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__catch_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__catch_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USreadNatLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USreadNatLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USreadCharLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USreadCharLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USreadStringLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USreadStringLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}
+
+RICE_CC void Prelude__prim_USreadFloatLiteral_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    rice_sp = sp;
+    Prelude__prim_USreadFloatLiteral_impl();
+    sp = rice_sp;
+    RETURN();
+}

@@ -32,9 +32,9 @@
 #include "node.h"
 #include "runtime.h"
 
-// bt_stack/mem are `extern` in runtime.h -- defined once here, the way an
+// trail/mem are `extern` in runtime.h -- defined once here, the way an
 // eventual generated main() will define them.
-Stack* bt_stack;
+Trail* trail;
 unsigned long mem;
 
 static int failures = 0;
@@ -97,7 +97,7 @@ static Symbol boxed_int_symbol = { .tag = 5, .arity = 1, .name = "Int",
 
 int main(void)
 {
-    bt_stack = new_stack();
+    trail = trail_new();
     memory_init();
     machine_init();
 

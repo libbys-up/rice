@@ -6,17 +6,16 @@
 #include "runtime.h"
 
 #include "node.h"
-#include "stack.h"
+#include "trail.h"
 #include "debug.h"
 
 // Note:
 // (void)var;
 // is used to suppress variable not used warnings, so we can use -Wall.
 
-// backtracking-optimizations.md's #5 -- see its own doc comment on the
-// `extern` declaration, runtime.h. Defined here (not in generated main.c,
-// unlike bt_stack/mem) since nothing about it is per-program: every build
-// links this file exactly once.
+// This is for epoch trailing, see runtime.h.
+// Unlike trail and mem, this is defined here instead of in the generated main.c,
+// because nothing about it is specific to one program.
 unsigned int current_epoch = 0;
 
 static void CTR_impl(void)
@@ -35,11 +34,11 @@ static void choice_impl(void)
     choose(root);
 }
 
-// Sets free variable n to the constructor of `like`, with a fresh free
-// variable for every pointer child -- a core piece of a narrowing step.
-// A raw child can't be a free variable (a raw slot holds no node to bind
-// later), and has no structure left to narrow, so it takes `like`'s own
-// value instead.
+/* Sets free variable n to the constructor of `like`, with a fresh free
+ * variable for every pointer child.  This is the core of a narrowing step.
+ * A raw child can't be a free variable (a raw slot has no node to bind later),
+ * so it takes `like`'s own value instead.
+ */
 void set_free_constructor(union field n, union field like)
 {
     Symbol* sym = like.n->symbol;
@@ -56,8 +55,14 @@ void set_free_constructor(union field n, union field like)
     }
     for(unsigned int i = 0; i < sym->arity; i++)
     {
-        set_child_at(n, i, child_rep(sym, i) == R_PTR ? free_var()
-                                                       : child_at_v(like, i));
+        if(child_rep(sym, i) == R_PTR)
+        {
+            set_child_at(n, i, free_var());
+        }
+        else
+        {
+            set_child_at(n, i, child_at_v(like, i));
+        }
     }
 }
 
@@ -72,18 +77,17 @@ void narrow_raw_error(Symbol* sym)
     exit(1);
 }
 
-// copy node into new_node
+/* Overwrite new_node with the contents of node.
+ * The spill array gets copied too, so the two nodes don't share it.
+ */
 union field set_copy(union field new_node, union field node)
 {
 #if OPT_EPOCH_TRAIL
-    // `new_node`'s memory keeps its own age -- overwriting its *content*
-    // from `node` here isn't a new allocation, the same reasoning as
-    // set_X's own hnf functions never touching epoch (Rice.Codegen.C.ToH).
-    // This matters concretely: apply_hnf calls this to overwrite `root`
-    // (typically long-lived) with a callee's shape; memcpy-ing `node`'s
-    // epoch straight over root's own would let an old node suddenly read
-    // as young (or vice versa) for reasons having nothing to do with when
-    // root's memory was actually allocated.
+    // new_node keeps its own epoch.
+    // We're overwriting its contents, not allocating it,
+    // so it's just as old as it was before.
+    // apply_hnf uses this to overwrite a long lived root,
+    // and taking node's epoch would make root look young.
     unsigned int keep_epoch = new_node.n->epoch;
 #endif
     memcpy(new_node.n, node.n, sizeof(Node));
@@ -100,46 +104,14 @@ union field set_copy(union field new_node, union field node)
     return new_node;
 }
 
-// CLAUDE: What does this function do that different than set_copy?
-// Do we need both?
-union field set_copy_free(union field new_node, union field node)
-{
-    int arity = node.n->symbol->arity;
-    for(int i = 0; i < arity; i++)
-    {
-        if(child_rep(node.n->symbol, i) != R_PTR)
-        {
-            narrow_raw_error(node.n->symbol);
-        }
-    }
-
-    new_node.n = (Node*)alloc(sizeof(Node));
-#if OPT_EPOCH_TRAIL
-    new_node.n->epoch = current_epoch;
-#endif
-    new_node.n->missing = node.n->missing;
-    new_node.n->nondet = true;
-    if(arity > 3)
-    {
-        new_node.n->children[3].a = alloc_spill(arity - 3);
-    }
-    for(int i = 0; i < arity; i++)
-    {
-        set_child_at(new_node, i, free_var());
-    }
-    return new_node;
-}
-
 // create a copy of node.
 union field copy(union field node)
 {
     union field new;
     new.n = (Node*)alloc(sizeof(Node));
 #if OPT_EPOCH_TRAIL
-    // Stamped *before* set_copy, which preserves whatever epoch is
-    // already sitting in the destination rather than copying `node`'s --
-    // this is a fresh allocation, so its own epoch is "now", same as any
-    // other freshly alloc'd node, not the source's age.
+    // This is a fresh node, so it's stamped with the current epoch.
+    // We do this before set_copy, because set_copy keeps the destination's epoch.
     new.n->epoch = current_epoch;
 #endif
     set_copy(new, node);
@@ -163,16 +135,19 @@ static inline void check_fill_ptrs(Symbol* sym, int from, int count)
         }
     }
 #else
-    (void)sym; (void)from; (void)count;
+    (void)sym;
+    (void)from;
+    (void)count;
 #endif
 }
 
-// reduce a node rooted by apply(PART(f,y1,y2...yn), x1, x2 ... xn)
-// apply(PART(f,y1,...), x1, ...) on the evaluation machine. apply_hnf
-// pushes a frame [root, f, nondet] and enters apply_k, the loop that
-// evaluates f to a partial application: evaluating f jumps to f's code,
-// which returns into apply_k. Once f is a PART, the frame is popped and
-// the arguments filled in; a now fully applied call is then a tail jump.
+/* Reduce apply(f, x1, ..., xn) on the evaluation machine.
+ * apply_hnf pushes a frame [root, f, nondet] and enters apply_k.
+ * apply_k evaluates f until it's a partial application:
+ * evaluating f jumps to f's code, which returns into apply_k.
+ * Once f is a partial application, we pop the frame and fill in the arguments.
+ * If that makes a fully applied call, we tail jump to it.
+ */
 static const unsigned char apply_reps[] = { R_PTR, R_PTR, R_INT };
 static RICE_CC void apply_k(union field _root, Frame* sp);
 static const FrameInfo apply_info =
@@ -265,7 +240,7 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
     int missing = f.n->missing;
 
     debug_expr(HIGH, f);
-    debug(HIGH, "arity = %d\nmissing = %d\nnargs = %d\n", 
+    debug(HIGH, "arity = %d\nmissing = %d\nnargs = %d\n",
                 f.n->symbol->arity, missing, nargs);
     debug(HIGH, "missing > nargs %d\n", missing > nargs);
 
@@ -281,23 +256,11 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
         //we'll need to move this to a bigger array
         set_copy(root,f);
 
-        // Where the *first* still-missing argument slot lives, under
-        // Rice.Codegen.C.ToH's forward child-storage (child 0 is the
-        // first argument, ..., a "missing" argument occupies one of the
-        // last `missing` slots, in the same left-to-right order the
-        // arguments themselves arrive in) -- v1 (child1 below, despite
-        // the name: see set_apply1/2/3's own reversed storage for *this*
-        // apply node's own new arguments, which the local variable names
-        // here are labeled after) fills this slot first, then each
-        // subsequent argument fills the next slot up. This used to be
-        // `missing-1`, matching old_rice's own *reversed* child storage;
-        // that stopped matching once ToH switched to forward storage
-        // (archetecture.md's "Boxed primitives" era predates that
-        // change) -- confirmed as a real, live bug by running old_rice's
-        // own benchmark suite through the finished Phase 1 compiler: any
-        // partial application of 2+ missing arguments silently overwrote
-        // an already-supplied argument instead of filling the real empty
-        // slot, leaving the true slot NULL.
+        // f's node stores its arguments forward,
+        // with the missing ones in its last `missing` slots.
+        // So the first empty slot is arity - missing, and we fill upward from there.
+        // The apply node stores its arguments in reverse (see runtime.h),
+        // so the first argument we fill in is child1, the last one in the apply node.
         int fillIdx = f.n->symbol->arity - missing;
         check_fill_ptrs(f.n->symbol, fillIdx, nargs);
         while(nargs > 2)
@@ -343,26 +306,22 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
     }
     else
     {
-        // We're overapplied, so 
+        // We're overapplied, so
         //  * add all the arguments,
         //  * reduce root
         //  * try again.
         debug(HIGH, "too many args (%d/%d)\n", f.n->missing, nargs);
         debug_expr(HIGH, f);
-       
-        // we need a copy of f, 
+
+        // we need a copy of f,
         // because this one is applied to more arguments.
         // Other parts of the program might also reference that
         // old partial application.
         union field newf = copy(f);
         debug_expr(LOW, newf);
 
-        // copy arguments -- same forward-slot fix as the under/fully-
-        // applied branch above (`fillIdx`, not `missing-1`): this loop
-        // fills newf's (f's own, forward-laid-out) still-missing slots
-        // from the earliest-supplied argument onward, so the target
-        // index must count up from the first missing slot, not down from
-        // the last one.
+        // copy arguments.
+        // Same as above: fill newf's missing slots from the first empty one upward.
         int fillIdx = newf.n->symbol->arity - missing;
         check_fill_ptrs(newf.n->symbol, fillIdx, missing);
         while(missing > 0)
@@ -377,9 +336,8 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
         debug(HIGH, "fully applied child\n");
         debug_expr(HIGH, newf);
         newf.n->missing = 0;
-        // newf is a fully applied call. It isn't evaluated here: the
-        // re-entered apply's own loop evaluates it as its function, the
-        // same order as before, on the machine stack.
+        // newf is a fully applied call. We don't evaluate it here:
+        // the apply node we build next evaluates it as its function.
         child_at(root,0) = newf;
         root.n->missing = -nargs;
         debug(HIGH, "new apply node\n");
@@ -396,7 +354,7 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
 // code for backtracking
 //////////////////////////////////////////////////////////////////////////////
 
-// push (node -> copy(node)) on the stack, leaving node itself unchanged.
+// push (node -> copy(node)) on the trail, leaving node itself unchanged.
 // A whole-node memcpy, so the snapshot keeps node's own epoch and nondet
 // flag, and undo() puts both back.
 void save_snapshot(union field node)
@@ -404,7 +362,7 @@ void save_snapshot(union field node)
     union field saved;
     saved.n = (Node*)alloc(sizeof(Node));
     memcpy(saved.n, node.n, sizeof(Node));
-    stack_push(bt_stack, node, saved, false);
+    trail_push(trail, node, saved, false);
 }
 
 // save_snapshot, then mark node nondet. Always trails: used where the
@@ -416,36 +374,34 @@ void save_copy(union field node)
     node.n->nondet = true;
 }
 
-// push (n -> saved) on the backtracking stack)
+// push (n -> saved) on the trail
 void save(union field n, union field saved)
 {
     debug(HIGH, "save: ");
     debug_expr(HIGH, n);
     debug_expr(HIGH, saved);
     n.n->nondet = true;
-    stack_push(bt_stack, n, saved, false);
+    trail_push(trail, n, saved, false);
 }
 
-// push (left -> right) on the backtracking stack.
-// Not sure this is used.
+// push (left -> right) on the trail, as an ordinary (non-choice) entry.
+// Narrowing uses this: the generated code for a FREE scrutinee
+// pushes (scrutinee -> fresh free variable),
+// so once every constructor has been tried, the variable is free again.
 void push_frame(union field left, union field right)
 {
-    stack_push(bt_stack, left, right, false);
+    trail_push(trail, left, right, false);
 }
 
-// push (left ->? right) on the backtracking stack.
+// push (left ->? right) on the trail.
 // This is the stopping point while backtracking.
-//
-// A genuine choice point (narrowing a free variable to one of several
-// possible constructors, same as choose() below for a `?`) -- so under
-// OPT_EPOCH_TRAIL this is one of the two places (with choose()) that
-// advances current_epoch. stack_push captures the *pre*-increment value
-// into this frame first (runtime.h's own doc comment on why that's always
-// safe to do unconditionally); incrementing after is what makes anything
-// allocated from here on read as younger than this choice point.
+// Narrowing uses this for each other constructor a free variable could be.
+// Like choose(), this is a choice point, so it advances current_epoch (#5).
+// trail_push saves the old epoch in the entry first,
+// so everything allocated after this looks younger than the choice point.
 void push_choice(union field left, union field right)
 {
-    stack_push(bt_stack, left, right, true);
+    trail_push(trail, left, right, true);
 #if OPT_EPOCH_TRAIL
     current_epoch++;
 #endif
@@ -458,7 +414,7 @@ void push_choice(union field left, union field right)
 // ?(left, right, false) reduces to FORWARD(left) and backtracks to ?(left,right,true)
 // ?(left, right, true) reduces to FORWARD(right) and backtracks to ?(left,right,false)
 // For the nondet optimization only FORWARD(left) is marked as non-deterministic.
-// 
+//
 // if we reduce to left, then we will backtrack later
 // so our backtracking condition is side == 0
 // We flip the side value to indicate that we want to reduce to the other side next time.
@@ -477,76 +433,68 @@ void choose(union field root)
     saved.n = (Node*)alloc(sizeof(Node));
 
     //save = left ? right
-    //make a copy of root to push on the stack
+    //make a copy of root to push on the trail
     //swap if we're using left/right node
-    //push root on the stack
+    //push root on the trail
     //we backtrack if we're pointing to the left
     //otherwise this functions like (id right)
     memcpy(saved.n, root.n, sizeof(Node));
     child_at_i(saved,2) = !side;
-    stack_push(bt_stack, root, saved, side == 0);
+    trail_push(trail, root, saved, side == 0);
 #if OPT_EPOCH_TRAIL
-    // A genuine choice point either way -- side == 0 is the first
-    // exploration (the frame just pushed is choice-marked, i.e. a real
-    // undo() stopping point); side == 1 is the second, dispatched only
-    // after undo() already popped back to here and flipped it (that
-    // frame isn't choice-marked, since there's nothing left to retry once
-    // *this* alternative is also exhausted -- see undo()'s own doc
-    // comment). Both still mark "everything from here on is younger than
-    // this choice point" equally, so both advance current_epoch the same
-    // way; stack_push above already captured the pre-increment value into
-    // this frame regardless of which case this is.
+    // Both sides count as a choice point for epochs.
+    // Only the left side's entry is a choice entry for undo(),
+    // because after the right side there's nothing left to try,
+    // but everything allocated from here on is still younger than this choice.
     current_epoch++;
 #endif
 
     // If this node is pointing to the right, then
     // we won't do any more backtracking,
-    // but this node could be restored to the origonal choice later,
-    // so any node that depends on it should be on the stack.
+    // but this node could be restored to the original choice later,
+    // so any node that depends on it should be on the trail.
     set_forward(root,choices[side]);
     root.n->nondet = true;
 
     debug(HIGH, "leaving choice\n");
 }
 
-// Backtrack until we find a choice at or above stack height `cutoff`,
-// overwriting every popped frame's lhs with its saved rhs along the way so
-// the next attempt recomputes from the restored state. Returns true if a
-// choice was found and (only in that case) left ready to try its other
-// alternative; false means backtracking ran out of stack down to `cutoff`
-// without finding one -- an ordinary top-level search passes cutoff 0, so
-// this only reports "no solution at all"; a scoped caller (see
-// OPT_SCOPED_BACKTRACK in prelude.c's lazy_unify_step) passes a height it
-// recorded before starting, so this reports "no solution *in that scope*"
-// without searching any choice point older than it, and every alternative
-// within the scope still gets tried exactly as thoroughly either way --
-// see backtracking-optimizations.md's #3 for why that's sound generally,
-// not just for the one caller that originally used it.
+/* Backtrack until we find a choice at or above trail height `cutoff`.
+ * Every entry we pop gets restored (rhs is copied back over lhs),
+ * so the next attempt starts from the restored graph.
+ * Returns true if we found a choice, and it's ready to try its other alternative.
+ * Returns false if we ran out of trail down to `cutoff` without finding one.
+ *
+ * Top level search passes cutoff 0, so false means "no more solutions".
+ * Scoped backtracking (#3) passes the height from when its function started,
+ * so false means "no more solutions in this scope",
+ * and we never touch choices older than that.
+ */
 bool undo(int cutoff)
 {
-    // Nothing above `cutoff` means nothing in scope. The loop below always
-    // pops at least once, so without this check a scoped caller with an
-    // empty scope (e.g. a function whose logical parent pushed a frame
-    // before tail-dispatching into it) would pop and restore a frame that
-    // belongs to an ancestor. For cutoff 0 this is the old size == 0 test.
-    if(bt_stack->size <= (size_t)cutoff)
+    // Nothing above `cutoff` means nothing in scope.
+    // The loop below always pops at least once,
+    // so without this check we'd pop an entry that belongs to someone else.
+    if(trail->size <= (size_t)cutoff)
+    {
         return false;
+    }
 
-    debug(HIGH, "full stack\n");
-    debug_stack(HIGH);
+    debug(HIGH, "full trail\n");
+    debug_trail(HIGH);
     debug(HIGH, "undoing\n");
-    FieldPair* frame;
+    TrailEntry* frame;
     do
     {
-        frame = pop(bt_stack);
+        frame = trail_pop(trail);
         if(frame->lhs.n != NULL)
         {
             memcpy(frame->lhs.n, frame->rhs.n, sizeof(Node));
         }
-    } while(!frame->choice && size(bt_stack) > cutoff);
+    } while(!frame->choice && trail_size(trail) > cutoff);
 
     debug(HIGH, "finished undoing\n");
-    debug_stack(HIGH);
+    debug_trail(HIGH);
     return frame->choice;
 }
 
@@ -555,22 +503,26 @@ bool undo(int cutoff)
 ///////////////////////////////////////////////////////////////////////////
 
 
-void print_frame(FieldPair* f)
+void print_trail_entry(TrailEntry* f)
 {
     printf("%p:", f->lhs.n);
     print_expr(f->lhs);
     if(f->choice)
+    {
         printf(" T-> ");
+    }
     else
+    {
         printf(" F-> ");
+    }
 
     printf("%p:", f->rhs.n);
     print_expr(f->rhs);
 }
 
-void print_stack(Stack* s)
+void print_trail(Trail* s)
 {
-    printf("stacksize: %zu %zu\n", s->size, s->capacity);
+    printf("trail size: %zu %zu\n", s->size, s->capacity);
     if(s->size == 0)
     {
         printf("[]\n");
@@ -578,10 +530,10 @@ void print_stack(Stack* s)
     }
     for(int i = s->size - 1; i > 0; i--)
     {
-        print_frame(&s->array[i]);
+        print_trail_entry(&s->array[i]);
         printf(", \n");
     }
-    print_frame(&s->array[0]);
+    print_trail_entry(&s->array[0]);
     printf("\n");
 }
 
@@ -593,9 +545,13 @@ static void print_child_expr(union field n, int i)
 {
     FieldRep r = child_rep(n.n->symbol, i);
     if(r == R_PTR)
+    {
         print_expr(child_at_v(n, i));
+    }
     else
+    {
         print_raw(child_at_v(n, i), r);
+    }
 }
 
 void print_expr(union field n)
@@ -614,7 +570,7 @@ void print_expr(union field n)
         printf("?");
         fflush(stdout);
     }
-    if(n.n->missing < 0) // this is only ever true in a PART symbol
+    if(n.n->missing < 0) // an apply node: the function, then the arguments
     {
         printf("(");
         fflush(stdout);
@@ -640,25 +596,25 @@ void print_expr(union field n)
         for(int i = 0; i < (int)n.n->symbol->arity; i++)
         {
             if(i > 0)
+            {
                 printf(", ");
+            }
             if(i < filled)
+            {
                 print_child_expr(n, i);
+            }
             else
+            {
                 printf("*");
+            }
         }
         printf(")");
         fflush(stdout);
     }
 }
 
-// Prints components 0..i, comma-separated, in that (forward-storage,
-// same convention as print_list/print_string above) order -- no parens;
-// callers (print_final, below) print those themselves, both because
-// they're the ones who already know to print the opening one before
-// calling this, and because this used to fold the closing paren into its
-// own i==0 base case, which -- paired with printing the *current* index
-// before recursing to i-1, i.e. arity-1 first, down to 0 last -- printed
-// every tuple starting from its last component instead of its first.
+// Prints components 0..i of a tuple, separated by commas.
+// The caller prints the parentheses.
 void print_tuple(union field n, int i)
 {
     if(i == 0)
@@ -673,56 +629,76 @@ void print_tuple(union field n, int i)
     }
 }
 
-// Appends c's *derived-Show* escaped spelling to buf (which must have
-// room for at least 4 more bytes: the longest single-character
-// expansion, a decimal escape like "\127", is 4 bytes) and returns the
-// new write position. `quote` is whichever of '\'' or '"' is the
-// enclosing literal's own delimiter -- the one character that needs
-// escaping in one context but not the other (a bare '"' is fine inside
-// 'x', a bare '\'' is fine inside "..."; confirmed against real kics2's
-// own `show` output for exactly this case). Named escapes match GHC's
-// derived Show (\a\b\f\n\r\t\v, plus \\ and the delimiter itself);
-// anything else non-printable (code < 32, or >= 127 for a plain 7-bit
-// char) falls back to a decimal escape, same convention. Lives here,
-// not prelude.c, because runtime.c's own printing uses it and the
-// runtime library (runtime/Makefile) doesn't include prelude.c.
+/* Appends c, escaped the way Curry's derived Show would, to buf,
+ * and returns the new write position.
+ * buf needs room for at least 4 more bytes (the longest escape is "\127").
+ * `quote` is the delimiter of the literal we're in ('\'' or '"').
+ * That's the one character that only needs escaping in one context:
+ * a bare '"' is fine inside 'x', and a bare '\'' is fine inside "...".
+ * Named escapes match GHC's derived Show (\a \b \f \n \r \t \v, \\, and the delimiter).
+ * Anything else that isn't printable gets a decimal escape.
+ * This lives here instead of prelude.c because the runtime library
+ * (runtime/Makefile) doesn't include prelude.c, and our printing needs it.
+ */
 char* appendEscaped(char* buf, char c, char quote)
 {
-    if (c == '\\')       { *buf++ = '\\'; *buf++ = '\\'; }
-    else if (c == quote) { *buf++ = '\\'; *buf++ = quote; }
-    else if (c == '\a')  { *buf++ = '\\'; *buf++ = 'a'; }
-    else if (c == '\b')  { *buf++ = '\\'; *buf++ = 'b'; }
-    else if (c == '\f')  { *buf++ = '\\'; *buf++ = 'f'; }
-    else if (c == '\n')  { *buf++ = '\\'; *buf++ = 'n'; }
-    else if (c == '\r')  { *buf++ = '\\'; *buf++ = 'r'; }
-    else if (c == '\t')  { *buf++ = '\\'; *buf++ = 't'; }
-    else if (c == '\v')  { *buf++ = '\\'; *buf++ = 'v'; }
-    else if (c < 32 || c >= 127)
+    if(c == '\\')
+    {
+        *buf++ = '\\';
+        *buf++ = '\\';
+    }
+    else if(c == quote)
+    {
+        *buf++ = '\\';
+        *buf++ = quote;
+    }
+    else if(c == '\a')
+    {
+        *buf++ = '\\';
+        *buf++ = 'a';
+    }
+    else if(c == '\b')
+    {
+        *buf++ = '\\';
+        *buf++ = 'b';
+    }
+    else if(c == '\f')
+    {
+        *buf++ = '\\';
+        *buf++ = 'f';
+    }
+    else if(c == '\n')
+    {
+        *buf++ = '\\';
+        *buf++ = 'n';
+    }
+    else if(c == '\r')
+    {
+        *buf++ = '\\';
+        *buf++ = 'r';
+    }
+    else if(c == '\t')
+    {
+        *buf++ = '\\';
+        *buf++ = 't';
+    }
+    else if(c == '\v')
+    {
+        *buf++ = '\\';
+        *buf++ = 'v';
+    }
+    else if(c < 32 || c >= 127)
     {
         buf += sprintf(buf, "\\%d", (int)(unsigned char)c);
     }
-    else { *buf++ = c; }
+    else
+    {
+        *buf++ = c;
+    }
     return buf;
 }
 
-// (:)'s children are forward-stored like every other ordinary
-// constructor (Rice.Codegen.C.ToH's setRealChildren): child 0 is the
-// head (`:`'s first parameter), child 1 the tail (its second) -- *not*
-// the reversed convention `apply`'s own missing-argument slots use
-// (runtime.h's own note on that). These two functions (along with
-// print_final's own "is this a char list" check right below) read them
-// backwards -- a real, previously-uncaught bug: nothing before
-// tests/run.sh's crash-detection fix (STATUS.md) had ever actually
-// printed a list or string as `main`'s own top-level result (`putStr`'s
-// own string handling, toCStr/toCurryString in prelude.c, was already
-// correct and unaffected, since those never went through here).
-// Derived-Show output, same convention as prim_showStringLiteral
-// (prelude.c) -- this is nf_all's own top-level "print a found
-// solution" path, a separate printer from show*Literal (only reached
-// when a Curry program calls `show` itself), so it needs the exact
-// same escaping independently: previously this just wrote each raw
-// byte between quotes, so e.g. a string containing an actual newline
-// or a literal backslash printed unescaped instead of as `\n`/`\\`.
+// Print one character of a Char or String literal, escaped like derived Show.
 static void printEscapedChar(char c, char quote);
 
 // Prints a raw value the way Curry would show a literal of its type.
@@ -751,9 +727,13 @@ static void print_raw(union field v, FieldRep r)
 void print_field(union field v, FieldRep r)
 {
     if(r == R_PTR)
+    {
         print_expr(v);
+    }
     else
+    {
         print_raw(v, r);
+    }
 }
 
 static void printEscapedChar(char c, char quote)
@@ -763,6 +743,9 @@ static void printEscapedChar(char c, char quote)
     printf("%s", buf);
 }
 
+// Print a String (a list of boxed Chars) as a string literal.
+// (:) stores its children forward, like every constructor:
+// child 0 is the head, and child 1 is the tail.
 void print_string(union field n)
 {
     union field h = child_at(n,0);
@@ -785,6 +768,7 @@ void print_string(union field n)
     printf("\"");
     return;
 }
+
 void print_list(union field n)
 {
     union field h = child_at(n,0);
@@ -809,6 +793,29 @@ void print_list(union field n)
     return;
 }
 
+// If name is a tuple constructor "(,)", "(,,)", ..., return its number of commas.
+// Otherwise return 0.
+static int tuple_commas(const char* name)
+{
+    if(name[0] != '(' || name[1] != ',')
+    {
+        return 0;
+    }
+    int commas = 0;
+    const char* p = name + 1;
+    while(*p == ',')
+    {
+        commas++;
+        p++;
+    }
+    if(p[0] != ')' || p[1] != '\0')
+    {
+        return 0;
+    }
+    return commas;
+}
+
+// Print a fully evaluated value, for showing the solutions nf_all finds.
 void print_final(union field n)
 {
     if(TAG(n) == FORWARD_TAG)
@@ -818,35 +825,26 @@ void print_final(union field n)
     }
     if(!strcmp(n.n->symbol->name, ":"))
     {
-        // children[0] is the head (forward storage, see print_string/
-        // print_list's own note above) -- a `String` is `[Prelude.Char]`,
-        // so checking its constructor's real, exact name ("Char", the
-        // boxed Prelude constructor `toCurryString` builds every list
-        // element out of -- prelude.c) is what actually distinguishes a
-        // string from any other list; the lowercase "char" this checked
-        // before never matched anything real either, independent of
-        // which child it was reading.
+        // A String is a [Char], so we can tell a string from any other list
+        // by checking whether the head is a boxed Char.
         if(!strcmp(n.n->children[0].n->symbol->name, "Char"))
+        {
             print_string(n);
+        }
         else
+        {
             print_list(n);
+        }
         return;
     }
-    if(!strcmp(n.n->symbol->name, "(,)"))               { printf("("); print_tuple(n,1);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,)"))              { printf("("); print_tuple(n,2);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,)"))             { printf("("); print_tuple(n,3);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,)"))            { printf("("); print_tuple(n,4);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,)"))           { printf("("); print_tuple(n,5);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,)"))          { printf("("); print_tuple(n,6);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,)"))         { printf("("); print_tuple(n,7);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,)"))        { printf("("); print_tuple(n,8);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,)"))       { printf("("); print_tuple(n,9);  printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,)"))      { printf("("); print_tuple(n,10); printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,)"))     { printf("("); print_tuple(n,11); printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,)"))    { printf("("); print_tuple(n,12); printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,)"))   { printf("("); print_tuple(n,13); printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,,)"))  { printf("("); print_tuple(n,14); printf(")"); return; }
-    if(!strcmp(n.n->symbol->name, "(,,,,,,,,,,,,,,,)")) { printf("("); print_tuple(n,15); printf(")"); return; }
+    int commas = tuple_commas(n.n->symbol->name);
+    if(commas > 0)
+    {
+        printf("(");
+        print_tuple(n, commas);
+        printf(")");
+        return;
+    }
     // A box prints as its bare value (a Char as 'x', the derived-Show
     // convention print_string/showCharLiteral also follow).
     FieldRep box = box_rep(n.n->symbol);
@@ -865,13 +863,21 @@ void print_final(union field n)
         for(int i = 0; i < (int)n.n->symbol->arity; i++)
         {
             if(i > 0)
+            {
                 printf(", ");
+            }
             if(i >= filled)
+            {
                 printf("*");
+            }
             else if(child_rep(n.n->symbol, i) == R_PTR)
+            {
                 print_final(child_at_v(n,i));
+            }
             else
+            {
                 print_raw(child_at_v(n,i), child_rep(n.n->symbol, i));
+            }
         }
         printf(")");
     }
@@ -885,7 +891,9 @@ static bool looks_like_node(union field p)
 {
     uintptr_t a = (uintptr_t)p.n;
     if(a < 4096 || a % sizeof(void*) != 0)
+    {
         return false;
+    }
     uintptr_t s = (uintptr_t)p.n->symbol;
     return s >= 4096 && s % sizeof(void*) == 0;
 }
@@ -897,10 +905,23 @@ void check_layout(union field n, bool allow_null, const char* where)
     for(int i = 0; i < filled; i++)
     {
         if(child_rep(sym, i) != R_PTR)
+        {
             continue;
+        }
         union field c = child_at_v(n, i);
-        if(c.n == NULL ? allow_null : looks_like_node(c))
+        bool ok;
+        if(c.n == NULL)
+        {
+            ok = allow_null;
+        }
+        else
+        {
+            ok = looks_like_node(c);
+        }
+        if(ok)
+        {
             continue;
+        }
         fprintf(stderr, "Error: layout check failed in %s: child %d of %s "
                         "should be a node pointer (R_PTR) but holds %#lx\n",
                 where, i, sym->name, (unsigned long)c.i);
@@ -918,19 +939,20 @@ void error(char* msg, union field n)
     exit(1);
 }
 
-// Normal forms on the evaluation machine: nf (every reachable value
-// evaluated) and ground_nf (also fails on a free variable). Both are one
-// routine, nfx_k, with frame [expr, settled, state, mode]:
-//   expr     the node the caller holds. Failures are recorded on it, never
-//            on `settled`: nf_all reads TAG(expr) directly, so a failure
-//            left on a node further down a FORWARD chain would print as a
-//            bogus solution.
-//   settled  expr with FORWARD_TAG chased, evaluated to head normal form
-//   state    -1 while settling; otherwise the index of the child being
-//            normalized right now (children go last to first)
-//   mode     0 for nf, 1 for ground_nf
-// Each child gets its own frame, so depth follows the data on the machine
-// stack, not the C stack. nf and ground_nf below are C drivers for it.
+/* Normal forms on the evaluation machine: nf (every reachable value
+ * evaluated) and ground_nf (also fails on a free variable). Both are one
+ * routine, nfx_k, with frame [expr, settled, state, mode]:
+ *   expr     the node the caller holds. Failures are recorded on it, never
+ *            on `settled`: nf_all reads TAG(expr) directly, so a failure
+ *            left on a node further down a FORWARD chain would print as a
+ *            bogus solution.
+ *   settled  expr with FORWARD_TAG chased, evaluated to head normal form
+ *   state    -1 while settling; otherwise the index of the child being
+ *            normalized right now (children go last to first)
+ *   mode     0 for nf, 1 for ground_nf
+ * Each child gets its own frame, so depth follows the data on the machine
+ * stack, not the C stack. nf and ground_nf below are C drivers for it.
+ */
 static const unsigned char nfx_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
 static RICE_CC void nfx_k(union field _root, Frame* sp);
 static const FrameInfo nfx_info =
@@ -967,7 +989,9 @@ static RICE_CC void nfx_k(union field _root, Frame* sp)
                 MUSTTAIL return settled.n->symbol->hnf(settled, sp);
             }
             if(t != FORWARD_TAG)
+            {
                 break;
+            }
             settled = child_at(settled, 0);
         }
         SLOT(1) = settled;
@@ -986,7 +1010,14 @@ static RICE_CC void nfx_k(union field _root, Frame* sp)
         debug(LOW, "HNF: ");
         debug_expr(LOW, settled);
 #if CHECK_LAYOUT
-        check_layout(settled, false, ground ? "ground_nf" : "nf");
+        if(ground)
+        {
+            check_layout(settled, false, "ground_nf");
+        }
+        else
+        {
+            check_layout(settled, false, "nf");
+        }
 #endif
         state = filled_arity(settled);
     }
@@ -1015,10 +1046,14 @@ static RICE_CC void nfx_k(union field _root, Frame* sp)
     for(long i = state - 1; i >= 0; i--)
     {
         if(child_rep(settled.n->symbol, (int)i) != R_PTR)
+        {
             continue;
+        }
         union field e = child_at_v(settled, i);
         if(ground && e.n == NULL)
+        {
             continue;
+        }
         SLOT(2).i = i;
         sp = nfx_push(sp, e, ground);
         MUSTTAIL return nfx_k(e, sp);
@@ -1052,16 +1087,13 @@ void ground_nf(union field expr)
     machine_run(ground_nf_code, expr);
 }
 
-// Runs `expr` (a standalone program's `main`, always `IO _`) to normal
-// form exactly once: no "try another solution" backtracking loop, and no
-// printing of the result itself -- an IO action's output is whatever side
-// effects it already performed (putStrLn, etc.), not a value to show.
-// This is what an ordinary compiled executable's C `main()` should do;
-// `nf_all` below (compiled in when `rice --interactive` is given, e.g. by
-// a curry-repl-style front end evaluating an arbitrary, possibly
-// non-`IO`, possibly nondeterministic goal expression) is a different,
-// heavier driver, not the right default for a plain `curry foo.curry`
-// program. See Rice.Codegen.C.ToC.writeMain / Rice.Main's --interactive.
+/* Run a compiled program's `main` (an IO action) to normal form once.
+ * There's no "try another solution" loop, and we don't print the result:
+ * an IO action's output is the side effects it already performed.
+ * nf_all below is the other driver, for `rice --interactive`,
+ * where the goal can be any expression and might have several solutions.
+ * See Rice.Codegen.C.ToC.writeMain and Rice.Main's --interactive.
+ */
 void run_io(union field expr)
 {
     GC_ROOT(expr);  // nf runs the machine
@@ -1074,7 +1106,7 @@ void run_io(union field expr)
     }
 }
 
-// computer expr to a normal form, and print all solutions by backtracking.
+// compute expr to a normal form, and print all solutions by backtracking.
 void nf_all(union field expr)
 {
     bool solution = false;
@@ -1084,7 +1116,7 @@ void nf_all(union field expr)
     debug(HIGH, "MAYBE SOLUTION 1: ");
     debug_expr(HIGH, expr);
     debug(HIGH, "%d = %d?\n", TAG(expr), FAIL_TAG);
-    debug_stack(MED);
+    debug_trail(MED);
     if(TAG(expr) != FAIL_TAG)
     {
         printf("SOLUTION: ");
@@ -1093,7 +1125,7 @@ void nf_all(union field expr)
         solution = true;
     }
     // While we can backtrack, try again.
-    // The cutoff here is just the empty stack.
+    // The cutoff here is just the empty trail.
     while(undo(0))
     {
         debug(HIGH, "NORMALIZING %p:", expr.n);
@@ -1106,9 +1138,7 @@ void nf_all(union field expr)
             print_final(expr);
             printf("\n");
             solution = true;
-            //print_stack(bt_stack);
         }
-        //printf("stack size: %zu\n", bt_stack->size);
     }
     GC_UNROOT(1);
     if(!solution)
@@ -1121,10 +1151,30 @@ void nf_all(union field expr)
 
 // ----------------------------------------------------------------------
 // Machine entry points (runtime/machine.h). Each runs its C-convention
-// implementation above, which may still evaluate subterms with nested
-// eval_hnf calls, then returns to the frame on top of the machine stack.
+// implementation above, then returns to the frame on top of the machine stack.
 // ----------------------------------------------------------------------
 
-RICE_CC void CTR_hnf(union field root, Frame* sp)     { GC_SAFE_POINT(root, sp); rice_root = root; CTR_impl(); RETURN(); }
-RICE_CC void choice_hnf(union field root, Frame* sp)  { GC_SAFE_POINT(root, sp); rice_root = root; choice_impl(); RETURN(); }
-RICE_CC void forward_hnf(union field root, Frame* sp) { GC_SAFE_POINT(root, sp); (void)root; RETURN(); }
+RICE_CC void CTR_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    CTR_impl();
+    RETURN();
+}
+
+RICE_CC void choice_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    rice_root = root;
+    choice_impl();
+    RETURN();
+}
+
+// A FORWARD node is already in head normal form, as far as hnf is concerned.
+// Whoever evaluated it chases the forward themselves (see HNF in runtime.h).
+RICE_CC void forward_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    (void)root;
+    RETURN();
+}

@@ -2,7 +2,8 @@
 # section for the full phase plan this fits into).
 #
 # Builds the standalone-compilable core of runtime/ -- node.h, macros.h,
-# memory.h, debug.h, stack.{h,c}, runtime.{h,c} -- into a static library.
+# memory.h, debug.h, trail.{h,c}, machine.{h,c}, heap.c, gc.{h,c},
+# runtime.{h,c} -- into a static library.
 #
 # prelude.c is deliberately NOT part of this target: it #includes a
 # per-program-generated "Prelude.h" (codegen output -- e.g.
@@ -12,7 +13,7 @@
 # See Rice.Main's buildExecutable, which links it directly
 # alongside a specific program's generated .c files instead.
 #
-# bt_stack/mem (both `extern` in runtime.h) are deliberately *not* defined
+# trail/mem (both `extern` in runtime.h) are deliberately *not* defined
 # anywhere in this library.  They're meant to be defined once by whatever
 # provides main()
 
@@ -20,13 +21,7 @@ CC      ?= gcc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -g
 AR      ?= ar
 
-# To build against the Boehm GC instead of the default calloc-based
-# allocator (memory.h): make CFLAGS="-std=c11 -Wall -Wextra -Werror -g -DGC" \
-#                             LDLIBS=-lgc
-# This is experimental, not verified to work.
-# I'll probably replace Boehm with a custom GC later.
-
-SRC := runtime.c stack.c machine.c heap.c gc.c
+SRC := runtime.c trail.c machine.c heap.c gc.c
 OBJ := $(SRC:.c=.o)
 LIB := libriceruntime.a
 
