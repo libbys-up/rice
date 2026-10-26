@@ -9,10 +9,11 @@ from collections import OrderedDict
 
 # (metric, title, what it means)
 METRICS = [
-    ("seconds", "Wall-clock seconds (min of runs)", ""),
+    ("seconds", "Wall-clock seconds per run (min over rounds)", ""),
+    ("spread", "Timing spread (max/min over rounds)",
+     "a noise check: a speedup smaller than this is within the noise"),
     ("trail_pushes", "Trail entries pushed", "every entry, choice points included"),
     ("max_trail", "Trail high-water mark", "entries"),
-    ("undo_restores", "Entries restored by undo", ""),
     ("skipped_nondet", "Rewrites #1 didn't trail", ""),
     ("skipped_epoch", "Rewrites #5 didn't trail", ""),
     ("barrier_lowered", "Rewrites whose new nodes the barrier stamped old", ""),

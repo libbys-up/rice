@@ -21,4 +21,4 @@ total acc []     = acc
 total acc (y:ys) = (total $! (acc + y)) ys
 
 main :: Int
-main = total 0 (map isqrt (squares 600))
+main = total 0 (map isqrt (squares 10000))

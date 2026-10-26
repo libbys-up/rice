@@ -1,18 +1,24 @@
--- optbench: #4 (copy collapse) and path compression.
--- `v` is reached through a 200-long chain of forwards (each `idc`
--- collapses to its argument) and then read 20,000 times. Without either
--- optimization every read walks the chain. #4 copies the finished value
--- instead of forwarding to it, so there's no chain; path compression
--- retargets it on the first read.
-idc :: a -> a
-idc x = x
+-- optbench: path compression.
+-- `v` heads a 200-long chain of forwards, and a 300,000-element list has
+-- `v` in every slot. Each `idc 0 x` collapses to `x` while `x` is still
+-- a thunk, so it's a forward, not a copy, and #4 can't help. (`idc` is
+-- recursive so the inliner leaves it alone; inlined, there'd be no
+-- chain.) Without compression, reading each element walks the whole
+-- chain from `v`; a reader's own slot moves to the end, but the next
+-- element's slot still points at `v`. With compression, the first read
+-- retargets `v` and the rest take one hop.
+idc :: Int -> a -> a
+idc k x = if k > 0 then idc (k - 1) x else x
 
 chain :: Int -> a -> a
-chain n x = if n == 0 then x else idc (chain (n - 1) x)
+chain n x = if n == 0 then x else idc 0 (chain (n - 1) x)
 
-reads :: Maybe Int -> Int -> Int -> Int
-reads v acc k = if k == 0 then acc
-                else case v of Just x -> (reads v $! (acc + x)) (k - 1)
+copies :: Int -> a -> [a]
+copies n x = if n == 0 then [] else x : copies (n - 1) x
+
+total :: Int -> [Maybe Int] -> Int
+total acc []     = acc
+total acc (m:ms) = case m of Just x -> (total $! (acc + x)) ms
 
 main :: Int
-main = let v = chain 200 (Just 1) in reads v 0 20000
+main = let v = chain 200 (Just 1) in total 0 (copies 300000 v)

@@ -173,7 +173,7 @@ is built around the optimizations instead (#1, #3, #4, #5 and path
 compression, `backtracking_proofs.md`):
 
 ```
-tests/optbench.sh                      # every config, every program, 3 timed runs
+tests/optbench.sh                      # every config, every program, 3 timing rounds
 tests/optbench.sh --no-time            # counts and correctness only (faster)
 tests/optbench.sh --configs=naive,all  # just these configs
 tests/optbench.sh barrier young        # just these programs
@@ -188,6 +188,13 @@ tests/optbench.sh barrier young        # just these programs
   stamps the barrier lowered, scoped-retry hits, copies, forward hops and
   compressions (`OptStats`, runtime.h) and print them to stderr. They're
   exact, so they show effects too small to time.
+- **Timing**: after everything is built, in rounds that each time every
+  (program, config) once, in a rotated order, so load on the machine
+  doesn't land on one config. A short program is repeated until
+  `--min-time` (0.5 s) has passed. The report gives the minimum over
+  rounds and the spread (max/min); a speedup smaller than the spread is
+  noise. The old_rice programs run for about 30 ms, so their times are
+  mostly startup; their counts are what's useful.
 - **Correctness**: every config's output is compared against the
   program's golden, or naive's output without one. A mismatch fails the
   run, so this is also a differential test of the flag combinations.
@@ -195,7 +202,8 @@ tests/optbench.sh barrier young        # just these programs
   (its header says which, and what to expect), plus some nondeterministic
   old_rice benchmarks (`EXTRA` in the script).
 
-Results go to `tests/.optbench/` (`results.tsv`, and `report.md` with
+Results go to `tests/.optbench/` (`results.tsv`, `samples.tsv` with
+every timing measurement, and `report.md` with
 one table per metric, made by `optbench_report.py`).
 
 ## On the `external/` programs

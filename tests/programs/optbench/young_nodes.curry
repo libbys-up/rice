@@ -1,5 +1,5 @@
 -- optbench: #5 (epoch trailing).
--- After a choice, build and consume a 200,000-element list whose
+-- After a choice, build and consume a 400,000-element list whose
 -- elements depend on the choice. Those rewrites are nondeterministic, so
 -- #1 trails them, but every node is younger than the choice, so #5
 -- doesn't.
@@ -11,4 +11,4 @@ sumL acc []     = acc
 sumL acc (y:ys) = (sumL $! (acc + y)) ys
 
 main :: (Bool, Int)
-main = let b = True ? False in (b, sumL 0 (build b 200000))
+main = let b = True ? False in (b, sumL 0 (build b 400000))
