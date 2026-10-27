@@ -796,6 +796,11 @@ static RICE_CC void lu_k(union field _root, Frame* sp)
             {
                 scruts = child_at(scruts, 0);
             }
+            else if(tg == CHOICE_TAG)
+            {
+                // choose() makes it a nondet forward to one side, and pushes the choice point.
+                choose(scruts);
+            }
             else if(tg == FUNCTION_TAG)
             {
                 SLOT(2) = scruts;
@@ -833,6 +838,10 @@ static RICE_CC void lu_k(union field _root, Frame* sp)
             else if(tg == FORWARD_TAG)
             {
                 scrutt = child_at(scrutt, 0);
+            }
+            else if(tg == CHOICE_TAG)
+            {
+                choose(scrutt);
             }
             else if(tg == FUNCTION_TAG)
             {

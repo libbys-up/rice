@@ -93,6 +93,16 @@ once unconditionally, same as plain `HNF`, then keep looping only while
 still FUNCTION_TAG) -- caught by actually running the test suite, not by
 re-reading the code.
 
+**Status (2026-10-26)**: the explicit machine replaced `OPT_TAIL_JUMP`.
+Every transfer on the machine is a `musttail` jump, so neither option can
+grow the C stack any more, and the caveat below no longer applies. #2 is
+now `OPT_TAIL_DISPATCH` (default 1): generated code ends a tail call with
+`TAIL_CALL(f_hnf)` (runtime.h), a direct jump to the known callee. With
+it 0, `TAIL_CALL` jumps to `redispatch` (runtime.c) instead, which does
+what a trampoline's loop would with the root it got back: check the tag,
+then jump through `root->symbol->hnf`. It only exists to measure what #2
+saves; `tests/optbench.sh` has `+tail` and `-tail`.
+
 **Validity — sound, with a real caveat, not just semantic hand-waving**:
 producing the same graph either way, so results are identical. The caveat is
 about *resource* boundedness, not results. Option (b) calls `g_hnf`

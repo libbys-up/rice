@@ -58,6 +58,15 @@ tests/
     external/       hand-written programs covering language features not
                      well exercised elsewhere, informed by kics2's/pakcs's
                      own test suites (see "On the external/ programs" below)
+    kics2_bench/    KiCS2's benchmark suite (kics2/benchmarks/suite), with
+                     only the changes the modern frontend needs (each
+                     file's header says which); goldens checked against
+                     PAKCS or KiCS2
+    pakcs_examples/ nondeterministic PAKCS examples (pakcs/examples), each
+                     with a `main` added that runs one of its goals
+    optbench/       one program per backtracking optimization, for
+                     optbench.sh (own section below)
+    perf/           synthetic micro-benchmarks for bench.sh
   .run/             gitignored scratch space run.sh uses; safe to delete
   .bench/           gitignored scratch space bench.sh uses; safe to delete
 ```
@@ -177,11 +186,15 @@ tests/optbench.sh                      # every config, every program, 3 timing r
 tests/optbench.sh --no-time            # counts and correctness only (faster)
 tests/optbench.sh --configs=naive,all  # just these configs
 tests/optbench.sh barrier young        # just these programs
+tests/optbench.sh --sets=optbench,kics2  # just these program sets
 ```
 
-- **Configs**: `naive` (everything off), `+x` (one optimization added
-  to naive), `all`, and `-x` (one removed from all), plus `default`,
-  `+nondet+epoch` and `+epoch+barrier`. `+x` is what an optimization does
+- **Configs**: `naive` (everything off, #2 included), `+x` (one
+  optimization added to naive), `all`, and `-x` (one removed from all),
+  plus `default`, `+nondet+epoch` and `+epoch+barrier`. #2 is
+  `OPT_TAIL_DISPATCH` (`+tail`/`-tail`): off, every generated tail call
+  goes through `redispatch` (runtime.c), a tag check and a jump through
+  the root's symbol, instead of jumping straight to the known callee. `+x` is what an optimization does
   alone, `-x` what it still adds once the others are on.
 - **Counts**: each program is also built with `-DOPT_STATS=1`, which
   makes the runtime count trail entries, rewrites each filter skipped,
@@ -198,9 +211,13 @@ tests/optbench.sh barrier young        # just these programs
 - **Correctness**: every config's output is compared against the
   program's golden, or naive's output without one. A mismatch fails the
   run, so this is also a differential test of the flag combinations.
-- **Programs**: `programs/optbench/` has one program per optimization
-  (its header says which, and what to expect), plus some nondeterministic
-  old_rice benchmarks (`EXTRA` in the script).
+- **Programs**: every program with a golden in the selected sets:
+  `optbench` (`programs/optbench/`, one program per optimization; its
+  header says which, and what to expect), `old_rice`
+  (`old_rice/benchmarks/`), `kics2` (`kics2_bench/`) and `pakcs`
+  (`pakcs_examples/`). Each program is built in one source directory that
+  every config reuses, so rice's frontend runs once per program and a
+  config only recompiles the C.
 
 Results go to `tests/.optbench/` (`results.tsv`, `samples.tsv` with
 every timing measurement, and `report.md` with

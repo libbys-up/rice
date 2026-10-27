@@ -281,9 +281,10 @@ returnStmt :: [CStmt]
 returnStmt = [text "RETURN()" <> semi]
 
 --- A tail call: reduce `root` with `code` (an expression of type `Code`),
---- which returns to wherever this code would have.
+--- which returns to wherever this code would have. `TAIL_CALL` (runtime.h)
+--- jumps to `code` directly, or through `redispatch` with #2 off.
 jumpTo :: CExpr -> [CStmt]
-jumpTo code = [ text "MUSTTAIL return" <+> code <> text "(root, sp)" <> semi ]
+jumpTo code = [ call "TAIL_CALL" [code] <> semi ]
 
 --- The trail point for a write to `root` that no constructor-case branch
 --- covers (`Nothing`: a function body, or literal-case branch, with no

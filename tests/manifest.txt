@@ -95,3 +95,35 @@ perf/tailsum.curry  SLOW  10,000,000-deep genuinely tail-recursive accumulator -
 
 # --- gc/: memory-bounded tests (`-- rice-maxrss: N`, src/gc-plan.md stage 3) ---
 gc/nondet_pending.curry  XFAIL  peak memory over its limit: under a pending choice every rewrite of the loop's root is trailed, and the trail keeps each snapshot (and what it points to) alive; dropping all but the oldest snapshot per node between backtracking stop points needs the collector to know the trail heights held in frames
+
+# --- kics2_bench/: KiCS2's benchmark suite (kics2/benchmarks/suite), each
+# file's header says what (if anything) was changed for the modern
+# frontend. Goldens were checked against PAKCS or KiCS2 (SearchSMM's one
+# answer by hand: 9567 + 1085 = 10652). Suite programs importing
+# SearchTree, CLPR, CLPFD or List, and LogBindTest (no `main`), weren't
+# copied. Several below need lazy unification: rice's (=:=) normalizes
+# both sides before unifying, so a candidate built from free variables
+# (`xs ++ [x]`) never fails early, and the all-solutions search runs
+# forever after printing its answers (PAKCS's and KiCS2's unify as they
+# go, so theirs ends).
+kics2_bench/BFSvsPar.curry        SKIP   an infinite search space by design: KiCS2 benchmarks it with breadth-first or parallel search, and rice's depth-first search never returns
+kics2_bench/NDNums.curry          SKIP   an infinite search space by design (all naturals): KiCS2 benchmarks it with a complete search strategy, which rice doesn't have
+kics2_bench/Last.curry            XFAIL  times out: `xs ++ [x] =:= l` with rice's normalize-first (=:=) (see above); it prints its answer, then searches longer xs forever
+kics2_bench/RegExp.curry          XFAIL  times out: grep's `xs ++ sem r ++ ys =:= s` with rice's normalize-first (=:=) (see above)
+kics2_bench/SearchQueens.curry    XFAIL  times out: permute's `u++v =:= permute xs` with rice's normalize-first (=:=) (see above)
+kics2_bench/SearchEmbed.curry     XFAIL  times out: `t =:= x++(c:ts)` with rice's normalize-first (=:=) (see above); KiCS2's own harness leaves this one out too
+kics2_bench/SearchHorseman.curry  XFAIL  times out: `int2nat heads =:= m `plus` h` over free Peano naturals with rice's normalize-first (=:=) (see above)
+kics2_bench/SearchGraph.curry     XFAIL  runtime error: "can't narrow a free variable to Int: it has a raw (unboxed) field" (inv's `a =:= g b` with b a free Int)
+kics2_bench/SatSolver.curry       XFAIL  C compile error: a generated node has 51 children, and runtime.h's child_at_k accessors stop at 49
+kics2_bench/PrimesBuiltin.curry   SLOW   about 3.5 s
+kics2_bench/Queens.curry          SLOW   about 4 s
+kics2_bench/QueensUser.curry      SLOW   about 4.5 s
+kics2_bench/SearchSMM.curry       SLOW   about 10 s
+
+# --- pakcs_examples/: nondeterministic examples from PAKCS
+# (pakcs/examples), each with a `main` added that runs one of the goals
+# pakcs's own examples/test.sh evaluates. Goldens checked against PAKCS.
+# They run in milliseconds, so in tests/optbench.sh only their counts mean
+# anything.
+pakcs_examples/First.curry        XFAIL  times out: `first x (from y) =:= [O]` over free Peano naturals with rice's normalize-first (=:=) (see kics2_bench above)
+pakcs_examples/horseman.curry     XFAIL  times out: `heads =:= add m h` over free Peano naturals with rice's normalize-first (=:=) (see kics2_bench above)

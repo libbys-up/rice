@@ -160,10 +160,17 @@ static inline void HNF(union field root)
  * Every subset of these is proved to give the baseline's answers on a model
  * of the machine (backtracking_proofs.md), given the barrier when #1 and #5 are both on.
  * #4, #5 and path compression are off by default until we've measured them.
- * There's no flag for #2 (eager tail dispatch): every tail call on the machine is a musttail jump.
+ *  * OPT_TAIL_DISPATCH (#2): a tail call jumps straight to the callee's code.
+ *    Off, it goes through redispatch (runtime.c) instead, the way a
+ *    trampoline would: check root's tag, then jump through root's symbol.
+ *    Both are musttail jumps, so the C stack is the same either way;
+ *    off only exists to measure what #2 saves.
  */
 #ifndef OPT_NONDET_TRAIL
 #define OPT_NONDET_TRAIL 1
+#endif
+#ifndef OPT_TAIL_DISPATCH
+#define OPT_TAIL_DISPATCH 1
 #endif
 #ifndef OPT_SCOPED_BACKTRACK
 #define OPT_SCOPED_BACKTRACK 1
@@ -226,6 +233,7 @@ typedef struct
     unsigned long compressions;         // forwards retargeted (path compression)
     unsigned long compress_hops_skipped;// hops those retargetings skipped
     unsigned long max_trail;            // the trail's high water mark
+    unsigned long tail_calls;           // generated tail calls (TAIL_CALL)
 } OptStats;
 extern OptStats opt_stats;
 #define STAT(name) (opt_stats.name++)
@@ -646,6 +654,15 @@ RICE_CC void CTR_hnf(union field root, Frame* sp);
 RICE_CC void choice_hnf(union field root, Frame* sp);
 RICE_CC void apply_hnf(union field root, Frame* sp);
 RICE_CC void forward_hnf(union field root, Frame* sp);
+RICE_CC void redispatch(union field root, Frame* sp);
+
+// A generated tail call to `code`, which reduces root: f_hnf after set_f,
+// choice_hnf after set_choice, apply_hnf after set_apply.
+#if OPT_TAIL_DISPATCH
+#define TAIL_CALL(code) STAT(tail_calls); MUSTTAIL return code(root, sp)
+#else
+#define TAIL_CALL(code) STAT(tail_calls); MUSTTAIL return redispatch(root, sp)
+#endif
 
 // Narrowing: turn free variable n into the constructor of `like`,
 // with a fresh free variable for each pointer child.

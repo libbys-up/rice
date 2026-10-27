@@ -45,6 +45,7 @@ void print_opt_stats(void)
     PRINT_STAT(compressions);
     PRINT_STAT(compress_hops_skipped);
     PRINT_STAT(max_trail);
+    PRINT_STAT(tail_calls);
     fprintf(stderr, "stat allocations %lu\n", mem);
 #undef PRINT_STAT
 #endif
@@ -1220,4 +1221,22 @@ RICE_CC void forward_hnf(union field root, Frame* sp)
     GC_SAFE_POINT(root, sp);
     (void)root;
     RETURN();
+}
+
+// A tail call with #2 off (OPT_TAIL_DISPATCH=0, TAIL_CALL in runtime.h).
+// Instead of jumping to the callee's code, which the caller knows,
+// we do what a trampoline's loop would do with the root it got back:
+// check the tag, and if root still needs reducing, jump through its symbol.
+// Root is always a FUNCTION or a CHOICE here, so the default case is only
+// the check itself.
+RICE_CC void redispatch(union field root, Frame* sp)
+{
+    switch(TAG(root))
+    {
+        case FUNCTION_TAG:
+        case CHOICE_TAG:
+            MUSTTAIL return root.n->symbol->hnf(root, sp);
+        default:
+            RETURN();
+    }
 }

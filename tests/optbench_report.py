@@ -23,6 +23,7 @@ METRICS = [
     ("forward_hops", "Forward nodes followed by readers", ""),
     ("compressions", "Forwards retargeted by path compression", ""),
     ("compress_hops_skipped", "Hops path compression skipped", ""),
+    ("tail_calls", "Generated tail calls (#2 makes each a direct jump)", ""),
     ("allocations", "Allocations", ""),
 ]
 
@@ -42,19 +43,32 @@ def main(path):
     programs, configs = list(programs), list(configs)
 
     print("# Backtracking optimization bench\n")
-    print("Configs: `naive` has everything off; `+x` adds one optimization to it;")
+    print("Configs: `naive` has everything off (#2 included); `+x` adds one optimization to it;")
     print("`all` has everything on; `-x` removes one from it. The barrier is on")
     print("whenever #1 and #5 both are.\n")
 
-    bad = [(p, c, data[(p, c, "status")]) for p in programs for c in configs
-           if data.get((p, c, "status"), "ok") != "ok"]
-    if bad:
-        print("## Problems\n")
-        for p, c, st in bad:
-            print(f"- `{p}` under `{c}`: {st}")
+    def status(p, c):
+        return data.get((p, c, "status"), "ok")
+    wrong = [(p, c) for p in programs for c in configs if status(p, c) == "MISMATCH"]
+    other = [(p, c, status(p, c)) for p in programs for c in configs
+             if status(p, c) not in ("ok", "MISMATCH")]
+    if wrong:
+        print("## Wrong output\n")
+        for p, c in wrong:
+            print(f"- `{p}` under `{c}`")
         print()
     else:
-        print("Every config's output matched the golden (or naive's output).\n")
+        print("Every run that finished matched its golden.\n")
+    if other:
+        # Usually a config with neither #1 nor #5 trailing every rewrite of a
+        # big deterministic program until it runs out of memory or time.
+        print("## Didn't finish\n")
+        by = OrderedDict()
+        for p, c, st in other:
+            by.setdefault((p, st), []).append(c)
+        for (p, st), cs in by.items():
+            print(f"- `{p}`: {st} under " + ", ".join(f"`{c}`" for c in cs))
+        print()
 
     def table(key, fmt):
         rows = [p for p in programs if any((p, c, key) in data for c in configs)]
@@ -76,15 +90,19 @@ def main(path):
             print(f"({note})\n")
         table(key, lambda p, c, v: v)
         if key == "seconds":
-            print("### Speedup over naive\n")
+            for base_conf in ("naive", "default"):
+                print(f"### Speedup over {base_conf}\n")
+                if base_conf == "default":
+                    print("(what each config gains or loses against what rice ships;"
+                          " it also covers programs naive can't finish)\n")
 
-            def speed(p, c, v):
-                base = data.get((p, "naive", "seconds"), "NA")
-                try:
-                    return f"{float(base) / float(v):.2f}x"
-                except (ValueError, ZeroDivisionError):
-                    return ""
-            table("seconds", speed)
+                def speed(p, c, v, base_conf=base_conf):
+                    base = data.get((p, base_conf, "seconds"), "NA")
+                    try:
+                        return f"{float(base) / float(v):.2f}x"
+                    except (ValueError, ZeroDivisionError):
+                        return ""
+                table("seconds", speed)
 
 
 if __name__ == "__main__":
