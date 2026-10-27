@@ -18,4 +18,4 @@ total acc []     = acc
 total acc (m:ms) = case m of Just x -> (total $! (acc + x)) ms
 
 main :: Int
-main = let v = chain 200 (Just 1) in total 0 (copies 300000 v)
+main = let v = chain 200 (Just 1) in total 0 (copies 1200000 v)

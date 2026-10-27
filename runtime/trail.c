@@ -79,12 +79,3 @@ TrailEntry* trail_pop_to(Trail* s, int n)
     return &s->array[s->size];
 }
 
-bool trail_empty(Trail* s)
-{
-    return s->size == 0;
-}
-
-int trail_size(Trail* s)
-{
-    return s->size;
-}

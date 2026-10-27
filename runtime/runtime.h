@@ -329,15 +329,26 @@ static inline bool settle_step(union field* x, bool* nondet)
 /* Scoped backtracking (#3).
  * When a case in a generated function fails, we first try to undo choices
  * that were made since that case started, before failing root.
- *  * SCOPED_SAVE_CUTOFF(slot) records the trail's height when the case starts,
- *    in a frame slot, because a case block runs as its own C function.
- *    SCOPED_LOAD_CUTOFF(slot) reads it back.
+ *  * The cutoff is the trail's height when the case started, kept in a frame
+ *    slot because a case block runs as its own C function.
+ *    SCOPED_LOAD_CUTOFF(slot) names that slot; nothing is read until a retry.
  *    The cutoff is per case, not per function: the retry only redoes this case's dispatch,
  *    so it can't flip a choice that an enclosing case's dispatch read
  *    (backtracking_proofs.md, #3 rule 2; ScopedStaleDispatch.curry).
- *  * SCOPED_RETRY(scrutinee, orig) is used where a case's scrutinee is FAIL
+ *  * The cutoff is recorded lazily. SCOPED_MARK_CUTOFF goes first in the
+ *    FUNCTION, CHOICE and FREE branches, the only ones that can push a choice.
+ *    Until one runs, the trail can grow only by path compression's retargets
+ *    in the FORWARD branch, which don't change what any node means, so the
+ *    height then is as good a cutoff as the height at entry.
+ *    The slot holds height + 1, or 0 (frame_push's zero) while unmarked.
+ *    A case that never marked pushed no choice, so its retry has nothing to flip
+ *    and is skipped; saving the cutoff on every case entry made #3 cost about
+ *    20% on deterministic programs (TakPeano).
+ *    (Proof pending: ~/curry/papers/unif/proofs/lazy_cutoff.md.)
+ *  * SCOPED_RETRY(scrutinee) is used where a case's scrutinee is FAIL
  *    or a constructor the case doesn't handle.
- *    If undo() finds a choice to flip, we reset the scrutinee and `continue`
+ *    If undo() finds a choice to flip, we reset the scrutinee to the case's
+ *    original one (frame slot 1, which the loop never writes) and `continue`
  *    the case loop, which re-reads whatever undo() restored.
  *    Otherwise we fall through to the usual fail(root).
  *
@@ -350,16 +361,17 @@ static inline bool settle_step(union field* x, bool* nondet)
  * or in a literal case (its scrutinee is a raw value, which undo() can't restore).
  */
 #if OPT_SCOPED_BACKTRACK
-#define SCOPED_SAVE_CUTOFF(slot) ((slot).i = trail_size(trail))
-#define SCOPED_LOAD_CUTOFF(slot) int _cutoff = (int)(slot).i
-#define SCOPED_RETRY(scrutinee_var, orig_var)   \
-    STAT(scoped_retries);                       \
-    if(undo(_cutoff))                           \
-    {                                           \
-        STAT(scoped_hits);                      \
-        scrutinee_var = orig_var;               \
-        continue;                               \
-    }                                           \
+#define SCOPED_LOAD_CUTOFF(n) enum { _cutslot = (n) }
+#define SCOPED_MARK_CUTOFF() \
+    (SLOT(_cutslot).i ? (void)0 : (void)(SLOT(_cutslot).i = trail_size(trail) + 1))
+#define SCOPED_RETRY(scrutinee_var)                                  \
+    STAT(scoped_retries);                                            \
+    if(SLOT(_cutslot).i != 0 && undo((int)SLOT(_cutslot).i - 1))     \
+    {                                                                \
+        STAT(scoped_hits);                                           \
+        scrutinee_var = SLOT(1);                                     \
+        continue;                                                    \
+    }                                                                \
     else ((void)0)
 
 /* SCOPED_RESAVE goes right after a SCOPED_RETRY that didn't find anything,
@@ -367,6 +379,8 @@ static inline bool settle_step(union field* x, bool* nondet)
  * For an unhandled constructor, the branch has already trailed root.
  * But the failed retry's undo() popped that entry (it was the newest one in scope),
  * so we have to trail root again, or nothing could ever restore it.
+ * With no cutoff marked the retry popped nothing, but we still trail:
+ * the branch's entry was gated on nondet, and rule 1 below needs more.
  *
  * SCOPED_FAIL_TRAIL is the trail for the FAIL case's fail(root),
  * which runs after its SCOPED_RETRY.
@@ -379,9 +393,9 @@ static inline bool settle_step(union field* x, bool* nondet)
 #define SCOPED_RESAVE(root_node) save_copy(root_node)
 #define SCOPED_FAIL_TRAIL(nondet_var, root_node) save_copy(root_node)
 #else
-#define SCOPED_SAVE_CUTOFF(slot) ((void)0)
 #define SCOPED_LOAD_CUTOFF(slot) ((void)0)
-#define SCOPED_RETRY(scrutinee_var, orig_var) ((void)0)
+#define SCOPED_MARK_CUTOFF() ((void)0)
+#define SCOPED_RETRY(scrutinee_var) ((void)0)
 #define SCOPED_RESAVE(root_node) ((void)0)
 #define SCOPED_FAIL_TRAIL(nondet_var, root_node) trail_node(root_node, nondet_var)
 #endif

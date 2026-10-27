@@ -373,17 +373,9 @@ fieldDecl v = text "field" <+> var v <+> equals <+> text "{0}" <> semi
 --- `scrutinee` is a name `Rice.Codegen.C.ToC.showConsCase` alone owns for
 --- its own internal case-walking copy -- prefixed so it can never collide
 --- with a real `"v" ++ show n` variable name (see `varName`'s note above).
---- `origScrutinee` is `showConsCase`'s own frozen snapshot of the
---- scrutinee's value *before* the dispatch loop below it ever runs --
---- distinct from `scrutinee` (which the loop reassigns as it chases
---- FUNCTION_TAG/CHOICE_TAG/FORWARD_TAG) and from `var v` (which
---- `showConsBranch`'s `writeBack` reassigns to the branch's own resolved
---- value, so by the time a branch body's SCOPED_RETRY would want "the
---- original", `var v` no longer holds it -- see `showConsCase`'s note).
-root, scrutinee, origScrutinee :: CExpr
-root          = text "root"
-scrutinee     = text "_scrutinee"
-origScrutinee = text "_orig"
+root, scrutinee :: CExpr
+root      = text "root"
+scrutinee = text "_scrutinee"
 
 symbol :: CExpr -> CExpr
 symbol v = v <> text ".n->symbol"

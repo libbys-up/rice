@@ -66,6 +66,8 @@ tests/
                      with a `main` added that runs one of its goals
     optbench/       one program per backtracking optimization, for
                      optbench.sh (own section below)
+    scaled/         bigger copies of old_rice, KiCS2 and PAKCS programs
+                     too quick to time, which optbench.sh runs instead
     perf/           synthetic micro-benchmarks for bench.sh
   .run/             gitignored scratch space run.sh uses; safe to delete
   .bench/           gitignored scratch space bench.sh uses; safe to delete
@@ -206,8 +208,9 @@ tests/optbench.sh --sets=optbench,kics2  # just these program sets
   doesn't land on one config. A short program is repeated until
   `--min-time` (0.5 s) has passed. The report gives the minimum over
   rounds and the spread (max/min); a speedup smaller than the spread is
-  noise. The old_rice programs run for about 30 ms, so their times are
-  mostly startup; their counts are what's useful.
+  noise. A program that still runs in a few milliseconds (PAKCS's
+  family and colormap examples, which are fixed databases) is mostly
+  startup; only its counts are useful.
 - **Correctness**: every config's output is compared against the
   program's golden, or naive's output without one. A mismatch fails the
   run, so this is also a differential test of the flag combinations.
@@ -215,7 +218,10 @@ tests/optbench.sh --sets=optbench,kics2  # just these program sets
   `optbench` (`programs/optbench/`, one program per optimization; its
   header says which, and what to expect), `old_rice`
   (`old_rice/benchmarks/`), `kics2` (`kics2_bench/`) and `pakcs`
-  (`pakcs_examples/`). Each program is built in one source directory that
+  (`pakcs_examples/`). A program that runs too quickly to time (well
+  under 0.1 s) is replaced by its copy in `scaled/<set>/`, if it has
+  one: the same program on a bigger input, printing only a few answers
+  so the golden stays small. Each program is built in one source directory that
   every config reuses, so rice's frontend runs once per program and a
   config only recompiles the C.
 

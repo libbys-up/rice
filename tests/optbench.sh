@@ -44,7 +44,8 @@
 # Programs: every program with a .expected golden in the selected sets
 # (SETS below). optbench/ has one program per optimization (its header
 # comment says which and why); the others are the benchmark suites of
-# old_rice, KiCS2 and PAKCS's examples.
+# old_rice, KiCS2 and PAKCS's examples. A program that runs too quickly
+# to time is replaced by its bigger copy in programs/scaled/<set>/.
 #
 # Results: DIR/results.tsv (one row per program, config, metric),
 # DIR/samples.tsv (every timing measurement) and DIR/report.md (the
@@ -94,6 +95,8 @@ for arg in "$@"; do
     *)           FILTERS+=("$arg") ;;
   esac
 done
+# Absolute, since programs run from their own directory.
+mkdir -p "$OUT" && OUT="$(cd "$OUT" && pwd)"
 
 # --- configs. Flags: NT = OPT_NONDET_TRAIL (#1), SB = OPT_SCOPED_BACKTRACK
 # (#3), CC = OPT_COPY_COLLAPSE (#4), ET = OPT_EPOCH_TRAIL (#5), PC =
@@ -139,6 +142,9 @@ for entry in "${SETS[@]}"; do
     continue
   fi
   for f in "$PROGRAMS/$sdir"/*.curry; do
+    # A program too quick to time has a bigger copy in scaled/<set>/.
+    big="$PROGRAMS/scaled/$sname/$(basename "$f")"
+    [ -f "$big" ] && f="$big"
     [ -f "${f%.curry}.expected" ] && PROGRAM_LIST+=("$f")
   done
 done

@@ -241,13 +241,14 @@ showAsgn (IVarAssign  v e)     = var v .= showExpr e
 --- session that added this) the main real-world way a program actually
 --- fails. With an enclosing case's own scrutinee variable in scope
 --- (`Just v`, from `showConsBranch`), try SCOPED_RETRY first: if
---- `undo(_cutoff)` finds and flips a choice point made since that case
---- began, resetting `_scrutinee` back to `v` and looping lets the SAME
---- case-dispatch loop (already present, already handling FORWARD_TAG the
---- same way) redispatch whatever undo restored, without ever touching
---- `root` at all. With no enclosing case (`Nothing` -- a function that's
---- unconditionally undefined), there's no local scrutinee to retry
---- against, so this falls straight through to the unmodified `fail`.
+--- `undo` finds and flips a choice point made since that case began
+--- (its cutoff), resetting `_scrutinee` to the case's original
+--- scrutinee (frame slot 1) and looping lets the SAME case-dispatch loop
+--- (already present, already handling FORWARD_TAG the same way)
+--- redispatch whatever undo restored, without ever touching `root` at all.
+--- With no enclosing case (`Nothing` -- a function that's unconditionally
+--- undefined), there's no local scrutinee to retry against, so this falls
+--- straight through to the unmodified `fail`.
 --- A failed retry pops the `trail_node(root, nondet)` frame that
 --- `showConsBranch` already pushed for this branch, so SCOPED_RESAVE
 --- re-saves `root` before `fail` (see runtime.h) -- otherwise `fail(root)`
@@ -257,7 +258,7 @@ showStmt :: Gen -> IStatement -> G [CStmt]
 showStmt gen st = case st of
   IExempt ->
     return $
-      maybe [] (const [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
+      maybe [] (const [ scall "SCOPED_RETRY" [scrutinee]
                       , scall "SCOPED_RESAVE" [root] ]) ctx ++
       uncaseTrail ctx ++
       scall "fail" [root] : debugLeave (gLabel gen) ++ leave gen returnStmt
@@ -341,7 +342,9 @@ writeBack v
 ---   2           the dispatch loop's current scrutinee (`_scrutinee`)
 ---   3 ..        every other variable the branches use (`caseFreeVars`)
 ---   nondet      the loop's `nondet` flag (raw)
----   cutoff      the trail's height when the case began (raw, #3)
+---   cutoff      the trail's height + 1 once the case may push a choice,
+---               0 before (raw, #3; frame_push zeroes it, see
+---               SCOPED_MARK_CUTOFF in runtime.h)
 --- with reps from `gReps`, so the GC can trace it.
 ---
 --- The loop's `nondet` starts at `root`'s own flag, not false
@@ -378,7 +381,6 @@ enterCase gen v bs = do
     , slot 2 .= var v ] ++
     [ slot (3 + i) .= var x | (i, x) <- zip [0 ..] frees ] ++
     [ rawSlot ndS .= nondet root
-    , scall "SCOPED_SAVE_CUTOFF" [slot cutS]
     , text "MUSTTAIL return" <+> text fname <> text "(root, sp)" <> semi ]
 
 --- The prototype, reps array and `FrameInfo` of case block `k`.
@@ -411,12 +413,11 @@ caseBody gen v frees ndS cutS bs = do
   return $
     [ text "field" <+> root <+> equals <+> slot 0 <> semi ] ++
     [ text "field" <+> var v <+> equals <+> slot 1 <> semi | v /= 0 ] ++
-    [ text "field" <+> scrutinee <+> equals <+> slot 2 <> semi
-    , text "field" <+> origScrutinee <+> equals <+> slot 1 <> semi ] ++
+    [ text "field" <+> scrutinee <+> equals <+> slot 2 <> semi ] ++
     [ text "field" <+> var x <+> equals <+> slot (3 + i) <> semi
     | (i, x) <- zip [0 ..] frees ] ++
     [ text "bool" <+> nondetVar <+> equals <+> rawSlot ndS <> semi
-    , scall "SCOPED_LOAD_CUTOFF" [slot cutS]
+    , scall "SCOPED_LOAD_CUTOFF" [int cutS]
     , cwhile ctrue
         [ nondetVar .|= nondet scrutinee
         , cswitch (symtag scrutinee)
@@ -487,7 +488,7 @@ declBlock (IBlock decls asgns st) =
 --- popped entries the write depends on.
 failBlock :: Gen -> CStmt
 failBlock gen = ccase (text "FAIL_TAG")
-  ( [ scall "SCOPED_RETRY" [scrutinee, origScrutinee]
+  ( [ scall "SCOPED_RETRY" [scrutinee]
     , scall "SCOPED_FAIL_TRAIL" [nondetVar, root]
     , scall "fail" [root]
     ] ++ debugLeave (gLabel gen) ++ leave gen returnStmt
@@ -499,12 +500,14 @@ failBlock gen = ccase (text "FAIL_TAG")
 --- re-dispatches.
 funBlock :: Int -> CStmt
 funBlock ndS = ccase (text "FUNCTION_TAG")
-  [ slot 2 .= scrutinee
+  [ scall "SCOPED_MARK_CUTOFF" []
+  , slot 2 .= scrutinee
   , rawSlot ndS .= nondetVar
   , text "MUSTTAIL return" <+> scrutinee <> text ".n->symbol->hnf(" <> scrutinee <> text ", sp)" <> semi ]
 
 choiceBlock :: CStmt
-choiceBlock = ccase (text "CHOICE_TAG") [scall "choose" [scrutinee], cbreak]
+choiceBlock = ccase (text "CHOICE_TAG")
+  [scall "SCOPED_MARK_CUTOFF" [], scall "choose" [scrutinee], cbreak]
 
 --- `follow_forward` (runtime.h) is one hop, or path compression under
 --- OPT_PATH_COMPRESS.
@@ -521,7 +524,8 @@ freeCaseBlock _ []                                  =
     [scall "error" [dquotes (text "empty case has no constructors to narrow to"), root]]
 freeCaseBlock v (IConsBranch first _ _ : restBs) =
   ccase (text "FREE_TAG") $
-    [ scall "push_frame" [scrutinee, call "free_var" []] ] ++
+    [ scall "SCOPED_MARK_CUTOFF" []
+    , scall "push_frame" [scrutinee, call "free_var" []] ] ++
     map pushChoice (reverse rest) ++
     [ scall ("set_" ++ mangle first ++ "_free") [scrutinee]
     , writeBack v

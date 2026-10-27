@@ -59,8 +59,15 @@ TrailEntry* trail_pop(Trail* s);
  */
 TrailEntry* trail_pop_to(Trail* s, int n);
 
-bool trail_empty(Trail* s);
+// Inline: case blocks read the size to mark their cutoff under OPT_SCOPED_BACKTRACK.
+static inline bool trail_empty(Trail* s)
+{
+    return s->size == 0;
+}
 
-int trail_size(Trail* s);
+static inline int trail_size(Trail* s)
+{
+    return s->size;
+}
 
 #endif // TRAIL_H

@@ -123,7 +123,16 @@ kics2_bench/SearchSMM.curry       SLOW   about 10 s
 # --- pakcs_examples/: nondeterministic examples from PAKCS
 # (pakcs/examples), each with a `main` added that runs one of the goals
 # pakcs's own examples/test.sh evaluates. Goldens checked against PAKCS.
-# They run in milliseconds, so in tests/optbench.sh only their counts mean
-# anything.
+# They run in milliseconds; tests/optbench.sh times the bigger copies in
+# scaled/pakcs/ instead.
 pakcs_examples/First.curry        XFAIL  times out: `first x (from y) =:= [O]` over free Peano naturals with rice's normalize-first (=:=) (see kics2_bench above)
 pakcs_examples/horseman.curry     XFAIL  times out: `heads =:= add m h` over free Peano naturals with rice's normalize-first (=:=) (see kics2_bench above)
+
+# --- scaled/: bigger copies of the programs above that run too quickly
+# to time, for tests/optbench.sh, which uses scaled/<set>/<name>.curry in
+# place of the original. Each header says what was scaled. Goldens checked
+# against KiCS2.
+scaled/old_rice/schedule.curry    SLOW   about 2 s
+scaled/pakcs/nondetfunc.curry     SLOW   about 1 s
+scaled/pakcs/mergesort_or.curry   SLOW   about 1 s
+scaled/old_rice/perm.curry        SLOW   about 1 s

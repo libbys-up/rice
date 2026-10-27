@@ -1,5 +1,5 @@
 -- optbench: path compression.
--- `v` heads a 200-long chain of forwards, and a 300,000-element list has
+-- `v` heads a 200-long chain of forwards, and a 1,200,000-element list has
 -- `v` in every slot. Each `idc 0 x` collapses to `x` while `x` is still
 -- a thunk, so it's a forward, not a copy, and #4 can't help. (`idc` is
 -- recursive so the inliner leaves it alone; inlined, there'd be no
@@ -21,4 +21,4 @@ total acc []     = acc
 total acc (m:ms) = case m of Just x -> (total $! (acc + x)) ms
 
 main :: Int
-main = let v = chain 200 (Just 1) in total 0 (copies 300000 v)
+main = let v = chain 200 (Just 1) in total 0 (copies 1200000 v)

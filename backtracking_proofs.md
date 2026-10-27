@@ -142,6 +142,12 @@ differential tests, the gate should follow the flag.
 
 3. The scoped retry inside `=:<=` (`lu_k`) is not modeled.
 
+4. **The cutoff is recorded lazily (not yet proved).** A case marks its
+   cutoff on first reaching FUNCTION, CHOICE or FREE, and skips the retry
+   if it never marked. The fail write is still always trailed.
+   `~/curry/papers/unif/proofs/lazy_cutoff.md` has the argument and the
+   proof plan; revert to the eager save if it doesn't go through.
+
 ## #4: Copy instead of forward
 
 1. **Copy only a constructor that cannot be undone.** That means not a
