@@ -112,21 +112,26 @@ riceVersionNumber = case map read (splitOn '.' packageVersion) of
     (w, [])       -> [w]
     (w, _ : rest) -> w : splitOn c rest
 
---- The front end executable: `$RICE_FRONTEND` if it's set, otherwise the
---- front end of the Curry system rice was built with, otherwise the first
---- of `curry-frontend`, `kics2-frontend` and `pakcs-frontend` on `$PATH`.
+--- The front end executable: `$RICE_FRONTEND` if it's set; otherwise
+--- `bin/curry-frontend` under `riceHome`, which `make frontend` builds from
+--- the pinned `frontend/` submodule; otherwise the front end of the Curry
+--- system rice was built with; otherwise the first of `curry-frontend`,
+--- `kics2-frontend` and `pakcs-frontend` on `$PATH`.
 frontend :: IO FilePath
 frontend = do
   env <- getEnv "RICE_FRONTEND"
   if not (null env) then return env else do
+    home     <- riceHome
     pathDirs <- fmap splitSearchPath (getEnv "PATH")
-    let builtWith  = installDir </> "bin" </> (curryCompiler ++ "-frontend")
-        candidates = builtWith : [ d </> f | f <- [ "curry-frontend"
+    let ours       = home </> "bin" </> "curry-frontend"
+        builtWith  = installDir </> "bin" </> (curryCompiler ++ "-frontend")
+        candidates = ours : builtWith : [ d </> f | f <- [ "curry-frontend"
                                                   , "kics2-frontend"
                                                   , "pakcs-frontend" ]
                                            , d <- pathDirs ]
     found <- filterM doesFileExist candidates
     case found of
       (fe : _) -> return fe
-      []       -> error ("No Curry front end found. Set RICE_FRONTEND to "
-                         ++ "a curry-frontend executable.")
+      []       -> error ("No Curry front end found. Run `make frontend` in "
+                         ++ home ++ ", or set RICE_FRONTEND to a "
+                         ++ "curry-frontend executable.")

@@ -164,6 +164,27 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
+## Distribution (2026-10-29)
+
+Done:
+- Rice's own `lib/` (KiCS2 3.5.0's, `__KICS2__` renamed `__RICE__`;
+  `tools/sync-lib.sh`), and `Rice.Frontend` runs the front end itself.
+- `RICEHOME` defaults to the package directory; output is quiet without
+  `-v`; failures exit 1; objects are per flag set (`obj-<hash>/`).
+- `frontend/` is a submodule pinned at curry-frontend v3.1.0 (not on
+  Hackage past 2.0.0). The top-level `Makefile` builds it into `bin/` with
+  Stack (or cabal), runs `cypm install`, and precompiles Prelude. CPM has
+  no install hooks, so a bare `cypm install` can't build the front end;
+  rice then falls back to the build system's front end. Its Prelude
+  `.tfcy` is byte-identical to KiCS2's. Suite: 120 pass, 0 fail.
+
+To do:
+- `LICENSE` still says `<AUTHOR NAME>`.
+- A Linux run, and CI.
+- `rice --help`: separate the developer options.
+- Untested: rice built with PAKCS.
+- Bootstrapping: rice still needs a Curry system to build itself.
+
 ## Settled 2026-10-28: collector loose ends
 
 - **Stage 4 cleanup.** The Boehm path was already gone (`eddacd5`).

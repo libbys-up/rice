@@ -117,14 +117,21 @@ We write three kinds of documentation, and each has its own home
 \subsection{Building Rice}
 
 You need KiCS2 (Rice is a KiCS2 program), the Curry package manager
-\code{cypm}, and clang (or gcc, with \code{--gcc}).  Build and install the
-\code{rice} executable from the project root with
+\code{cypm}, Haskell Stack (or cabal) for the front end, and clang (or gcc,
+with \code{--gcc}).  From the project root,
+\begin{lstlisting}[language=bash]
+git submodule update --init
+make CYPM=~/opt/kics2/bin/cypm
+\end{lstlisting}
+builds the front end into \file{bin/} (\code{make frontend}, about 12 minutes
+the first time), installs \code{rice} into \file{~/.cpm/bin}
+(\code{make rice}), and compiles Prelude (\code{make prelude}).  While working
+on the compiler, rebuild just \code{rice} with
 \begin{lstlisting}[language=bash]
 PATH=~/opt/kics2/bin:$PATH cypm install
 \end{lstlisting}
 Put KiCS2 first on your \code{PATH}: \code{cypm} builds with whichever Curry
-system it finds, and a \code{rice} built with PAKCS doesn't work.  The
-executable goes in \file{~/.cpm/bin}.
+system it finds, and Rice is only tested built with KiCS2.
 
 At run time Rice finds its standard library (\file{lib/}), its runtime
 (\file{runtime/}) and its Prelude replacements (\file{replace/}) in the
@@ -201,6 +208,8 @@ These are C preprocessor flags, set with \code{--cflags}:
 \file{tests/} & the regression and benchmark test bench (\S\ref{sec:testing}) \\
 \file{test/} & a C smoke test for the runtime, and small examples \\
 \file{tools/} & \file{sync-lib.sh}, which refreshes \file{lib/} from KiCS2 \\
+\file{frontend/} & the Curry front end, a git submodule (\S\ref{sec:frontend}) \\
+\file{bin/} & \code{make frontend}'s output; never commit it \\
 \file{debug_repros/} & small programs that reproduced past runtime bugs \\
 \file{src/*.md}, \file{src/*.tex} & this manual, the history files, and
   plan documents (\S\ref{sec:docs}) \\
@@ -379,10 +388,15 @@ the load path: the current directory, then \code{CURRYPATH}, then
 \file{lib/}.  The front end writes each module's \file{.tfcy} into
 \file{.curry/rice-1.0.0/} beside its source, with Rice's own cache files.
 The front end executable is \code{RICE_FRONTEND} if that's set, otherwise
-the one of the Curry system Rice was built with, otherwise the first of
-\code{curry-frontend}, \code{kics2-frontend} and \code{pakcs-frontend} on
-\code{PATH}.  Its \file{.tfcy} format has to be the one the
-\code{flatcurry-typed} package reads.
+\file{bin/curry-frontend}, otherwise the one of the Curry system Rice was
+built with, otherwise the first of \code{curry-frontend},
+\code{kics2-frontend} and \code{pakcs-frontend} on \code{PATH}.
+\file{bin/curry-frontend} is built by \code{make frontend} from the
+\file{frontend/} submodule, which pins the version Rice is tested with (3.1.0,
+the one KiCS2 3.5 uses).  The front end isn't on Hackage past 2.0.0, so it's
+built from source with Stack.  Its \file{.tfcy} format has to be the one the
+\code{flatcurry-typed} package reads; to move to a newer front end, check out
+its tag in \file{frontend/} and check that.
 
 \subsection{Separate compilation and caching}
 \label{sec:caching}
