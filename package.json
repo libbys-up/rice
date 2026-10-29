@@ -23,6 +23,7 @@
     "scc"                : ">= 3.0.0, < 4.0.0",
     "time"               : ">= 3.0.0, < 4.0.0"
   },
+  "configModule": "Rice.PackageConfig",
   "executables": [ {
                      "name": "rice",
                      "main": "Rice.Main"

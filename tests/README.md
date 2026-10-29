@@ -23,13 +23,12 @@ error, crash, timeout, or output mismatch against an existing golden).
 `XFAIL`/`SLOW`-skipped/no-golden-yet-PASS never affect it, so it's safe to
 wire into a pre-commit hook or CI step as-is.
 
-By default, every run starts by wiping Rice's own Prelude optimize-cache
-(both `$RICEHOME/.curry` and, if `$KICS2HOME` or `kics2` on `$PATH`
-resolves, the kics2 lib's own `rice-1.0.0` cache) — `Rice.Build.Cache`'s
-mtime-based staleness has no reason to track `replace/*.curry` as a
-dependency of the cached, optimized Prelude, so an edit there needs this
-wipe to actually take effect the way a `cypm install` rebuild of `rice`
-itself does. Pass `--no-clean` to skip it for faster iterative reruns —
+By default, every run starts by wiping rice's compiled `lib/` and
+`replace/`, and the runtime's objects (`clean_rice_caches` in `lib.sh`) —
+`Rice.Build.Cache`'s mtime-based staleness has no reason to track
+`replace/*.curry` as a dependency of the cached, optimized Prelude, so an
+edit there needs this wipe to actually take effect the way a `cypm install`
+rebuild of `rice` itself does. Pass `--no-clean` to skip it for faster iterative reruns —
 only safe if `replace/*.curry` and `runtime/*.c`/`*.h` haven't changed
 since the last clean run.
 
@@ -74,9 +73,7 @@ tests/
 ```
 
 Each `<name>.curry` may have a sibling `<name>.expected` — the golden,
-exact-match stdout (with the `total memory allocations: N` trailer stripped
-before comparing, since that reflects allocator/optimizer behavior, not
-correctness, and can legitimately drift on a good change). No `<name>.expected`
+exact-match stdout. No `<name>.expected`
 yet just means "hasn't been reviewed and recorded" — `run.sh` still requires
 the program to compile, run, and exit cleanly within its timeout, just
 without checking the actual output.
@@ -101,13 +98,10 @@ A test can carry these as comments anywhere in its source:
   test that goes over counts as its expected failure. This is how a
   garbage collector regression shows up (`src/gc-plan.md`, stage 3).
 
-Don't run two `run.sh` invocations with different `RICE_CFLAGS` at the
-same time: every program links the same `runtime/*.o`, which are rebuilt
-whenever their flags change, so one run can link the other's objects.
-For the same reason, don't run `make` in `runtime/`: it rebuilds those
-objects with the Makefile's flags (`-g`, no `-O2`) but leaves `rice`'s
-`*.o.flags` records alone, so every later program links unoptimized
-runtime code. If that happens, `rm runtime/*.o runtime/*.o.flags`.
+Each set of C flags gets its own runtime and Prelude objects (`obj-<hash>`
+directories), so runs with different `RICE_CFLAGS` don't share objects.
+Two runs at once still need `--no-clean` on the second, because a clean
+start wipes the compiled Prelude the first one is using.
 
 Every compile also gets `--lint-fieldreps` (`src/field-reps-plan.md`), so
 a lint failure is a compile failure.

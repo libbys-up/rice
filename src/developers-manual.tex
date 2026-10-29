@@ -126,9 +126,10 @@ Put KiCS2 first on your \code{PATH}: \code{cypm} builds with whichever Curry
 system it finds, and a \code{rice} built with PAKCS doesn't work.  The
 executable goes in \file{~/.cpm/bin}.
 
-At run time Rice finds its runtime (\file{runtime/}) and its Prelude
-replacements (\file{replace/}) through the environment variable
-\code{RICEHOME}, which must be the project root.
+At run time Rice finds its standard library (\file{lib/}), its runtime
+(\file{runtime/}) and its Prelude replacements (\file{replace/}) in the
+directory it was installed from.  Set \code{RICEHOME} to use another copy.
+Rice also needs a Curry front end (\S\ref{sec:frontend}).
 
 \subsection{Running it}
 
@@ -192,11 +193,14 @@ These are C preprocessor flags, set with \code{--cflags}:
 \file{src/FlatCurry/} & typed versions of FlatCurry libraries we need but
   the packages don't provide (\S\ref{sec:vendored}) \\
 \file{src/ICurry/} & ICurry helper libraries (not used by the build yet) \\
+\file{lib/} & Rice's standard library, a copy of KiCS2's
+  (\S\ref{sec:frontend}) \\
 \file{replace/} & Rice's own definitions of some Prelude functions
   (\S\ref{sec:replace}) \\
 \file{runtime/} & the runtime system, in C (\S\ref{sec:runtime}) \\
 \file{tests/} & the regression and benchmark test bench (\S\ref{sec:testing}) \\
 \file{test/} & a C smoke test for the runtime, and small examples \\
+\file{tools/} & \file{sync-lib.sh}, which refreshes \file{lib/} from KiCS2 \\
 \file{debug_repros/} & small programs that reproduced past runtime bugs \\
 \file{src/*.md}, \file{src/*.tex} & this manual, the history files, and
   plan documents (\S\ref{sec:docs}) \\
@@ -215,6 +219,8 @@ detail.
 \toprule
 \file{Rice/Main.curry} & the \code{rice} command: options, the per-module
   driver, building the executable \\
+\file{Rice/Frontend.curry} & the load path, and running the front end
+  (\S\ref{sec:frontend}) \\
 \file{Rice/Build/Deps.curry} & the module graph, and dependency order \\
 \file{Rice/Build/Cache.curry} & cache file names, and deciding whether a module
   is stale \\
@@ -357,6 +363,27 @@ typed FlatCurry (\code{TProg}).  Types matter to us: unboxing and field reps
 are both about the type of a value.  We drop them at the last moment, because
 ICurry generation wants untyped FlatCurry.
 
+\subsection{The standard library and the front end}
+\label{sec:frontend}
+
+Rice compiles programs against its own standard library, \file{lib/}, not the
+one of the Curry system it was built with.  \file{lib/} is a copy of KiCS2's,
+made by \file{tools/sync-lib.sh}, with the CPP symbol \code{__KICS2__} renamed
+to \code{__RICE__}: the runtime implements the externals of the KiCS2
+branches.  \file{lib/VERSION} says which KiCS2 it came from.  After a sync,
+check whether Prelude's externals still match \file{runtime/prelude.c} and
+\file{replace/}.
+
+\code{Rice.Frontend} runs the front end itself, with \code{-D__RICE__}, and
+the load path: the current directory, then \code{CURRYPATH}, then
+\file{lib/}.  The front end writes each module's \file{.tfcy} into
+\file{.curry/rice-1.0.0/} beside its source, with Rice's own cache files.
+The front end executable is \code{RICE_FRONTEND} if that's set, otherwise
+the one of the Curry system Rice was built with, otherwise the first of
+\code{curry-frontend}, \code{kics2-frontend} and \code{pakcs-frontend} on
+\code{PATH}.  Its \file{.tfcy} format has to be the one the
+\code{flatcurry-typed} package reads.
+
 \subsection{Separate compilation and caching}
 \label{sec:caching}
 
@@ -374,8 +401,8 @@ ones:
 \end{itemize}
 
 Compiling Prelude takes a long time, so we cache aggressively.  Every module
-gets a directory \file{.curry/rice-1.0.0/} next to its source (Prelude's is in
-the KiCS2 library directory), holding:
+gets a directory \file{.curry/rice-1.0.0/} next to its source (Prelude's is
+\file{lib/.curry/rice-1.0.0/}), holding:
 \begin{center}
 \begin{tabular}{@{}ll@{}}
 \toprule
@@ -383,8 +410,7 @@ the KiCS2 library directory), holding:
 \file{.rfcy} & the untyped FlatCurry after ANF \\
 \file{.rimports} & just the module's imports \\
 \file{.h}, \file{.c} & the generated C \\
-\file{.o}, \file{.o.flags} & the object file, and the command line it was built
-  with \\
+\file{obj-<hash>/} & object files, one directory per compiler and flags \\
 \file{main.c} & for the root module only \\
 \bottomrule
 \end{tabular}
@@ -401,9 +427,15 @@ unchanged result doesn't make the modules importing it stale.
 The \file{.rimports} file exists because reading any field of a \code{TProg}
 parses the whole \file{.tfcy}, which takes seconds for Prelude.
 
-Object files are cached the same way: a \file{.o} is rebuilt when its
-\file{.c}, or any header in \file{runtime/}, is newer, or when the compiler
-command line changed.  That's what the \file{.o.flags} file is for.
+Object files are cached the same way, in a directory \file{obj-<hash>/} next
+to the \file{.c}, where the hash is of the C compiler and its flags (the
+runtime's are in \file{runtime/obj-<hash>/}).  So builds with different
+\code{--cflags}, \code{--debug} or \code{--gcc} keep separate objects.  A
+\file{.o} is rebuilt when its \file{.c}, or any header in \file{runtime/},
+is newer, or when the \file{.o.flags} file beside it records a different
+compiler and flags (in case of a hash collision).  Each object is compiled to
+a temporary file and renamed, so two builds at once can't leave a half-written
+one.
 
 The staleness check doesn't know that a module depends on \file{replace/} or on
 the compiler itself.  After changing either, delete the caches (\code{tests/run.sh}
@@ -463,7 +495,7 @@ pass raw integers instead of allocating boxes (\S\ref{sec:planned}).
 
 Some Prelude functions need a different definition for Rice.
 \code{Rice.Files.Replace} handles this: for module \code{M}, if
-\file{$RICEHOME/replace/replace_M.curry} exists, each of its functions replaces
+\file{replace/replace_M.curry} exists, each of its functions replaces
 the function of the same name in \code{M}, and functions only defined there are
 added.  The replacements are renamed into \code{M}, and they go through
 \code{condenseStrings} and \code{unbox} first, like \code{M} did.
@@ -1331,15 +1363,9 @@ doesn't always exercise the same path.
 runtime events across flag settings.  \file{test/runtime_smoke.c} tests the
 runtime on its own (\code{make test} in \file{runtime/}).
 
-Two things to avoid:
-\begin{itemize}
-  \item Don't run two test runs with different C flags at the same time.  Every
-    program links the same \file{runtime/*.o}, which are rebuilt when the flags
-    change, so one run can link the other's objects.
-  \item Don't run \code{make} in \file{runtime/} without \code{test}: it
-    overwrites those objects with unoptimized builds.  If it happens,
-    \code{rm runtime/*.o runtime/*.o.flags}.
-\end{itemize}
+Two test runs can go at the same time, even with different C flags, as long
+as the second passes \code{--no-clean}: a clean start deletes the compiled
+Prelude the first run is using.
 
 %======================================================================
 \section{Conventions}

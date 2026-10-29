@@ -1,8 +1,5 @@
 module Rice.Files.Replace (replacePrim, replace) where
 
-import System.Environment       (getEnv)
-import System.CurryPath         (runModuleActionQuiet)
-import FlatCurry.Typed.Files    (readTypedFlatCurry)
 import FlatCurry.Typed.Goodies  (updQNamesInTProg, updQNamesInTFunc, updTProgTFuncs, 
                                  tFuncName, tProgTFuncs, tProgName, updTRuleExtDecl,
                                  updTFuncTRule, updTRule, trTExpr,
@@ -16,6 +13,7 @@ import Data.List                (find, isPrefixOf)
 
 import Rice.Transform.StrLit    (condenseStrings)
 import Rice.Transform.Unbox     (unbox)
+import Rice.Frontend            (riceHome, readModuleFile)
 
 -- `replace_Prim.curry` can't name `Int#` in its source, so it calls the
 -- raw types `Int_SH`, `Char_SH` and `Float_SH`. This gives them their names.
@@ -27,13 +25,13 @@ rename_SH q = case q of
                    _ -> q
 
 --- Replaces Prelude's functions on Int, Char and Float with the versions
---- in `$RICEHOME/replace/replace_Prim.curry`, which unbox their arguments
+--- in `replace/replace_Prim.curry` under `riceHome`, which unbox their arguments
 --- and call raw primitives. See the developer's manual, "Replacing
 --- Prelude functions".
 replacePrim :: TProg -> IO TProg
-replacePrim pre = do home <- getEnv "RICEHOME"
+replacePrim pre = do home <- riceHome
                      let primFile = home </> "replace" </> "replace_Prim" <.> "curry"
-                     prim <- runModuleActionQuiet readTypedFlatCurry primFile
+                     prim <- readModuleFile primFile
                      let prim_sharp = updTProgTFuncs (map (updTypeQNamesInTFunc rename_SH))
                                         (updQNamesInTProg rename_SH prim)
                      return $ replaceFuncs "Prelude" prim_sharp pre
@@ -95,16 +93,16 @@ addFuncs name rep p = updTProgTFuncs allFuncs p
        isOld f    = elem (snd (tFuncName f)) names
 
 --- Replaces functions in module `M` with the ones defined in
---- `$RICEHOME/replace/replace_M.curry`, if that file exists, and adds the
+--- `replace/replace_M.curry` under `riceHome`, if that file exists, and adds the
 --- functions only defined there.
 replace :: TProg -> IO TProg
 replace p = do let name = tProgName p
-               home <- getEnv "RICEHOME"
+               home <- riceHome
                let repFile = home </> "replace" </> "replace_"++name <.> "curry"
                hasRepFile <- doesFileExist repFile
                if not hasRepFile
                 then return p
-                else do repP <- runModuleActionQuiet readTypedFlatCurry repFile
+                else do repP <- readModuleFile repFile
                         -- The module being replaced into has already been
                         -- through these; its replacements have to match.
                         let prepped = unbox (condenseStrings repP)

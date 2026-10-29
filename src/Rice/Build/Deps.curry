@@ -13,9 +13,9 @@ import qualified Data.Map as Map
 import Data.SCC (scc)
 
 import FlatCurry.Typed.Goodies (tProgName, tProgImports)
-import FlatCurry.Typed.Files   (readTypedFlatCurry)
 
 import Rice.Build.Cache (readCachedImports, writeCachedImports)
+import Rice.Frontend    (readModule)
 import Rice.Diagnostics (timeIO)
 
 --- Every module reachable from the root, mapped to its direct imports.
@@ -32,7 +32,7 @@ type ModuleGraph = Map.Map String [String]
 --- always stale and has to be recompiled anyway.
 buildModuleGraph :: Bool -> String -> IO ModuleGraph
 buildModuleGraph timing root = do
-  rootProg <- timeIO timing (root ++ ": readTypedFlatCurry (root)") (readTypedFlatCurry root)
+  rootProg <- timeIO timing (root ++ ": readModule (root)") (readModule root)
   let rootName = tProgName rootProg
       rootImps = tProgImports rootProg
   writeCachedImports rootName rootImps
@@ -51,7 +51,7 @@ buildModuleGraph timing root = do
     case cached of
       Just imps -> return imps
       Nothing   -> timeIO timing (m ++ ": full parse for imports (no .rimports cache)") $ do
-        prog <- readTypedFlatCurry m
+        prog <- readModule m
         let imps = tProgImports prog
         writeCachedImports m imps
         return imps

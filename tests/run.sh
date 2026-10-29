@@ -65,22 +65,8 @@ if [ ! -x "$RICE" ]; then
 fi
 
 if [ "$CLEAN" -eq 1 ]; then
-  echo "Cleaning Prelude cache (\$RICEHOME/.curry, kics2 lib's rice-1.0.0 cache)..."
-  rm -rf "$RICEHOME/.curry"
-  # Rice.Build.Cache's mtime-based staleness check has no reason to know
-  # about replace/*.curry (it's read fresh every compile, but the
-  # *optimized-TProg* cache it guards doesn't track that file as a
-  # dependency) -- so a `replace_Prelude.curry`/`replace_Prim.curry` edit
-  # needs this wiped by hand to actually take effect, same as a `rice`
-  # rebuild does. KICS2HOME (already exported in this project's own
-  # .bashrc) is tried first; falls back to deriving it from `kics2` on
-  # $PATH, and is a no-op (not a hard error) if neither resolves.
-  KICS2_LIB="${KICS2HOME:-}"
-  if [ -z "$KICS2_LIB" ] && command -v kics2 >/dev/null 2>&1; then
-    KICS2_LIB="$(cd "$(dirname "$(command -v kics2)")/.." && pwd)"
-  fi
-  [ -n "$KICS2_LIB" ] && [ -d "$KICS2_LIB/lib/.curry/rice-1.0.0" ] && \
-    rm -rf "$KICS2_LIB/lib/.curry/rice-1.0.0"
+  echo "Cleaning rice's caches (lib/, replace/, runtime objects)..."
+  clean_rice_caches
 fi
 
 mkdir -p "$SCRATCH"
@@ -283,12 +269,10 @@ run_one() {
 
   [ "$VERBOSE" -eq 1 ] && sed 's/^/      | /' "$out_log"
 
-  # `nf_all`'s trailing "total memory allocations: N" line reflects
-  # allocator/optimizer behavior, not program correctness -- it can
-  # legitimately drift on a perfectly good change (e.g. inlining removing
-  # an allocation), so it's stripped before comparing/recording rather
-  # than baked into the golden, to keep goldens catching real regressions
-  # instead of flagging every allocation-count shift as one.
+  # `nf_all` prints a "total memory allocations: N" line when
+  # RICE_ALLOC_STATS is set (bench.sh sets it). The count drifts on good
+  # changes, so if the caller's environment sets it, strip it rather than
+  # bake it into the golden.
   local out_filtered="$work/out.filtered"
   grep -v '^total memory allocations:' "$out_log" > "$out_filtered"
 

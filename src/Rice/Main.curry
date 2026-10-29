@@ -10,30 +10,31 @@
 
 module Rice.Main where
 
-import System.Environment (getArgs, getEnv)
+import System.Environment (getArgs)
 import System.Console.GetOpt
 import System.Directory   (createDirectoryIfMissing, doesFileExist,
                            doesDirectoryExist, getDirectoryContents,
                            getModificationTime)
 import System.FilePath    (takeDirectory, takeExtension, replaceExtension,
+                           takeFileName,
                            (</>), (<.>))
-import System.Process     (system)
+import System.Process     (system, exitWith)
 import Data.Time          (ClockTime)
 import qualified Data.Map as Map
 import Data.List          (nub, last, maximum)
-import Data.Char          (toLower)
+import Data.Char          (toLower, ord)
 import Control.Monad      (when, foldM)
 import Text.Pretty        (pPrint)
 
 import FlatCurry.Types                   (Prog)
 import FlatCurry.Typed.Types             (TProg, TFuncDecl (..), TRule (..))
 import FlatCurry.Typed.Goodies           (tProgTFuncs)
-import FlatCurry.Typed.Files             (readTypedFlatCurry)
 import FlatCurry.Transform.Typed.ExecDet (showTransformRuleDet)
 import ICurry.Compiler                   (flatCurry2ICurryWithProgs,
                                           defaultICOptions)
 
 import Rice.Files.Info
+import Rice.Frontend          (riceHome, readModule)
 import Rice.Files.Replace     (replacePrim, replace)
 import Rice.Transform.ANF     (normalize)
 import Rice.Transform.Unbox   (unbox)
@@ -64,8 +65,13 @@ main = do
   if SHelp `elem` opts
     then putStrLn (usageInfo usageHeader optDescrs)
     else if not (null errors)
-      then mapM_ putStrLn errors
+      then do mapM_ putStrLn errors
+              exitWith 1
       else compileProgram opts (head files)
+
+--- Prints a progress message, under `--verbose`.
+say :: [CompilerOptions] -> String -> IO ()
+say opts msg = when (SVerbose `elem` opts) (putStrLn msg)
 
 usageHeader :: String
 usageHeader = "Usage: rice [OPTIONS] FILE.curry"
@@ -76,7 +82,8 @@ compileProgram opts file = do
   let timing = SCompilerTime `elem` opts
   graph <- buildModuleGraph timing file
   case topoSort graph of
-    Left cyc       -> putStrLn ("Cyclic import involving: " ++ unwords cyc)
+    Left cyc       -> do putStrLn ("Cyclic import involving: " ++ unwords cyc)
+                         exitWith 1
     Right modNames -> do
       let rootModule = last modNames
           start      = (Map.empty, [], emptyReps)
@@ -104,11 +111,11 @@ run graph rootModule opts (importedFT, impFcys, impReps) mname = do
   let imports = Map.findWithDefault (error missingModule) mname graph
       forced  = (has SForceRecompile && mname == rootModule)
                 || mname `elem` [n | SForceRecompileModule n <- opts]
-  when (has SPrintLoops) (readTypedFlatCurry mname >>= showLoops)
+  when (has SPrintLoops) (readModule mname >>= showLoops)
   stale <- if forced then return True else needsRecompile mname imports
   optimized <- if stale
     then optimizeModule opts importedFT mname
-    else do putStrLn ("Skipping " ++ mname)
+    else do say opts ("Skipping " ++ mname)
             time "readCachedOpt" (readCachedOpt mname)
   let (_, loopBreakers) = orderFuns optimized
       localFT           = makeFunTable loopBreakers (tProgTFuncs optimized)
@@ -136,9 +143,8 @@ run graph rootModule opts (importedFT, impFcys, impReps) mname = do
 --- the optimizer, then writes the result to the `.rtfcy` cache.
 optimizeModule :: [CompilerOptions] -> FunTable -> String -> IO TProg
 optimizeModule opts importedFT mname = do
-  putStrLn ("Compiling " ++ mname)
-  prog <- timeIO timing (stage "readTypedFlatCurry (stale)")
-                 (readTypedFlatCurry mname)
+  say opts ("Compiling " ++ mname)
+  prog <- timeIO timing (stage "readModule (stale)") (readModule mname)
   stopIf SStopRaw "before any transform" prog
   strProg <- timePure timing (stage "condenseStrings") (condenseStrings prog)
   printIf SPrintFlatCurry strProg
@@ -222,14 +228,18 @@ generateModule opts impFcys impReps mname optimized = do
 
 --- Compiles every module's `.c`, the runtime, and a generated `main.c` for
 --- the root module (the last in dependency order), and links them into one
---- executable named after the root module. The runtime is found through
---- `$RICEHOME/runtime`.
+--- executable named after the root module. The runtime is in
+--- `runtime/` under `riceHome`.
 ---
---- Each `.c` is compiled to a `.o` next to it, and only when that `.o` is
---- out of date (`compileObj`), so an unchanged Prelude isn't recompiled.
+--- Each `.c` is compiled to a `.o` in an `obj-<hash>` directory next to it,
+--- where the hash is of the compiler and flags (`objDirName`), and only
+--- when that `.o` is out of date (`compileObj`). So an unchanged Prelude
+--- isn't recompiled, and builds with different flags (`--cflags`,
+--- `--debug`, `--gcc`) keep separate objects instead of overwriting the
+--- runtime's and Prelude's.
 buildExecutable :: [CompilerOptions] -> [String] -> IO ()
 buildExecutable opts modNames = do
-  home <- getEnv "RICEHOME"
+  home <- riceHome
   let runtimeDir = home </> "runtime"
       rootModule = last modNames
   cHs <- mapM cPaths modNames
@@ -237,8 +247,8 @@ buildExecutable opts modNames = do
   let mainPath = takeDirectory rootHPath </> "main.c"
   writeFileIfChanged mainPath (pPrint (writeMain rootModule (mainModeOpt opts)))
   let incDirs      = nub (map (takeDirectory . snd) cHs)
-      compileFlags = ["-std=c11", "-O2"] ++ debugFlag ++ cflags
-                     ++ map ("-I" ++) (runtimeDir : incDirs)
+      codeFlags    = ["-std=c11", "-O2"] ++ debugFlag ++ cflags
+      incFlags     = map ("-I" ++) (runtimeDir : incDirs)
       runtimeFiles = map (runtimeDir </>) [ "runtime.c", "trail.c", "machine.c"
                                           , "heap.c", "gc.c", "prelude.c" ]
       allCFiles    = runtimeFiles ++ map fst cHs ++ [mainPath]
@@ -247,13 +257,15 @@ buildExecutable opts modNames = do
   -- check already covers it; counting it here would make any module's
   -- change recompile every object.
   hdrTime <- newestHeaderTime [runtimeDir]
-  objs <- mapM (compileObj cc compileFlags hdrTime) allCFiles
+  objs <- mapM (compileObj (SVerbose `elem` opts) cc codeFlags incFlags hdrTime)
+               allCFiles
   let cmd = unwords ([cc] ++ objs ++ ["-lm", "-o", rootModule])
-  putStrLn ("Linking: " ++ cmd)
+  say opts ("Linking: " ++ cmd)
   code <- system cmd
   if code == 0
-    then putStrLn ("Built ./" ++ rootModule)
-    else putStrLn ("Link failed (exit code " ++ show code ++ ")")
+    then say opts ("Built ./" ++ rootModule)
+    else do putStrLn ("Link failed (exit code " ++ show code ++ ")")
+            exitWith 1
  where
   cc = if SUseGCC `elem` opts then "gcc" else "clang"
   -- The last --debug wins.
@@ -263,14 +275,22 @@ buildExecutable opts modNames = do
   -- Every --cflags is used, and each can hold several flags.
   cflags = concatMap words [s | SCFlags s <- opts]
 
---- Compiles `cFile` to a `.o` next to it, unless the `.o` is up to date:
---- newer than `cFile` and than `hdrTime`, and built with the same command
---- line, which we record in a `.o.flags` file beside it. Returns the `.o`.
-compileObj :: String -> [String] -> Maybe ClockTime -> FilePath -> IO FilePath
-compileObj cc flags hdrTime cFile = do
-  let oFile      = replaceExtension cFile "o"
+--- Compiles `cFile` to a `.o` in its `obj-<hash>` directory, unless the
+--- `.o` is up to date: newer than `cFile` and than `hdrTime`, and built
+--- with the same compiler and `codeFlags`, which we record in a `.o.flags`
+--- file beside it (the hash alone could collide). The include flags are
+--- left out of the record: they differ between programs, but don't change
+--- the object. Returns the `.o`.
+---
+--- The compiler writes a temporary file that's then renamed, so two rice
+--- runs building the same object at once can't leave a half-written one.
+compileObj :: Bool -> String -> [String] -> [String] -> Maybe ClockTime
+           -> FilePath -> IO FilePath
+compileObj verbose cc codeFlags incFlags hdrTime cFile = do
+  let invocation = unwords (cc : codeFlags)
+      objDir     = takeDirectory cFile </> objDirName invocation
+      oFile      = objDir </> takeFileName (replaceExtension cFile "o")
       flagsFile  = oFile <.> "flags"
-      invocation = unwords (cc : flags)
   oExists <- doesFileExist oFile
   current <- if not oExists then return False else do
     oTime     <- getModificationTime oFile
@@ -282,13 +302,17 @@ compileObj cc flags hdrTime cFile = do
   if current
     then return oFile
     else do
-      let cmd = unwords ([cc, "-c"] ++ flags ++ [cFile, "-o", oFile])
-      putStrLn ("Compiling: " ++ cmd)
-      code <- system cmd
+      createDirectoryIfMissing True objDir
+      let tmp = oFile ++ ".$$"  -- the shell's process id
+          cmd = unwords ([cc, "-c"] ++ codeFlags ++ incFlags
+                         ++ [cFile, "-o", tmp])
+      when verbose (putStrLn ("Compiling: " ++ cmd))
+      code <- system (cmd ++ " && mv " ++ tmp ++ " " ++ oFile)
       if code == 0
         then do writeFile flagsFile invocation
                 return oFile
-        else error ("Compile failed (exit code " ++ show code ++ "): " ++ cFile)
+        else do putStrLn ("Compile failed (exit code " ++ show code ++ "): " ++ cmd)
+                exitWith 1
  where
   -- `readFile` is lazy, so we force the whole file here. Otherwise the
   -- handle could still be open when we write `flagsFile` above.
@@ -297,6 +321,14 @@ compileObj cc flags hdrTime cFile = do
     if not exists then return Nothing else do
       s <- readFile path
       length s `seq` return (Just s)
+
+--- The name of the directory for objects built by `invocation` (the
+--- compiler and its flags): `obj-` and a hash of it.
+objDirName :: String -> String
+objDirName invocation = "obj-" ++ show (foldl step 5381 invocation)
+ where
+  -- djb2, kept to 32 bits
+  step h c = (h * 33 + ord c) `mod` 4294967296
 
 --- The newest modification time of the `.h` files directly in `dirs`, or
 --- `Nothing` if there aren't any.
@@ -330,7 +362,7 @@ data CompilerOptions
   -- caching
   | SForceRecompile | SForceRecompileModule String
   -- other
-  | SCompilerTime | SHelp
+  | SVerbose | SCompilerTime | SHelp
  deriving (Show, Eq)
 
 --- Parses `--debug`'s argument: one of `runtime/debug.h`'s named levels
@@ -389,6 +421,7 @@ optDescrs =
   , Option []  ["force-recompile-module"] (ReqArg SForceRecompileModule "MODULE") forceModuleHelp
 
   -- other
+  , Option "v" ["verbose"]         (NoArg SVerbose)           "say which modules are compiled, and print each C compiler and linker command"
   , Option []  ["compiler-time"]   (NoArg SCompilerTime)      "print how long each compiler stage takes, in ms"
   , Option "h" ["help"]            (NoArg SHelp)              "print this help message and exit"
   ]

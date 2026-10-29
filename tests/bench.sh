@@ -21,7 +21,7 @@
 #                  scheduler noise (default 3). Allocation counts aren't
 #                  affected by --runs: they're read straight from the
 #                  first successful run's own "total memory allocations:"
-#                  line (runtime.c's nf_all), which is exact and
+#                  line (runtime.c's nf_all, with RICE_ALLOC_STATS set), which is exact and
 #                  deterministic for a given config, not something
 #                  repeated sampling improves.
 #   --timeout=SEC  per-run timeout (default 200 -- these are meant to be
@@ -89,14 +89,8 @@ if [ ! -x "$RICE" ]; then
 fi
 
 if [ "$CLEAN" -eq 1 ]; then
-  echo "Cleaning Prelude cache (\$RICEHOME/.curry, kics2 lib's rice-1.0.0 cache)..."
-  rm -rf "$RICEHOME/.curry"
-  KICS2_LIB="${KICS2HOME:-}"
-  if [ -z "$KICS2_LIB" ] && command -v kics2 >/dev/null 2>&1; then
-    KICS2_LIB="$(cd "$(dirname "$(command -v kics2)")/.." && pwd)"
-  fi
-  [ -n "$KICS2_LIB" ] && [ -d "$KICS2_LIB/lib/.curry/rice-1.0.0" ] && \
-    rm -rf "$KICS2_LIB/lib/.curry/rice-1.0.0"
+  echo "Cleaning rice's caches (lib/, replace/, runtime objects)..."
+  clean_rice_caches
 fi
 
 rm -rf "$SCRATCH"
@@ -181,7 +175,7 @@ bench_one() {
   for i in $(seq 1 "$RUNS"); do
     out_log="$work/out.$i.log"
     t0="$(now_s)"
-    ( cd "$work" && timeout "$RUN_TIMEOUT" "./$name" ) >"$out_log" 2>&1
+    ( cd "$work" && RICE_ALLOC_STATS=1 timeout "$RUN_TIMEOUT" "./$name" ) >"$out_log" 2>&1
     code=$?
     t1="$(now_s)"
     elapsed="$(perl -e "printf '%.3f', $t1 - $t0")"

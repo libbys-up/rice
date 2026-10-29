@@ -55,10 +55,8 @@
 # config rebuilds in, and each build's binary is copied out. rice skips
 # its frontend when the generated C is up to date, so the Curry-to-C
 # step runs once per program; a change of flags only recompiles the C.
-# Builds go config by config, because a change of flags rebuilds
-# runtime/*.o and the Prelude object, and that's most of the build time.
-# For the same reason, don't run this at the same time as another rice
-# build with different flags (tests/README.md).
+# Each set of flags gets its own runtime and Prelude objects
+# (Rice.Main's objDirName), so a config's first build compiles them.
 
 set -u
 

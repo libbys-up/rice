@@ -6,6 +6,15 @@ resolve_ricehome() {
   export RICEHOME
 }
 
+# Removes rice's compiled Prelude and library modules, the compiled
+# replace/*.curry, and the runtime's objects, so the next build starts
+# over. Needed after a change to replace/*.curry, which Rice.Build.Cache's
+# staleness check doesn't track, and after a codegen change.
+clean_rice_caches() {
+  rm -rf "$RICEHOME/.curry" "$RICEHOME/lib/.curry" "$RICEHOME/replace/.curry"
+  rm -rf "$RICEHOME"/runtime/obj-*
+}
+
 resolve_rice() {
   RICE="$(command -v rice || echo "$HOME/.cpm/bin/rice")"
 }

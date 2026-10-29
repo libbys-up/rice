@@ -155,23 +155,20 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 
 ## Hazards
 
-- Two `rice` builds or `tests/run.sh` runs with different `RICE_CFLAGS`
-  must not run at once: they share `runtime/*.o` (and the kics2 lib's
-  `Prelude.o`).
-- Don't run `make` in `runtime/`. It rebuilds the objects with `-g` and
-  no `-O2`, but leaves `rice`'s `*.o.flags`, so later programs link
-  unoptimized code. If it happens: `rm runtime/*.o runtime/*.o.flags`.
 - Build rice with `PATH=$HOME/opt/kics2/bin:$PATH cypm install`. After a
-  codegen or runtime-header change, also clear `.curry/`,
-  `~/opt/kics2/lib/.curry/rice-1.0.0/` and `runtime/*.o*`.
+  codegen or runtime-header change, also clear rice's caches
+  (`clean_rice_caches` in `tests/lib.sh`, or `tests/run.sh` without
+  `--no-clean`).
+- Don't edit a test script while it runs: bash reads scripts as it goes,
+  so the running copy dies or misbehaves.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
 ## Settled 2026-10-28: collector loose ends
 
 - **Stage 4 cleanup.** The Boehm path was already gone (`eddacd5`).
-  The allocations counter stays a node count, but printing it on stdout
-  after every non-IO program is a distribution problem (below).
+  The allocations counter stays a node count; it's printed (on stderr)
+  only when `RICE_ALLOC_STATS` is set.
 - **`GC_STRESS` speed.** Each collection zeroed a fresh 4 MB chunk and
   poisoned every old one, about 1 ms per safe point. `heap.c` now uses
   64 KB chunks under `GC_STRESS`, which also takes the chunk slow path

@@ -1,8 +1,8 @@
 ------------------------------------------------------------------------------
 --- Rice's per-module cache files, and deciding when they're stale.
 ---
---- A module's files live in `.curry/rice-1.0.0/` next to its source, the
---- way the Curry front end keeps its own `.curry/<compiler>/`:
+--- A module's files live in `.curry/rice-<version>/` next to its source,
+--- with the front end's `.tfcy` (`Rice.Frontend`):
 ---   `.rtfcy`    the optimized typed FlatCurry
 ---   `.rfcy`     the untyped FlatCurry after ANF
 ---   `.rimports` the module's import list
@@ -25,11 +25,13 @@ module Rice.Build.Cache ( needsRecompile,
  ) where
 
 import Data.Maybe        (fromMaybe)
-import System.CurryPath  (lookupModuleSourceInLoadPath, inCurrySubdir, modNameToPath)
+import System.CurryPath  (modNameToPath)
 import System.Directory  (doesFileExist, getModificationTime, createDirectoryIfMissing)
 import System.FilePath   ((</>), (<.>), takeDirectory)
 import FlatCurry.Types       (Prog)
 import FlatCurry.Typed.Types (TProg)
+
+import Rice.Frontend (riceSubdir, lookupModule, tfcyPath)
 
 --- The optimized typed FlatCurry.
 riceExt :: String
@@ -46,17 +48,12 @@ riceFcyExt = "rfcy"
 riceImportsExt :: String
 riceImportsExt = "rimports"
 
---- Rice's directory for a module's files, in the Curry convention
---- `.curry/<compiler>-<version>`.
-riceSubdir :: String
-riceSubdir = ".curry" </> "rice-1.0.0"
-
 --- The directory holding the module's source, and the path of its Rice
 --- files without an extension. It's an error if we can't find the module.
 moduleBase :: String -> IO (FilePath, FilePath)
 moduleBase m = do
-  mbsrc <- lookupModuleSourceInLoadPath m
-  let (dir, _) = fromMaybe (error notFound) mbsrc
+  mbdir <- lookupModule m
+  let dir = fromMaybe (error notFound) mbdir
   return (dir, dir </> riceSubdir </> modNameToPath m)
  where notFound = "Rice.Build.Cache: can't resolve module " ++ m
 
@@ -64,8 +61,7 @@ moduleBase m = do
 modulePaths :: String -> IO (FilePath, FilePath)
 modulePaths m = do
   (dir, riceBase) <- moduleBase m
-  let tfcyBase = inCurrySubdir (dir </> m)
-  return (tfcyBase <.> "tfcy", riceBase <.> riceExt)
+  return (tfcyPath dir m, riceBase <.> riceExt)
 
 --- The module's `.c` and `.h`.
 cPaths :: String -> IO (FilePath, FilePath)

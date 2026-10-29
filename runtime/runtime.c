@@ -1192,7 +1192,12 @@ void nf_all(union field expr)
     {
         printf("No solutions found\n");
     }
-    printf("total memory allocations: %ld\n", mem);
+    // For tests/bench.sh, which reads the count from the program's output.
+    if(getenv("RICE_ALLOC_STATS") != NULL)
+    {
+        fflush(stdout);
+        fprintf(stderr, "total memory allocations: %ld\n", mem);
+    }
     print_opt_stats();
 }
 
