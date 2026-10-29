@@ -90,8 +90,12 @@ runFrontend :: [FilePath] -> String -> IO ()
 runFrontend dirs m = do
   fe   <- frontend
   path <- loadPath
+  -- -Odesugar-newtypes: ICurry generation would otherwise remove the
+  -- newtypes itself, by inferring types again on the program after unbox
+  -- and replace have changed it, and that fails.
   let cmd = unwords $ [quote fe, "--typed-flat", "--no-verb", "--no-warn",
-                       "--no-overlap-warn", "-o", quote riceSubdir,
+                       "--no-overlap-warn", "-Odesugar-newtypes",
+                       "-o", quote riceSubdir,
                        "-D__RICE__=" ++ show riceVersionNumber]
                       ++ map (("-i" ++) . quote) (dirs ++ path)
                       ++ [quote m]

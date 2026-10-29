@@ -20,8 +20,33 @@ does not get dropped once self-hosting works.
 
 ------------------------------------------------------------------------------
 
-Where we are
-------------
+Status, 2026-10-29
+------------------
+
+Done since this plan was written:
+
+- **B.1 GC and B.2 stack depth.** The precise copying collector and the
+  evaluation machine replaced both. Boehm is gone.
+- **Compiler identity.** Rice is "rice": its own `lib/` (KiCS2's, with
+  `__RICE__`), its own front end call (`Rice.Frontend`), and
+  `.curry/rice-1.0.0/`. The front end is pinned (`frontend/` submodule,
+  `make frontend`).
+- **Rice's closure compiles to objects.** `rice Rice.Main` (from `src/`,
+  with `CURRYPATH` set to `packageLoadPath` from `Rice.PackageConfig`)
+  compiles all 77 modules to C and object files in about 6 minutes. Getting
+  there fixed four bugs, each now a regression test: newtypes
+  (`-Odesugar-newtypes`), headers of modules with the same last name
+  component, names with `\` or `"` in C strings and comments, and the C
+  driver `main.c` overwriting a module `Main`'s `Main.c` on a
+  case-insensitive file system.
+
+What's left to link: the 49 externals below, in 10 modules. `catch` stays
+a stub for now: rice's closure has it only in functions rice doesn't call.
+
+------------------------------------------------------------------------------
+
+Where we are (2026-10-04)
+-------------------------
 
 What Rice compiles today is the Prelude plus user modules that contain no
 `external` declarations. `Rice.Main` links exactly `runtime.c`, `stack.c`,

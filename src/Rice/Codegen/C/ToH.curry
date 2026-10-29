@@ -95,7 +95,7 @@ symbolLit n tagExpr arity rs hnfExpr =
   [ (text "static Symbol" <+> text (symbolName n)) .=
       carray ([ dinit "tag"   tagExpr
               , dinit "arity" (int arity)
-              , dinit "name"  (dquotes (text (toName n))) ] ++
+              , dinit "name"  (cstring (toName n)) ] ++
               [ dinit "reps"  (text (repsName n)) | hasRaw ] ++
               [ dinit "hnf"   hnfExpr ])
   ]
@@ -212,7 +212,7 @@ makeEntry name arity =
 layoutCheck :: String -> CStmt
 layoutCheck fn =
   cifdef "CHECK_LAYOUT"
-    [ scall "check_layout" [root, text "true", dquotes (text fn)] ]
+    [ scall "check_layout" [root, text "true", cstring fn] ]
 
 makeCon :: (IQName, IArity) -> [CStmt]
 makeCon (n,a) = makeEntry n a

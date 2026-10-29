@@ -14,7 +14,7 @@ module Rice.Codegen.C.C where
 
 import Text.Pretty
 import ICurry.Types (IQName, IVarIndex)
-import Rice.Codegen.Names (mangle)
+import Rice.Codegen.Names (mangle, escape)
 
 --- A C type, written out verbatim (`"int"`, `"field"`, `"Node*"`, ...).
 type CType = String
@@ -78,15 +78,18 @@ x .|= e = x <+> text "|=" <+> e <> semi
 ------------------------------------------------------------------------------
 
 --- Includes a module's header. A hierarchical module `Test.Prop.Types`
---- has its header at `Test/Prop/Types.h` (`Rice.Build.Cache`), and
---- `Rice.Main` passes each module's directory with `-I`, so we include
---- just `"Types.h"`.
+--- has its header at `Test/Prop/Types.h` under its `.curry/rice-<version>/`
+--- directory (`Rice.Build.Cache`), and `Rice.Main` passes that directory
+--- with `-I`, so we include `"Test/Prop/Types.h"`. Including just
+--- `"Types.h"` would be ambiguous: `Control.Monad.Trans.Class` and
+--- `Control.Monad.IO.Class` would both be `"Class.h"`.
 cinclude :: CName -> CStmt
-cinclude file = text "#include" <+> dquotes (text (baseModName file) <> text ".h")
+cinclude file = text "#include" <+> dquotes (text (modPath file) <> text ".h")
 
---- The last component of a module name: `"Test.Prop.Types"` -> `"Types"`.
-baseModName :: CName -> CName
-baseModName = reverse . takeWhile (/= '.') . reverse
+--- A module name as a relative path: `"Test.Prop.Types"` ->
+--- `"Test/Prop/Types"`.
+modPath :: CName -> CName
+modPath = map (\c -> if c == '.' then '/' else c)
 
 cdefine :: CName -> Int -> CStmt
 cdefine name val = text "#define" <+> text name <+> int val
@@ -152,8 +155,17 @@ ctrue, cfalse :: CExpr
 ctrue  = text "true"
 cfalse = text "false"
 
+--- A C string literal holding `s`. Curry operator names can hold `\\` and
+--- `"`, so every name that goes into a string literal goes through this.
+cstring :: String -> CExpr
+cstring s = dquotes (text (escape s))
+
+--- A `//` comment. A comment ending in a backslash would continue onto
+--- the next line of C, so one that does (the operator `\\`, say) is put
+--- in backquotes.
 comment :: String -> CStmt
-comment s = text "//" <+> text s
+comment s = text "//" <+> text s'
+ where s' = if not (null s) && head (reverse s) == '\\' then "`" ++ s ++ "`" else s
 
 ------------------------------------------------------------------------------
 -- Calls, functions
@@ -327,7 +339,7 @@ nullf = text "(field)(Node*)NULL"
 --- `--debug` (`runtime/debug.h`).
 debugLeave :: String -> [CStmt]
 debugLeave msg =
-  [ scall "debug"      [text "LOW", dquotes (text ("leaving " ++ msg ++ "\\n"))]
+  [ scall "debug"      [text "LOW", cstring "leaving %s\n", cstring msg]
   , scall "debug_expr" [text "LOW", root]
   ]
 

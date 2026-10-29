@@ -226,7 +226,7 @@ generateModule opts impFcys impReps mname optimized = do
 -- Building the executable
 ------------------------------------------------------------------------------
 
---- Compiles every module's `.c`, the runtime, and a generated `main.c` for
+--- Compiles every module's `.c`, the runtime, and a generated `rice-main.c` for
 --- the root module (the last in dependency order), and links them into one
 --- executable named after the root module. The runtime is in
 --- `runtime/` under `riceHome`.
@@ -244,14 +244,21 @@ buildExecutable opts modNames = do
       rootModule = last modNames
   cHs <- mapM cPaths modNames
   (_, rootHPath) <- cPaths rootModule
-  let mainPath = takeDirectory rootHPath </> "main.c"
-  writeFileIfChanged mainPath (pPrint (writeMain rootModule (mainModeOpt opts)))
-  let incDirs      = nub (map (takeDirectory . snd) cHs)
+  -- A hierarchical module's header is in a subdirectory (A/B/C.h for
+  -- A.B.C), and is included by that path (Rice.Codegen.C.C.cinclude),
+  -- so the include directory is the one above it.
+  let includeDir m h = iterate takeDirectory h !! (1 + length (filter (== '.') m))
+      incDirs        = nub (zipWith includeDir modNames (map snd cHs))
+      -- The driver with C's main. No module can be called rice-main, so it
+      -- can't clash with a module's .c, even on a case-insensitive file
+      -- system, where main.c and a module Main's Main.c are the same file.
+      mainPath       = includeDir rootModule rootHPath </> "rice-main.c"
       codeFlags    = ["-std=c11", "-O2"] ++ debugFlag ++ cflags
       incFlags     = map ("-I" ++) (runtimeDir : incDirs)
       runtimeFiles = map (runtimeDir </>) [ "runtime.c", "trail.c", "machine.c"
                                           , "heap.c", "gc.c", "prelude.c" ]
       allCFiles    = runtimeFiles ++ map fst cHs ++ [mainPath]
+  writeFileIfChanged mainPath (pPrint (writeMain rootModule (mainModeOpt opts)))
   -- Only the hand-written runtime headers count here. A module's generated
   -- .h is always rewritten together with its .c, so the ordinary .c-vs-.o
   -- check already covers it; counting it here would make any module's
@@ -378,7 +385,7 @@ parseDebugLevel s = SDebug $ case map toLower s of
     _ -> error ("--debug: expected low|med|high or a non-negative "
                 ++ "integer, got " ++ show s)
 
---- The driver the generated `main.c` runs `main` with (see `MainMode`).
+--- The driver the generated `rice-main.c` runs `main` with (see `MainMode`).
 mainModeOpt :: [CompilerOptions] -> MainMode
 mainModeOpt opts = if SInteractive `elem` opts then Interactive else Standalone
 

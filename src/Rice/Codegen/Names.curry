@@ -6,7 +6,7 @@
 ------------------------------------------------------------------------------
 
 module Rice.Codegen.Names (getTag, toName, mangle, uninstance,
-                      quote, strConst, isStrConst) where
+                      quote, escape, strConst, isStrConst) where
 
 import Data.List (isPrefixOf, splitOn)
 import Data.Char (ord, isAlphaNum)

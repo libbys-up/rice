@@ -252,7 +252,7 @@ detail.
 \file{Rice/Codegen/C/ToH.curry} & a module's \file{.h}: tags, symbols,
   \code{make_X}, \code{set_X} \\
 \file{Rice/Codegen/C/ToC.curry} & a module's \file{.c}: the code for every
-  function; and \file{main.c} \\
+  function; and \file{rice-main.c} \\
 \file{Rice/Util.curry} & sorted-list set operations, variables, fresh names \\
 \bottomrule
 \end{longtable}
@@ -425,7 +425,7 @@ gets a directory \file{.curry/rice-1.0.0/} next to its source (Prelude's is
 \file{.rimports} & just the module's imports \\
 \file{.h}, \file{.c} & the generated C \\
 \file{obj-<hash>/} & object files, one directory per compiler and flags \\
-\file{main.c} & for the root module only \\
+\file{rice-main.c} & for the root module only \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -805,10 +805,10 @@ generated code.  Its \code{_hnf} is written by hand in
 
 \subsection{Building the executable}
 
-\code{buildExecutable} writes \file{main.c} for the root module, compiles every
-module's \file{.c}, the runtime's \file{.c} files and \file{main.c} with
+\code{buildExecutable} writes \file{rice-main.c} for the root module, compiles every
+module's \file{.c}, the runtime's \file{.c} files and \file{rice-main.c} with
 \code{clang -std=c11 -O2}, and links them into an executable named after the
-root module.  \file{main.c} initializes the trail, the heap and the machine,
+root module.  \file{rice-main.c} initializes the trail, the heap and the machine,
 builds a node for \code{main}, and hands it to a driver: \code{run_io}, which
 runs an \code{IO} action once, or, with \code{--interactive}, \code{nf_all},
 which prints every value \code{main} has (\S\ref{sec:drivers}).

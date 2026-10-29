@@ -108,6 +108,8 @@ run_one() {
   local work="$SCRATCH/${rel%.curry}"
   rm -rf "$work"; mkdir -p "$work"
   cp "$src" "$work/"
+  # A test's own modules, if it imports any, are in <name>.modules/.
+  [ -d "${src%.curry}.modules" ] && cp -R "${src%.curry}.modules/." "$work/"
 
   local run_timeout=$RUN_TIMEOUT
   { [ "$status" = "SLOW" ] || [ "$status" = "XSLOW" ]; } && run_timeout=$SLOW_RUN_TIMEOUT
@@ -307,7 +309,7 @@ run_one() {
 
 while IFS= read -r -d '' f; do
   run_one "$f"
-done < <(find "$PROGRAMS" -name '*.curry' -print0 | sort -z)
+done < <(find "$PROGRAMS" -name '*.modules' -prune -o -name '*.curry' -print0 | sort -z)
 
 echo
 echo "== Summary =="

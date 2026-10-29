@@ -72,6 +72,10 @@ tests/
   .bench/           gitignored scratch space bench.sh uses; safe to delete
 ```
 
+A test that imports modules of its own keeps them in a sibling directory
+`<name>.modules/`, which `run.sh` copies next to the test; the modules in
+it aren't tests themselves.
+
 Each `<name>.curry` may have a sibling `<name>.expected` — the golden,
 exact-match stdout. No `<name>.expected`
 yet just means "hasn't been reviewed and recorded" — `run.sh` still requires

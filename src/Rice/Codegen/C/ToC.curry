@@ -60,7 +60,7 @@ mainDriverCall :: MainMode -> CStmt
 mainDriverCall Standalone  = scall "run_io" [root]
 mainDriverCall Interactive = scall "nf_all" [root]
 
---- The generated `main.c`: defines the runtime's globals, initializes the
+--- The generated `rice-main.c`: defines the runtime's globals, initializes the
 --- runtime, builds a node for the root module's `main`, and runs it with
 --- the driver for `mode`.
 writeMain :: String -> MainMode -> Doc
@@ -146,7 +146,7 @@ showBody gen block = do
     -- root, so the collector can run here.
     [ scall "GC_SAFE_POINT" [root, text "sp"]
     , scall "REWRITE_STAMP" []
-    , scall "debug"      [text "LOW", dquotes (text ("HNF " ++ gLabel gen ++ ":\\n"))]
+    , scall "debug"      [text "LOW", cstring "HNF %s:\n", cstring (gLabel gen)]
     , scall "debug_expr" [text "LOW", root]
     ] ++ b
 
@@ -304,7 +304,7 @@ caseDecls gen k fname slotReps =
       .= carray [ dinit "code" (text fname)
                 , dinit "size" (int (length slotReps))
                 , dinit "reps" (text (fname ++ "_reps"))
-                , dinit "name" (dquotes (text (gLabel gen ++ " case " ++ show k))) ]
+                , dinit "name" (cstring (gLabel gen ++ " case " ++ show k)) ]
   ]
  where
   repLit r = text $ case r of
