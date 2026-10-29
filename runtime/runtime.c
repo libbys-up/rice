@@ -3,6 +3,7 @@
 #include<stdlib.h>
 #include<string.h>
 #include<stdint.h>
+#include<math.h>
 #include "runtime.h"
 
 #include "node.h"
@@ -747,6 +748,96 @@ char* appendEscaped(char* buf, char c, char quote)
 // Print one character of a Char or String literal, escaped like derived Show.
 static void printEscapedChar(char c, char quote);
 
+/* Writes x into buf (at least 32 bytes) the way Curry (and Haskell) show a
+ * Float: the fewest digits that read back as exactly x, in decimal notation
+ * from 0.1 up to 10^7 (0.1, 3.5, 7.0) and in scientific notation outside
+ * that (1.0e-2, 1.0e7).
+ * KiCS2 shows floats this way, and so must we: generated C writes float
+ * literals with show, so a lossy show would change a compiled program's
+ * constants.
+ */
+void showFloat(char* buf, double x)
+{
+    if(isnan(x))
+    {
+        strcpy(buf, "NaN");
+        return;
+    }
+    if(isinf(x))
+    {
+        strcpy(buf, x > 0 ? "Infinity" : "-Infinity");
+        return;
+    }
+    char* out = buf;
+    if(signbit(x))
+    {
+        *out++ = '-';
+        x = -x;
+    }
+    if(x == 0)
+    {
+        strcpy(out, "0.0");
+        return;
+    }
+    // The shortest %e form that reads back as x: "d.ddde+XX".
+    char e_form[32];
+    for(int prec = 0; prec < 17; prec++)
+    {
+        snprintf(e_form, sizeof e_form, "%.*e", prec, x);
+        if(strtod(e_form, NULL) == x)
+        {
+            break;
+        }
+    }
+    // Its digits, without the point or trailing zeros, and its exponent,
+    // with x = 0.digits * 10^exp.
+    char digits[24];
+    int nd = 0;
+    char* p = e_form;
+    for(; *p != 'e'; p++)
+    {
+        if(*p != '.')
+        {
+            digits[nd++] = *p;
+        }
+    }
+    while(nd > 1 && digits[nd - 1] == '0')
+    {
+        nd--;
+    }
+    digits[nd] = '\0';
+    int exp = atoi(p + 1) + 1;
+    if(x >= 0.1 && x < 1e7)
+    {
+        if(exp <= 0)
+        {
+            out += sprintf(out, "0.");
+            for(int i = 0; i < -exp; i++)
+            {
+                *out++ = '0';
+            }
+            strcpy(out, digits);
+        }
+        else if(nd <= exp)
+        {
+            out += sprintf(out, "%s", digits);
+            for(int i = nd; i < exp; i++)
+            {
+                *out++ = '0';
+            }
+            strcpy(out, ".0");
+        }
+        else
+        {
+            out += sprintf(out, "%.*s.%s", exp, digits, digits + exp);
+        }
+    }
+    else
+    {
+        sprintf(out, "%c.%se%d", digits[0], nd > 1 ? digits + 1 : "0", exp - 1);
+    }
+}
+
 // Prints a raw value the way Curry would show a literal of its type.
 static void print_raw(union field v, FieldRep r)
 {
@@ -761,8 +852,12 @@ static void print_raw(union field v, FieldRep r)
             printf("'");
             break;
         case R_FLOAT:
-            printf("%lf", v.f);
+        {
+            char buf[32];
+            showFloat(buf, v.f);
+            printf("%s", buf);
             break;
+        }
         case R_PTR:
             // Not a raw value; callers check the rep first.
             printf("<ptr %p>", (void*)v.n);
@@ -978,9 +1073,11 @@ void check_layout(union field n, bool allow_null, const char* where)
 //////////////////////////////////////////////////////////////////////////////
 // normal forms
 //////////////////////////////////////////////////////////////////////////////
+// The program's output so far comes first, then the message, on stderr.
 void error(char* msg, union field n)
 {
-    printf("Error: %s\n", msg);
+    fflush(stdout);
+    fprintf(stderr, "Error: %s\n", msg);
     print_expr(n);
     exit(1);
 }
@@ -1148,6 +1245,7 @@ void run_io(union field expr)
     print_opt_stats();
     if(TAG(expr) == FAIL_TAG)
     {
+        fflush(stdout);
         fprintf(stderr, "Program failed.\n");
         exit(1);
     }

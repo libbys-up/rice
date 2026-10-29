@@ -750,6 +750,8 @@ char* toCStr(union field string);
 // Escape one character the way Curry's derived Show does (runtime.c).
 // Shared by ext/Prelude.c's show*Literal and runtime.c's printing of solutions.
 char* appendEscaped(char* buf, char c, char quote);
+// Writes x into buf (at least 32 bytes) as Curry's show does.
+void showFloat(char* buf, double x);
 
 
 static Symbol fail_symbol    = { .tag = FAIL_TAG,     .arity = 0, .name = "FAIL",    .hnf = &CTR_hnf };

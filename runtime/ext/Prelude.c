@@ -40,7 +40,7 @@ field toCurryString(char* str)
     while(end != str)
     {
         end--;
-        field c = make_Prelude__Char((field)(unsigned long)(*end), 0);
+        field c = make_Prelude__Char((field)(unsigned long)(unsigned char)(*end), 0);
         string = make_Prelude___CO(c, string, 0);
     }
     return string;
@@ -227,7 +227,7 @@ RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
 
 /* bindIO m f: m is child 0, and f is child 1.
  *
- * Two surprising things here.
+ * Three surprising things here.
  *
  * First, we fully settle m, chasing forwards, not just one HNF call.
  * A do block evaluates one step at a time, so m often lands on a FORWARD
@@ -242,6 +242,8 @@ RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
  * restore it, and run the same program again (an extra "SOLUTION: ()").
  * So we record the trail's height before we start, and once root is in head normal form
  * we drop everything above it with trail_pop_to (which doesn't restore anything).
+ *
+ * Third, if m fails, the bind fails, whatever f is.
  *
  * On the machine: bind_k settles m with frame [root, m, nondet, cutoff].
  * Then that frame is replaced by a commit frame [cutoff] while `apply f m` runs,
@@ -276,6 +278,15 @@ static RICE_CC void bind_k(union field _root, Frame* sp)
     EVAL_OR_CONTINUE(m, 1, nondet, 2);
     long cutoff = SLOT(3).i;
     sp = frame_pop(sp);
+    if(TAG(m) == FAIL_TAG)
+    {
+        // A failed action fails the whole bind. Handing the failure to f
+        // would lose it whenever f ignores its argument, as `>>` does, and
+        // the program would carry on as if the action had run.
+        trail_node(root, nondet);
+        fail(root);
+        RETURN();
+    }
     sp = frame_push(sp, &commit_info);
     SLOT(0).i = cutoff;
     set_apply1(root, child_at(root, 1), m);
@@ -349,7 +360,7 @@ static void Prelude__prim_USshowFloatLiteral_impl(void)
 {
     field root = rice_root;
     char buf[64];
-    snprintf(buf, sizeof(buf), "%f", child_at_f(root, 0));
+    showFloat(buf, child_at_f(root, 0));
     overwrite_root(root, toCurryString(buf));
 }
 
@@ -1114,13 +1125,82 @@ static void Prelude__catch_impl(void)
 // whose rest is empty, so parsing a prefix is correct for them,
 // and for any program that calls these directly.
 //
-// Escapes are the exact inverse of appendEscaped (runtime.c):
-// the same named escapes, and the same decimal \NNN fallback.
+// Escapes are Haskell's, so we read what any Curry system writes (the front
+// end writes '\DEL', say), not only what appendEscaped (runtime.c) writes:
+// the one-letter escapes, the ASCII control names (\NUL ... \US, \SP,
+// \DEL), \^A-style controls, and decimal, \x hex and \o octal codes.
 // ----------------------------------------------------------------------
 
 static bool isAsciiDigit(char c)
 {
     return c >= '0' && c <= '9';
+}
+
+static bool isHexDigit(char c)
+{
+    return isAsciiDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static bool isOctDigit(char c)
+{
+    return c >= '0' && c <= '7';
+}
+
+static int digitValue(char c)
+{
+    return isAsciiDigit(c) ? c - '0' : (c | 0x20) - 'a' + 10;
+}
+
+// A code in `base` at `p`, as many digits as there are. Returns how many
+// digits it read, 0 if there were none. Rice's Char is a byte, so a code
+// above 255 keeps only its low byte.
+static int parseNumericEscape(const char* p, int base, char* out)
+{
+    long val = 0;
+    int n = 0;
+    while(base == 16 ? isHexDigit(p[n])
+          : base == 8 ? isOctDigit(p[n])
+          : isAsciiDigit(p[n]))
+    {
+        val = val * base + digitValue(p[n]);
+        n++;
+    }
+    *out = (char)val;
+    return n;
+}
+
+// The ASCII control names, in code order, then SP and DEL. SO comes after
+// SOH, so a longest match is needed: "\SOH" is SOH, not SO then 'H'.
+static const char* const asciiNames[] = {
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL",
+    "BS",  "HT",  "LF",  "VT",  "FF",  "CR",  "SO",  "SI",
+    "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN", "ETB",
+    "CAN", "EM",  "SUB", "ESC", "FS",  "GS",  "RS",  "US",
+};
+
+static int parseNamedEscape(const char* p, char* out)
+{
+    int best = 0;
+    for(int i = 0; i < 32; i++)
+    {
+        int len = (int)strlen(asciiNames[i]);
+        if(len > best && strncmp(p, asciiNames[i], len) == 0)
+        {
+            best = len;
+            *out = (char)i;
+        }
+    }
+    if(best == 0 && strncmp(p, "SP", 2) == 0)
+    {
+        *out = ' ';
+        best = 2;
+    }
+    if(best == 0 && strncmp(p, "DEL", 3) == 0)
+    {
+        *out = 127;
+        best = 3;
+    }
+    return best;
 }
 
 // Decodes the escape starting right after the backslash at `p` (not
@@ -1160,20 +1240,27 @@ static int parseEscape(const char* p, char* out)
         case 'v':
             *out = '\v';
             return 1;
+        case '^':
+            // \^@ is 0, \^A is 1, ..., \^_ is 31
+            if(p[1] >= '@' && p[1] <= '_')
+            {
+                *out = (char)(p[1] - '@');
+                return 2;
+            }
+            return 0;
+        case 'x':
+        case 'o':
+        {
+            // the letter, then the digits; no digits is malformed
+            int n = parseNumericEscape(p + 1, *p == 'x' ? 16 : 8, out);
+            return n == 0 ? 0 : n + 1;
+        }
         default:
             if(isAsciiDigit(*p))
             {
-                int val = 0;
-                int n = 0;
-                while(n < 3 && isAsciiDigit(p[n]))
-                {
-                    val = val * 10 + (p[n] - '0');
-                    n++;
-                }
-                *out = (char)val;
-                return n;
+                return parseNumericEscape(p, 10, out);
             }
-            return 0;
+            return parseNamedEscape(p, out);
     }
 }
 
@@ -1244,6 +1331,12 @@ static StringParse tryParseStringLiteral(const char* s)
             return (StringParse){ false, NULL, s };
         }
         char c;
+        if(p[0] == '\\' && p[1] == '&')
+        {
+            // \& is empty: it separates a numeric escape from a digit.
+            p += 2;
+            continue;
+        }
         if(*p == '\\')
         {
             int n = parseEscape(p + 1, &c);

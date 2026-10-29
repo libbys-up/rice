@@ -24,6 +24,9 @@ tests/.run/
 # tests/bench.sh's per-config scratch dirs and results.tsv
 tests/.bench/
 
+# tests/bootstrap.sh's copies of the tree and logs
+tests/.bootstrap/
+
 # tests/optbench.sh's results and builds
 tests/.optbench*/
 

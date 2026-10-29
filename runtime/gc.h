@@ -31,7 +31,9 @@
 extern size_t rice_heap_threshold;
 
 // The threshold never drops below 64MB.
+#ifndef GC_MIN_THRESHOLD
 #define GC_MIN_THRESHOLD ((size_t)64 << 20)
+#endif
 
 /* Copies everything reachable from 
  *  * root
