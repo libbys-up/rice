@@ -46,7 +46,15 @@ size_t rice_heap_threshold = GC_MIN_THRESHOLD;
 #endif
 
 // allocate about 4MB for each chunk.
+// GC_STRESS uses 64KB chunks. It collects at every safe point, and each
+// collection zeroes a fresh chunk and poisons the old ones, so with 4MB
+// chunks that cost about 1ms per safe point. Small chunks also take the
+// slow path and the own-chunk path for big spill arrays far more often.
+#ifdef GC_STRESS
+#define CHUNK_BYTES ((size_t)64 << 10)
+#else
 #define CHUNK_BYTES ((size_t)4 << 20)
+#endif
 
 /* Every chunk ever allocated, newest first, so the collector can find and
  * free them. The header is the first bytes of the chunk itself.

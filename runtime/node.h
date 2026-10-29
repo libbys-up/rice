@@ -2,6 +2,7 @@
 #define NODE_H
 
 #include<stdbool.h>
+#include<stdint.h>
 
 /* A Node represents a single expression node.
  * Our heap is really a graph defined by these nodes.
@@ -98,27 +99,17 @@ typedef enum
 #  define RICE_CC
 #endif
 
-/* Used by machine.h/c
- * We compute a node into head normal form using an _hnf function.
- * This will do the case loop in a needed position, and jump to the appropriate branch.
- * This used to just be a normal C function call,
- * but we ran into problems with the stack.
- * The OS has a defined stack size, so if we do normal C calls,
- * we hit it pretty fast with recursive functions.
- *
- * The solution here is to manage our own stack.
- * To do this we define a stack frame (a code pointer and arguments)
- * 
- * That means our actual function calls need 
- *  1. The root of the node we're reducing
- *  2. the stack pointer to the stack we defined.
- * These can both be passed as registers.
- * C's normal calling conventions will do that for us,
- * so we can still use a C function, we're just passing our stack as an argument.
- *
- * Code is this function signature,
- * so all of our _hnf functions will now have the signature:
+/* Machine code (machine.h): an _hnf function, a case block,
+ * or a continuation.
+ * We don't evaluate with ordinary C calls, because the C stack is too small
+ * for deeply recursive programs. Instead we keep our own stack of frames,
+ * and machine code only ever jumps.
+ * So every piece of machine code takes
+ *  1. root, the node we're reducing, and
+ *  2. sp, the top of our stack,
+ * which C passes in registers:
  * void foo_hnf(union field root, struct Frame* sp)
+ * See the developer's manual, "The evaluation machine".
  */
 struct Frame;
 typedef RICE_CC void (*Code)(union field root, struct Frame* sp);
@@ -209,10 +200,15 @@ static inline FieldRep child_rep(const Symbol* s, int i)
  *            then we don't need to record any rewrites onto the trail.
  *            This is under an #if because we don't want to do this bookkeeping
  *            if the optimization is turned off.
+ *
+ * missing, nondet, gc_bits and epoch share the first word, so a node is
+ * six words either way. That's why missing is only 16 bits: as an int, it
+ * would push epoch, and so every node, out to a seventh word.
+ * Nodes are most of what a program allocates, so that costs time everywhere.
  */
 typedef struct Node
 {
-    int missing;
+    int16_t missing;
     bool nondet;
     unsigned char gc_bits;
 #if OPT_EPOCH_TRAIL
@@ -221,5 +217,8 @@ typedef struct Node
     Symbol* symbol;
     union field children[4];
 } Node;
+
+_Static_assert(sizeof(Node) == 6 * sizeof(union field),
+               "a node must stay six words; see the comment above");
 
 #endif // NODE_H

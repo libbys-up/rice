@@ -145,7 +145,8 @@ static inline void HNF(union field root)
 
 
 
-/* The backtracking optimizations (src/backtracking-optimizations.md).
+/* The backtracking optimizations (developer's manual, "Making backtracking
+ * cheaper"; the soundness arguments are in backtracking_proofs.md).
  * Each one is its own 0/1 flag so we can turn them on and off independently
  * (-DOPT_EPOCH_TRAIL=1 on the command line, or rice's RICE_CFLAGS).
  *  * OPT_NONDET_TRAIL (#1): only trail a rewrite if it read something nondeterministic.
@@ -191,7 +192,7 @@ static inline void HNF(union field root)
 /* #1 and #5 are each sound alone, but not together without the barrier.
  * #1 leaves an old node's deterministic rewrite untrailed,
  * so it can end up pointing at a young node whose rewrite #5 didn't trail
- * (opt_conflict.md, counterexamples/StaleApply.curry).
+ * (tests/programs/regressions/stale_apply.curry).
  * The barrier makes that young node look as old as the node it hangs from.
  * #5 without #1 is proved with the barrier off, so it's only on by default with both.
  */
@@ -221,6 +222,10 @@ typedef struct
     unsigned long skipped_nondet;       // ... and #1 said no
     unsigned long skipped_epoch;        // ... and #5 said no
     unsigned long barrier_lowered;      // nodes' stamps the barrier lowered (per rewrite)
+    unsigned long lowered_nodes;        // nodes built with a lowered stamp
+    unsigned long lowered_rewritten;    // those nodes that were ever rewritten
+    unsigned long lowered_rewrites;     // later rewrites of those nodes
+    unsigned long lowered_trailed;      // ... that got a trail entry
     unsigned long trail_pushes;         // every trail entry, of any kind
     unsigned long choice_points;        // trail entries undo() stops at
     unsigned long undos;                // calls to undo() that popped something
@@ -237,6 +242,13 @@ typedef struct
 } OptStats;
 extern OptStats opt_stats;
 #define STAT(name) (opt_stats.name++)
+
+// A second bit in gc_bits, only in OPT_STATS builds: the barrier built this
+// node with a stamp older than now (stamp_node), so we can count what its
+// later rewrites cost.  The collector only reads and clears GC_TRAILED.
+#define STAT_LOWERED 2
+// ... and has been rewritten since.
+#define STAT_REWRITTEN 4
 #else
 #define STAT(name) ((void)0)
 #endif
@@ -334,7 +346,7 @@ static inline bool settle_step(union field* x, bool* nondet)
  *    SCOPED_LOAD_CUTOFF(slot) names that slot; nothing is read until a retry.
  *    The cutoff is per case, not per function: the retry only redoes this case's dispatch,
  *    so it can't flip a choice that an enclosing case's dispatch read
- *    (backtracking_proofs.md, #3 rule 2; ScopedStaleDispatch.curry).
+ *    (backtracking_proofs.md, #3 rule 2; regressions/scoped_stale_dispatch.curry).
  *  * The cutoff is recorded lazily. SCOPED_MARK_CUTOFF goes first in the
  *    FUNCTION, CHOICE and FREE branches, the only ones that can push a choice.
  *    Until one runs, the trail can grow only by path compression's retargets
@@ -342,9 +354,7 @@ static inline bool settle_step(union field* x, bool* nondet)
  *    height then is as good a cutoff as the height at entry.
  *    The slot holds height + 1, or 0 (frame_push's zero) while unmarked.
  *    A case that never marked pushed no choice, so its retry has nothing to flip
- *    and is skipped; saving the cutoff on every case entry made #3 cost about
- *    20% on deterministic programs (TakPeano).
- *    (Proof pending: ~/curry/papers/unif/proofs/lazy_cutoff.md.)
+ *    and is skipped. That way a deterministic case pays nothing for #3.
  *  * SCOPED_RETRY(scrutinee) is used where a case's scrutinee is FAIL
  *    or a constructor the case doesn't handle.
  *    If undo() finds a choice to flip, we reset the scrutinee to the case's
@@ -388,7 +398,7 @@ static inline bool settle_step(union field* x, bool* nondet)
  * Both always trail, whatever nondet says (backtracking_proofs.md, #3 rule 1).
  * The proof of #3 needs the next undo to restore a scope's fail write,
  * and the flag here is only this case's own, which can be false
- * while the case's root depends on a choice (ScopedNestedND.curry).
+ * while the case's root depends on a choice (regressions/scoped_nested_nd.curry).
  */
 #define SCOPED_RESAVE(root_node) save_copy(root_node)
 #define SCOPED_FAIL_TRAIL(nondet_var, root_node) save_copy(root_node)
@@ -477,10 +487,26 @@ static inline void trail_node(union field root, bool nondet)
 {
     nondet |= root.n->nondet;
     STAT(trail_decisions);
-    if(needs_trail(root, nondet))
+    bool trailed = needs_trail(root, nondet);
+    if(trailed)
     {
         save_snapshot(root);
     }
+#if OPT_STATS
+    if(root.n->gc_bits & STAT_LOWERED)
+    {
+        if(!(root.n->gc_bits & STAT_REWRITTEN))
+        {
+            STAT(lowered_rewritten);
+            root.n->gc_bits |= STAT_REWRITTEN;
+        }
+        STAT(lowered_rewrites);
+        if(trailed)
+        {
+            STAT(lowered_trailed);
+        }
+    }
+#endif
     root.n->nondet = nondet;
 }
 
@@ -548,6 +574,13 @@ __attribute__((always_inline))
 static inline union field stamp_node(union field n, unsigned int stamp)
 {
     n.n->epoch = stamp;
+#if OPT_STATS
+    if(stamp < current_epoch)
+    {
+        n.n->gc_bits |= STAT_LOWERED;
+        STAT(lowered_nodes);
+    }
+#endif
     return n;
 }
 
@@ -725,7 +758,7 @@ static Symbol forward_symbol = { .tag = FORWARD_TAG,  .arity = 1, .name = "->", 
 static Symbol free_symbol    = { .tag = FREE_TAG,     .arity = 0, .name = "free",    .hnf = &CTR_hnf };
 static Symbol apply_symbol   = { .tag = FUNCTION_TAG, .arity = 0, .name = "apply",   .hnf = &apply_hnf };
 
-// Placeholder for case shortcutting (archetecture.md's "Case Shortcutting (RET)").
+// Placeholder for case shortcutting (developer's manual, "Planned work").
 // That isn't implemented yet, and nothing calls make_restore,
 // so the fields here don't have to be right yet.
 static Symbol backup_symbol  = { .tag = FAIL_TAG,     .arity = 0, .name = "RET",     .hnf = &CTR_hnf };

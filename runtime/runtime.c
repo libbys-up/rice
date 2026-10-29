@@ -33,6 +33,10 @@ void print_opt_stats(void)
     PRINT_STAT(skipped_nondet);
     PRINT_STAT(skipped_epoch);
     PRINT_STAT(barrier_lowered);
+    PRINT_STAT(lowered_nodes);
+    PRINT_STAT(lowered_rewritten);
+    PRINT_STAT(lowered_rewrites);
+    PRINT_STAT(lowered_trailed);
     PRINT_STAT(trail_pushes);
     PRINT_STAT(choice_points);
     PRINT_STAT(undos);
