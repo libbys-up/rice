@@ -1,169 +1,159 @@
-# Current state (2026-10-11)
+# Current state (2026-10-28)
 
-Work in progress: the garbage collector, stage 6 of the evaluation-stack
-plan. Design, staging and measurements: `src/gc-plan.md`. Leak analysis,
-soundness arguments and model-level checks:
-`~/curry/papers/unif/proofs/LEAKS.md`. (This file's previous contents,
-about the scoped-retry fixes, are in git history at `cf250f0`.)
+Work in progress: measuring and tuning the backtracking optimizations.
+Branch `phase1-codegen-and-runtime`, nothing pushed. Newest first:
 
-## Where things stand
+- `3916ca7`: #3 records its cutoff lazily; scaled-up bench programs.
+- `62ecb1c`: the #2 tail-dispatch flag; old_rice, KiCS2 and PAKCS sets.
+- `42c0fcd`: optbench with real forward chains and interleaved timing.
+- `73fd88a`: the optimizations fixed per the proofs; path compression.
 
-Branch `phase1-codegen-and-runtime`, nothing pushed. Collector commits,
-newest first:
+The previous contents of this file (the garbage collector, stage 6) are in
+git history at `eddacd5`. Leak 2 there (the trail keeping snapshots alive,
+`gc/nondet_pending` XFAIL) is still open. One thing in its plan changed:
+step 1 lists `SCOPED_SAVE_CUTOFF` as where a case frame holds a trail
+height. That macro is gone. The cutoff slot (`cutS` in `enterCase`) now
+holds height + 1, or 0 while unmarked, so a height remap must leave 0
+alone and remap `slot - 1`.
 
-- `950fb38`: skips forwarding chains (leak 1), adds `-- rice-maxrss: N`
-  to `tests/run.sh`, and adds `tests/programs/gc/`.
-- `b120628`: the precise copying collector.
-- `2687b36`: bump allocation from heap chunks.
+Suite on 2026-10-28, default flags, before the two commits that follow
+`3916ca7`: 120 pass, 13 xfail, 0 fail (not rerun with all flags on).
+Suites at `3916ca7`: `tests/run.sh` 119 pass, 13 xfail, 0 fail, both with
+the default flags and with all flags on. `regressions/fieldrep_debug_print`
+failed to compile once with an empty build log and passed on three reruns,
+the same kind of transient failure copy_chain had once.
 
-Stages 1 (allocator), 2 (collector) and 3 (memory-bounded tests) are
-done. Stage 4 (cleanup) hasn't started.
+## The optimizations
 
-Suites at `950fb38`:
+| # | flag | default | verdict so far |
+|---|---|---|---|
+| 1 | `OPT_NONDET_TRAIL` | on | Big win almost everywhere; less clear on SearchMAC (see the barrier). |
+| 2 | `OPT_TAIL_DISPATCH` | on | Little effect, never slower. |
+| 3 | `OPT_SCOPED_BACKTRACK` | on | Big win on the FunPats programs. With the lazy cutoff, its fixed cost is gone. |
+| 4 | `OPT_COPY_COLLAPSE` | off | Mostly redundant with path compression. Candidate to drop. |
+| 5 | `OPT_EPOCH_TRAIL` | off | Net win since nodes went back to six words (2026-10-28 rerun below). Candidate to turn on. |
+| 6 | `OPT_PATH_COMPRESS` | off | Useful; covers most of what #4 does. |
+| – | `OPT_WRITE_BARRIER` | on iff #1 and #5 | Required for #1+#5 soundness. |
 
-| Run | Result |
+All flags on: `-DOPT_NONDET_TRAIL=1 -DOPT_SCOPED_BACKTRACK=1
+-DOPT_COPY_COLLAPSE=1 -DOPT_EPOCH_TRAIL=1 -DOPT_PATH_COMPRESS=1
+-DOPT_TAIL_DISPATCH=1`. Add `-DOPT_STATS=1` for event counts
+(`runtime.h`'s `OptStats`, printed at exit).
+
+The bench is `tests/optbench.sh` (header comment has usage). The report is
+`tests/.optbench/report.md`. Sets use `tests/programs/scaled/<set>/` in
+place of the original program when one exists.
+
+## Done 2026-10-28: #5's fixed cost on deterministic programs
+
+Most of it was the node size. `Node.missing` was an `int`, so with #5 on the
+4-byte `epoch` pushed `symbol` to offset 16 and every node grew from 48 to 56
+bytes. `missing` is `int16_t` now, nodes are 48 bytes with or without #5, and
+`node.h` asserts it. All flags on, best of 7–9 runs:
+
+| program | 56 bytes | 48 bytes | #5 off |
+|---|---|---|---|
+| ReverseBuiltin | 0.146 s | 0.110 s | 0.107 s |
+| PrimesBuiltin | 3.308 s | 3.156 s | 3.177 s |
+| `scaled/pakcs/mergesort_or` | 0.519 s | 0.481 s | 0.480 s |
+| TakPeano | 1.094 s | 1.085 s | 1.076 s |
+
+What's left is within noise on these four. The other suspects (stamping each
+allocation, `rewrite_stamp`, the epoch compare in `needs_trail`) weren't
+profiled separately.
+
+Rerun of optbench (`--configs=all,-epoch,+nondet,+nondet+epoch,+epoch`,
+report in `tests/.optbench-epoch/report.md`). What #5 adds on top of
+everything else, `-epoch` → `all`:
+
+| program | `-epoch` | `all` |
+|---|---|---|
+| fib | 0.656 s | 0.129 s |
+| young_nodes | 0.414 s | 0.228 s |
+| SearchKanMis | 0.682 s | 0.386 s |
+| ExpVarFunPats | 0.306 s | 0.243 s |
+| SearchSMM | 5.415 s | 5.198 s |
+| reverse_builtin | 0.552 s | 0.580 s |
+| QueensUser | 4.055 s | 4.116 s |
+| SearchMAC | 0.313 s | 0.315 s |
+
+Nothing else moves outside noise. The worst case is reverse_builtin at
++5%, so #5 (with the barrier, as `all` has it) looks safe to turn on by
+default. Not done yet: it's a default change, so it wants a full suite run
+with the new defaults first.
+
+## Settled 2026-10-28: the SearchMAC write barrier
+
+On SearchMAC (`scaled/kics2/SearchMAC`, goal 40 39) #1+#5 trails 4.25M
+rewrites, against 0.82M for #5 alone, because the barrier stamps nodes old.
+We've accepted this. Trailing only the rewrites that must be undone isn't
+decidable, and the barrier was always an approximation; a better rule would
+be original research (and need the proofs in `backtracking_proofs.md`,
+"The write barrier", extended).
+
+The pattern, minimal:
+
+```curry
+total :: [Int] -> Int
+total = foldl (+) 0
+
+main :: Int
+main = c `seq` total (map (+ c) [1 .. 100000])
+ where c = 0 ? 1
+```
+
+`map (+ c) [1..n]` is created before the choice and walked after it. Each
+rewrite of the list is deterministic, so #1 doesn't trail it, and the barrier
+stamps what it builds as old as the cell it came from, all the way down. Every
+`x + c` reads the choice, so its rewrite must be trailed, and it's old, so #5
+can't skip it: #1+#5 trails exactly what #1 alone does (1.0M), and #5 skips
+nothing. #5 alone trails the first old cell instead, and everything built after
+it is young (0.6M). A per-rewrite choice between the two (trail an old root
+whose new value holds unevaluated calls) might keep #5's skips, but mixing the
+rules is what the proofs would have to cover.
+
+### Measured 2026-10-28: which stamped nodes cost anything
+
+New `OPT_STATS` counters (`lowered_nodes`, `lowered_rewritten`,
+`lowered_rewrites`, `lowered_trailed`; a stats-only bit in `gc_bits` marks a
+node built with a lowered stamp). SearchMAC 40 39, all flags:
+
+| counter | value |
 |---|---|
-| `tests/run.sh` | 70 pass, 4 xfail, 0 fail |
-| `tests/run.sh --slow` | 83 pass, 0 fail |
-| `RICE_CFLAGS=-DOPT_SCOPED_BACKTRACK=0 tests/run.sh regressions` | 37/37 |
-| `RICE_CFLAGS=-DGC_STRESS tests/run.sh` | no crashes or wrong output; 14 long tests time out |
+| `barrier_lowered` (rewrites that lowered a stamp) | 14.15M |
+| `lowered_nodes` (nodes built with a lowered stamp) | 7.62M |
+| `lowered_rewritten` (of those, ever rewritten) | 5.51M (72%) |
+| `lowered_rewrites` (rewrites of them) | 13.75M |
+| `lowered_trailed` (of those, trailed) | 3.90M |
+| `trailed_rewrites`, all | 4.25M (0.82M with #5 alone) |
 
-Benchmarks: `cent`, `primesort`, `sort` and `tailsum` are 11-22% faster
-than without collection, with peak memory under 80 MB (was up to
-6.5 GB). `reverse_builtin` is 49% slower (see below).
+So 92% of #1+#5's trail entries are rewrites of stamped nodes, and the extra
+~3.4M snapshots are the extra ~3M allocations (18.3M vs 15.3M). Stamping only
+nodes that are later rewritten wouldn't help: the 28% that never are cost
+nothing already. The cost is thunks built under an old deterministic root
+that are later evaluated after reading a choice. `lowered_trailed` is an upper
+bound on what the barrier adds, since some of those nodes would be old
+anyway. Reducing it needs a different sound rule, which means proof work.
 
-## Leak 1: forwarding chains (fixed, `950fb38`)
+## Proof work pending
 
-**What.** A long IO loop kept every step alive. Each step's `bindIO`
-node ends up forwarding to the next, and `run_io` roots the first, so a
-chain of FORWARD nodes grew one link per step. `gc/io_loop` peaked at
-927 MB.
+- None. #3's lazy cutoff (`3916ca7`) is a reasonable extension of what's
+  proved, not something the proofs need to cover.
+- Path compression's retargets can be trailed before a case marks its
+  cutoff; `~/curry/papers/unif/proofs/lazy_cutoff.md` covers why that's
+  harmless.
 
-**Fix.** `gc.c`'s `trace_child` skips a FORWARD node on any pointer
-*stored in a heap node* (including trail snapshots) if:
+## Bench notes
 
-1. its nondet flag is clear, and
-2. it is on no trail entry. The `GC_TRAILED` bit, in `Node`'s padding,
-   is set on every trail `lhs` for the length of a collection.
+- Rice has no encapsulated search, so scaled programs print few answers.
+  The scaled programs' goldens were checked against KiCS2. SearchMAC 40 39
+  took 30 min under KiCS2. `mergesort_or` was checked in Python.
+- A freshly linked binary's first run is about 0.25 s slow; optbench
+  repeats runs, but a one-off timing should warm up first.
+- Scratch timing helpers from 2026-10-27 (`try.sh`, `exp3/time.py`) were in
+  the session scratchpad and are gone; optbench covers the same ground.
 
-Roots (the `root` argument, frame slots, C roots, the trail) still
-point at the node itself. `io_loop` now peaks at 78 MB and runs 34%
-faster. The five benchmarks are unchanged.
-
-**Verified.** The argument is in `LEAKS.md`. It rests on three runtime
-properties: evaluation never writes a FORWARD node, readers chase
-forwards, and `undo` writes only trailed nodes. Those were checked by
-reading the code, not proved.
-
-- Rocq lemmas (`GcLeaks.v`) show that skipping a forward commutes with
-  `undo` and that following forwards ends at the same place.
-- The model's fuzzer (`GcBench.v`) collects before every step and
-  poisons whatever it considers dead. 400 seeds under each of 7 flag
-  sets: no differences.
-- Dropping condition 2 is caught (4 seeds under all optimizations).
-- Dropping condition 1 never changed a result in the model. It is kept
-  because of the argument: readers OR in the flag, and losing it could
-  leave a dependent write untrailed under #1.
-
-## Leak 2: the trail keeps snapshots alive (open)
-
-**What.** `gc/nondet_pending` (XFAIL in `tests/manifest.txt`): a loop
-running while a choice is pending peaks at 824 MB for 200k iterations,
-and grows with the loop. Every in-place rewrite of the loop's root
-depends on the choice, so it's trailed. The collector traces every trail
-entry, so every snapshot, and the list cell and accumulator it points
-to, stays alive.
-
-**Ruled out:**
-
-- **A weak trail** (drop entries whose node is unreachable): implemented,
-  measured and reverted. It dropped 6% of entries in this test and none
-  elsewhere in the suite, and cost a hash over the trail per collection.
-- **Keeping only the oldest entry per node** between stop points:
-  necessary but not enough. The oldest snapshot still points at the
-  list's head, whose *current* contents (the first cons) keep the whole
-  consumed list reachable.
-
-**Design** (`LEAKS.md`, "Proposed fix"):
-
-- A *segment* is the stretch of trail between two stop heights. Stop
-  heights are choice entries, every cutoff held for `undo`, and every
-  commit height held for `pop_to`.
-- *View k* is the heap after undoing the top k segments.
-- Liveness is traced per view: roots point at every version of a node,
-  and a version's children are traced in the views where it is visible.
-- Dead entries are dropped, which includes every entry that isn't the
-  lowest for its node in its segment.
-- A node whose current contents are dead but which has a live entry
-  keeps the node; its contents are overwritten with a placeholder.
-- The trail is then compacted, and every live height remapped.
-
-**Verified so far (model only).** `GcLeaks.v` proves that undo leaves
-each node with its deepest entry's snapshot, so dropping a newer entry
-in the same segment changes nothing. `GcBench.v`'s implementation of
-the whole design agrees with the baseline on 400 seeds × 7 flag sets.
-Both deliberately wrong variants (ignoring segments, tracing only the
-current view) are caught. Coverage is thin: only 1,880 entries were
-dropped in total, because the random programs build short trails. The
-model has no per-entry epochs, no `pop_to`, and no `undo(cutoff)`
-stopping mid-trail.
-
-**To implement in Rice:**
-
-1. **Find every live trail height.** Add a frame rep for trail heights
-   (`R_TRAIL`, beside `R_INT`). Use it in the `bindIO` and commit frames
-   (`prelude.c`), `lazy_unify_step`'s frame (slot 7), `nseq`'s frame
-   (slot 7), and generated case-block frames (`SCOPED_SAVE_CUTOFF` in
-   `Rice.Codegen.C.ToC`). Audit C-convention code for heights held in
-   locals across an evaluation, and give those a registration like
-   `GC_ROOT`. (`nf_all`'s `undo(0)` needs none.) Generated functions
-   already take `SCOPED_CUTOFF()` after `GC_SAFE_POINT`, so their own
-   cutoff is read after any compaction.
-2. **Trace by view in `gc.c`.** Compute segments from the live heights
-   and choice entries, then trace versions per view instead of tracing
-   the trail as roots.
-3. **Drop and compact.** Drop dead entries, overwrite dead current
-   contents, compact the trail, and remap every live height.
-4. **Handle epochs (D4).** `pop` reloads `current_epoch` from each popped
-   entry and `pop_to(n)` from entry `n`. If a segment's bottom entry is
-   dropped, carry its epoch down or keep a placeholder entry. This only
-   matters under `OPT_EPOCH_TRAIL`.
-5. **Test in Rice** what the model can't: epochs (`OPT_EPOCH_TRAIL=1`),
-   bindIO commits (`pop_to`), and scoped retry stopping mid-trail. Run
-   the suite under `GC_STRESS` with each.
-6. **Un-XFAIL `gc/nondet_pending`.** Also add a test where the loop's
-   root is rewritten many times *across* several choice points, so more
-   than one segment is involved.
-
-## The rest of the collector
-
-- **Stage 4 cleanup.**
-  - Remove the experimental Boehm path (`#ifdef GC` in
-    `runtime/memory.h`, and its Makefile target).
-  - Decide whether the "total memory allocations" counter should count
-    bytes instead.
-- **`reverse_builtin` +49%.** Its 4M-element list stays live, so every
-  collection copies everything built so far (about 1.1 GB copied in
-  total). Options:
-  - a growth factor above 2× (fewer collections, more memory);
-  - generations, which would fix it properly.
-- **`GC_STRESS` is too slow to cover long tests.** It costs about 1 ms
-  per safe point even with a tiny live set: each collection takes a
-  fresh zeroed 4 MB chunk and poisons the old one. So 14 long tests
-  only time out under it. Reusing chunks, or poisoning only what was
-  used, would make the stress run cover them.
-- **Tuning.** Chunk size (4 MB) and the threshold (64 MB, then 2× live)
-  are first guesses.
-- **Safe points only at `_hnf` entries.** Still unconfirmed that no loop
-  allocates unboundedly without entering a function. Write a test that
-  allocates heavily inside one runtime loop.
-- **The proofs side.** `LEAKS.md`, `GcLeaks.v` and `GcBench.v` are
-  uncommitted in the proofs repo. Not proved:
-  - that skipping a forward keeps `deref_nd`;
-  - D2-D4 (the per-view liveness);
-  - an end-to-end simulation of a collecting machine.
-
-## Hazards found along the way
+## Hazards
 
 - Two `rice` builds or `tests/run.sh` runs with different `RICE_CFLAGS`
   must not run at once: they share `runtime/*.o` (and the kics2 lib's
@@ -171,15 +161,55 @@ stopping mid-trail.
 - Don't run `make` in `runtime/`. It rebuilds the objects with `-g` and
   no `-O2`, but leaves `rice`'s `*.o.flags`, so later programs link
   unoptimized code. If it happens: `rm runtime/*.o runtime/*.o.flags`.
+- Build rice with `PATH=$HOME/opt/kics2/bin:$PATH cypm install`. After a
+  codegen or runtime-header change, also clear `.curry/`,
+  `~/opt/kics2/lib/.curry/rice-1.0.0/` and `runtime/*.o*`.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
-## Loose ends (not the collector)
+## Settled 2026-10-28: collector loose ends
 
-- `gc/strict_fold` is slow: about 1.7 µs per element, against 0.06 µs
-  in `tailsum`. Possibly `even`/`map` dispatching through type-class
-  dictionaries. Worth profiling.
-- `=:<=`'s settle loops treat a `CHOICE_TAG` node as a value
-  (`src/explicit-stack-plan.md`). Possibly a latent bug; it needs a test.
-- `git stash` holds the "lazy frames experiment". It can probably be
-  dropped, since the collector relies on eagerly pushed frames.
+- **Stage 4 cleanup.** The Boehm path was already gone (`eddacd5`).
+  The allocations counter stays a node count, but printing it on stdout
+  after every non-IO program is a distribution problem (below).
+- **`GC_STRESS` speed.** Each collection zeroed a fresh 4 MB chunk and
+  poisoned every old one, about 1 ms per safe point. `heap.c` now uses
+  64 KB chunks under `GC_STRESS`, which also takes the chunk slow path
+  and the own-chunk path far more often. A 20k-element strict fold went
+  from over 60 s to 1.2 s. The suite under `GC_STRESS`: 78 pass, 42 time
+  out at 15 s, no wrong output. What's left is real copying work
+  (`copy_node`, `gc_collect`) plus `madvise`/`memset`; recycling chunks
+  would gain at most about 2×.
+- **Safe points only at `_hnf` entries.** Audited rather than tested:
+  every runtime loop that allocates (`toCurryString`, `unify_step`'s
+  `save_copy`, `lu_k`'s narrowing via `set_free_constructor`) allocates
+  in proportion to a structure or string that existed when it started,
+  so heap growth between safe points is bounded by a constant times the
+  live heap. A test couldn't fail.
+- Still open: `reverse_builtin`'s copying cost (needs a larger growth
+  factor or generations), threshold and chunk-size tuning, and Leak 2.
+
+## Diagnosed 2026-10-28: `gc/strict_fold` is dictionary construction
+
+About 1 µs per element. A profile is almost all
+`_inst#Prelude.Integral#Prelude.Int#_LETn_hnf` and
+`_inst#Prelude.Ord#Prelude.Int#_LETn_hnf`, plus `apply_k`. Nothing in
+rice specializes dictionaries, so every overloaded call at a known type
+(`even`, `<=` inside `enumFromTo`) applies the instance function to `()`
+and builds the whole dictionary again: Integral's builds Enum, Real and
+itself through 13 lifted lets before one method is selected. Options, in
+order of effort: share instance dictionaries as CAFs (they take `()`
+only so they aren't CAFs); or inline instance functions so that the
+method selector becomes a case of a known constructor and the call goes
+straight to `_impl#even#...`. The second is the usual fix and likely
+the biggest single speedup for ordinary programs.
+
+## Loose ends
+
+- `=:<=`'s CHOICE handling: fixed in `62ecb1c`, with
+  `regressions/lazy_unify_choice`.
+- Dropped the "lazy frames experiment" stash (2026-10-08). It
+  predates root/sp-as-arguments, and `src/explicit-stack-plan.md`
+  records its numbers and why it wasn't adopted.
+- `runtime-review.md` (root) stays untracked on purpose: personal notes
+  from the 2026-10-24 runtime review.

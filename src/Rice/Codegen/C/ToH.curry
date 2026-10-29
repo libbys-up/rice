@@ -1,39 +1,16 @@
 ------------------------------------------------------------------------------
---- ICurry -> C header (`ModuleName.h`) generation.
+--- Generates a module's C header (`Module.h`).
 ---
---- Every constructor and non-primitive function gets: a tag `#define`, a
---- static `Symbol`, and `make_X`/`set_X` (`make_X_free`/`set_X_free` too,
---- for constructors). Two deliberate simplifications relative to both
---- reference sources this was designed against (see `STATUS.md`'s Phase 1
---- scoping and `src/codegen-runtime-review.md`):
+--- Every constructor and every function that isn't an inline primitive
+--- gets a tag `#define`, a static `Symbol`, and the inline functions
+--- `make_X` (allocate a node) and `set_X` (rewrite `root` in place).
+--- Constructors also get `make_X_free` and `set_X_free`, which build the
+--- constructor with free variables as its children, for narrowing.
 ---
---- - **No zero-arity-constructor/small-integer preallocation.** old_rice's
----   `writeMain` preallocated every 0-arity constructor and every `Int` in
----   [-127,128] as a flyweight, needing a whole-program `DataTable` this
----   pass doesn't have. Every constructor, 0-arity or not, just goes
----   through the same `make_X`/`set_X` as everything else -- correct,
----   marginally more allocation, no `DataTable` dependency.
---- - **Boxed `Int`/`Char`/`Float` need no special case at all**, beyond
----   the raw child their `Symbol`'s `reps` array records (like any symbol
----   with a raw slot -- see `Rice.Codegen.FieldReps`) -- confirmed
----   empirically (see
----   `archetecture.md`'s "Boxed primitives" section): by the time
----   `Rice.Transform.Unbox`'s output reaches real ICurry, a boxed value's
----   case branch is just an ordinary one-constructor `ICaseCons`, with no
----   dummy branches surviving to this stage. `Rice.Codegen.C.ToC` still
----   needed the empirical check; this file didn't need to know at all.
----
---- One bug found and fixed by actually running a compiled program, not
---- just reading the generated C: `setRealChildren` originally stored a
---- constructor/function's arguments into `root`'s child slots in
---- *reverse* order, copying old_rice's own convention uncritically. That
---- convention was old_rice's own ICurry generator's (`Compile.ToICurry`,
---- not what Rice actually uses) internal agreement with itself, not a
---- property of ICurry in general -- the external `icurry` package Rice
---- depends on indexes `IVarAccess`/`INodeAssign` in plain forward order,
---- and the mismatch was invisible in every arity-1 test (only one slot to
---- get "wrong") until a real arity-2 function (`(?)`, `True ? False`)
---- silently swapped its own two arguments. See `setRealChildren` below.
+--- Boxed `Int`, `Char` and `Float` are ordinary one-constructor types here;
+--- the only thing special about them is the raw child their `reps` record.
+--- Even a constructor with no children is allocated fresh by `make_X`; we
+--- don't share preallocated copies.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -74,28 +51,16 @@ toHeader reps (IProg name imps types allFuns) = vcat $
   concatMap (makeConFree reps) cons ++
   [ text ("#endif //" ++ guardName ++ "_H") ]
  where
-  -- `name` is a module name, possibly hierarchical ("Test.Prop.Types"):
-  -- a `.` isn't a valid character in a C preprocessor identifier, so
-  -- `name` itself can't be used here directly (an `#ifndef`/`#define`
-  -- pair containing one is, at best, compiler-specific behavior, not
-  -- portable C). Replacing `.` with `_` keeps the guard unique per
-  -- module (unlike using just `baseModName name`, which -- fine for
-  -- `cinclude`'s file-lookup purpose -- would collide between two
-  -- different modules that happen to share a last component, e.g.
-  -- `Foo.Types` and `Bar.Types`) without needing a real identifier
-  -- sanitizer, since `mangle`/`nameMangle` (Rice.Codegen.Names) both
-  -- assume an `IQName`, not a bare module-name `String`.
+  -- The whole module name, with `.` (not allowed in a macro name) as `_`.
+  -- Just the last component wouldn't be unique: Foo.Types and Bar.Types.
   guardName = map (\c -> if c == '.' then '_' else c) name
-  -- Primitive functions (Rice.Codegen.C.PrimOps) are inlined at every call
-  -- site (Rice.Codegen.C.ToC) and never actually invoked as real
-  -- functions -- no declaration, no Symbol, no make/set for them at all.
+  -- Primitives are inlined at every call site (Rice.Codegen.C.PrimOps),
+  -- so they get nothing here.
   funs = [f | f@(IFunction n _ _ _ _) <- allFuns, not (isJust (lookupPrim n))]
   cons = [c | IDataType _ cs <- types, c <- cs]
 
 ------------------------------------------------------------------------------
--- Function prototypes (so `&F_hnf` in a Symbol literal, and any call to
--- F_hnf from another module's generated code, both have a declaration in
--- scope before they're used).
+-- Function prototypes, for the Symbols and for other modules' code
 ------------------------------------------------------------------------------
 
 declareFun :: IFunction -> CStmt
@@ -164,44 +129,31 @@ writeFunSymbol reps (IFunction n a _ _ _) =
 makeArgs :: [Int] -> [(CType,CName)]
 makeArgs = map (\v -> ("field", varName v))
 
---- Every child beyond the first 3 lives in a separately-allocated array
---- (`children[3].a`, `node.h`) -- always set explicitly, either to that
---- allocation or to `NULL`, since `set_X` may be overwriting a node whose
---- previous use left this pointer non-null.
+--- Children 3 and up live in a spill array at `children[3].a` (`node.h`).
+--- We always set that slot, to the array or to `NULL`, because `set_X`
+--- may be rewriting a node that had a spill array before.
 setChildArray :: IArity -> CStmt
 setChildArray arity
   | arity > 3 = (root <> text ".n->children[3].a") .= alloc_f (arity - 3)
   | otherwise = (root <> text ".n->children[3].a") .= text "NULL"
 
---- Assign the constructor/function's real arguments into `root`'s child
---- slots, in the same, direct, forward order the arguments themselves
---- come in (child slot 0 <- argument 1, slot 1 <- argument 2, ...) --
---- matching what `Rice.Codegen.C.ToC`'s `IVarAccess`/`INodeAssign`
---- compilation (`children`) already assumes an index means (the external
---- `icurry` package's own convention, confirmed empirically: forward
---- storage gave the right value, old_rice's reversed-storage convention
---- did not -- see this module's own file header for the incident).
---- `apply` nodes are the one place reversed storage is real and
---- necessary (letting `missing` alone determine which slot a partial
---- application's next argument lands in, `archetecture.md`) -- but that's
---- entirely `runtime.h`'s own hardcoded `set_apply*`/`make_apply*` logic,
---- unrelated to the ordinary constructor/function nodes generated here.
+--- Stores the arguments in `root`'s children in order: child 0 is the
+--- first argument. ICurry's `IVarAccess` and `INodeAssign` index children
+--- this way. (Apply nodes store theirs in reverse; that's in `runtime.h`.
+--- See the developer's manual, "Argument order".)
 setRealChildren :: IArity -> [CStmt]
 setRealChildren arity = zipWith setChild [0 .. arity-1] [1 .. arity]
  where setChild i v = children root [i] .= var v
 
---- Any of child slots 0,1,2 *not* used by a real argument gets explicitly
---- nulled, for the same "root may be reused, stale pointers" reason as
---- `setChildArray`.
+--- Clears child slots 0 to 2 that have no argument, since `root` may have
+--- held something else before.
 setUnusedChildren :: IArity -> [CStmt]
 setUnusedChildren arity = map nullChild [arity .. 2]
  where nullChild i = (children root [i] <> text ".n") .= text "NULL"
 
---- Stamp a freshly-allocated `root`'s birth time (backtracking-
---- optimizations.md's #5) -- `make_X`/`make_X_free` only, never `set_X`/
---- `set_X_free`: those overwrite an *existing* node's contents in place,
---- so the memory's own age doesn't change (`runtime.c`'s `set_copy` has
---- the same rule, for the same reason).
+--- Records the epoch a new node was created in (optimization #5). Only
+--- `make_X` does this: `set_X` rewrites an existing node, whose age
+--- doesn't change.
 epochStamp :: CStmt
 epochStamp = cifdef "OPT_EPOCH_TRAIL" [epoch root .= text "current_epoch"]
 
@@ -269,9 +221,7 @@ makeFun :: IFunction -> [CStmt]
 makeFun (IFunction n a _ _ _) = makeEntry n a
 
 ------------------------------------------------------------------------------
--- set_X_free / make_X_free -- constructors only (narrowing a free
--- variable always narrows it to some *constructor* shape, never a
--- function).
+-- set_X_free / make_X_free, for narrowing (constructors only)
 ------------------------------------------------------------------------------
 
 setChildFree :: Int -> CStmt

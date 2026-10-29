@@ -1,6 +1,7 @@
 #ifndef MACHINE_H
 #define MACHINE_H
 
+// The evaluation machine.
 // Since C has a finite stack determined by the OS,
 // we need to have our own stack when running curry programs.
 // Otherwise, each function call can push a stack frame,
@@ -22,14 +23,7 @@
 //
 // now f is in tail position and TCO can apply.
 // so a return statement in f is really just a call to our continuation.
-//
-// We also have a RETURN() macro which will functionally act as our return statement,
-// but in reality its calling our continuation.
-//
-//
-// The evaluation machine: Rice's own stack of continuation frames, so that
-// evaluating deeply nested expressions doesn't grow the C stack. See
-// src/explicit-stack-plan.md for the design.
+// See the developer's manual, "The evaluation machine".
 //
 // Machine code (generated `_hnf` functions, case blocks, and runtime
 // routines) transfers control only by guaranteed tail calls (MUSTTAIL).

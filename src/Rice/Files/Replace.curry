@@ -17,7 +17,8 @@ import Data.List                (find, isPrefixOf)
 import Rice.Transform.StrLit    (condenseStrings)
 import Rice.Transform.Unbox     (unbox)
 
--- | Replaces the primitive types in the given module with their unboxed versions.
+-- `replace_Prim.curry` can't name `Int#` in its source, so it calls the
+-- raw types `Int_SH`, `Char_SH` and `Float_SH`. This gives them their names.
 rename_SH :: QName -> QName
 rename_SH q = case q of
                    ("replace_Prim","Int_SH") -> ("replace_Prim","Int#")
@@ -25,8 +26,10 @@ rename_SH q = case q of
                    ("replace_Prim","Float_SH") -> ("replace_Prim","Float#")
                    _ -> q
 
--- replaces the functions that operate directly on primitive values
--- with their unboxed versions.
+--- Replaces Prelude's functions on Int, Char and Float with the versions
+--- in `$RICEHOME/replace/replace_Prim.curry`, which unbox their arguments
+--- and call raw primitives. See the developer's manual, "Replacing
+--- Prelude functions".
 replacePrim :: TProg -> IO TProg
 replacePrim pre = do home <- getEnv "RICEHOME"
                      let primFile = home </> "replace" </> "replace_Prim" <.> "curry"
@@ -35,9 +38,8 @@ replacePrim pre = do home <- getEnv "RICEHOME"
                                         (updQNamesInTProg rename_SH prim)
                      return $ replaceFuncs "Prelude" prim_sharp pre
 
--- tries to find a function is the replace program with the same name
--- if we find one, then rename all of the names to be the origonal module,
--- otherwise return the origonal function.
+-- The function of the same name in `rep`, moved into module `name`, or
+-- the original function if `rep` doesn't have one.
 replaceFunc :: String -> TProg -> TFuncDecl -> TFuncDecl
 replaceFunc name rep f = case find (same f) (tProgTFuncs rep) of
                               Just f' -> updName name f'
@@ -92,8 +94,9 @@ addFuncs name rep p = updTProgTFuncs allFuncs p
        allFuncs _ = (tProgTFuncs p) ++ newFuncs
        isOld f    = elem (snd (tFuncName f)) names
 
--- replaces functions in library lib.curry with functions 
--- defined in $RICEHOME/replace/replace_lib.curry
+--- Replaces functions in module `M` with the ones defined in
+--- `$RICEHOME/replace/replace_M.curry`, if that file exists, and adds the
+--- functions only defined there.
 replace :: TProg -> IO TProg
 replace p = do let name = tProgName p
                home <- getEnv "RICEHOME"

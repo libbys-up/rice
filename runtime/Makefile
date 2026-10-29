@@ -1,5 +1,7 @@
-# Rice runtime Phase 0 build (see STATUS.md's "runtime/ and Codegen"
-# section for the full phase plan this fits into).
+# Builds the runtime on its own, for test/runtime_smoke.c (`make test`).
+# rice doesn't use this: Rice.Main compiles the runtime itself, with -O2.
+# Running it overwrites the runtime/*.o files rice links with unoptimized
+# -g builds; if that happens, rm runtime/*.o runtime/*.o.flags.
 #
 # Builds the standalone-compilable core of runtime/ -- node.h, macros.h,
 # memory.h, debug.h, trail.{h,c}, machine.{h,c}, heap.c, gc.{h,c},

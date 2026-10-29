@@ -11,8 +11,8 @@
 --- itself (a fresh one for a non-variable case scrutinee) never appears
 --- after full ANF.
 ---
---- The design and the invariants it relies on are in
---- `src/field-reps-plan.md`.
+--- See the developer's manual, "Field reps", for why we need this and the
+--- invariants `lintFieldReps` checks.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------

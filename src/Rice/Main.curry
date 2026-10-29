@@ -1,288 +1,251 @@
+------------------------------------------------------------------------------
+--- The `rice` command: parse the options, compile every module the program
+--- needs in dependency order, then build and link the executable.
+---
+--- The pipeline is described in the developer's manual
+--- (`src/developers-manual.tex`, "The compiler").
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
+
 module Rice.Main where
 
 import System.Environment (getArgs, getEnv)
 import System.Console.GetOpt
-import System.Directory (createDirectoryIfMissing, doesFileExist,
-                          doesDirectoryExist, getDirectoryContents,
-                          getModificationTime)
-import System.FilePath (takeDirectory, takeExtension, replaceExtension,
-                         (</>), (<.>))
-import System.Process (system)
-import Data.Time (ClockTime)
+import System.Directory   (createDirectoryIfMissing, doesFileExist,
+                           doesDirectoryExist, getDirectoryContents,
+                           getModificationTime)
+import System.FilePath    (takeDirectory, takeExtension, replaceExtension,
+                           (</>), (<.>))
+import System.Process     (system)
+import Data.Time          (ClockTime)
 import qualified Data.Map as Map
-import Data.List (nub, last, maximum)
-import Data.Char (toLower)
-import Control.Monad (when, foldM)
-import Text.Pretty (pPrint)
+import Data.List          (nub, last, maximum)
+import Data.Char          (toLower)
+import Control.Monad      (when, foldM)
+import Text.Pretty        (pPrint)
 
-import FlatCurry.Types         (Prog)
-import FlatCurry.Typed.Goodies (tProgTFuncs, tFuncBody, tFuncName)
-import FlatCurry.Typed.Files   (readTypedFlatCurry)
-import FlatCurry.Transform.Typed.ExecDet (showTransformExprDet)
-import ICurry.Compiler (flatCurry2ICurryWithProgs, defaultICOptions)
+import FlatCurry.Types                   (Prog)
+import FlatCurry.Typed.Types             (TProg, TFuncDecl (..), TRule (..))
+import FlatCurry.Typed.Goodies           (tProgTFuncs)
+import FlatCurry.Typed.Files             (readTypedFlatCurry)
+import FlatCurry.Transform.Typed.ExecDet (showTransformRuleDet)
+import ICurry.Compiler                   (flatCurry2ICurryWithProgs,
+                                          defaultICOptions)
 
 import Rice.Files.Info
-import Rice.Files.Replace (replacePrim, replace)
-import Rice.Transform.ANF (normalize)
-import Rice.Transform.Unbox (unbox)
-import Rice.Transform.Untype (removeTypes)
-import Rice.Transform.StrLit (condenseStrings)
-import Rice.Transform.Order (orderFuns)
+import Rice.Files.Replace     (replacePrim, replace)
+import Rice.Transform.ANF     (normalize)
+import Rice.Transform.Unbox   (unbox)
+import Rice.Transform.Untype  (removeTypes)
+import Rice.Transform.StrLit  (condenseStrings)
+import Rice.Transform.Order   (orderFuns)
 import Rice.Optimize.FunTable (FunTable, makeFunTable)
-import Rice.Optimize.Inline (optimizeProg, optimizeRules)
-import Rice.Build.Deps (ModuleGraph, buildModuleGraph, topoSort)
-import Rice.Build.Cache (needsRecompile, readCachedOpt, writeOptIfChanged, cPaths,
-                          fcyPath, readCachedFcy, writeFcyIfChanged,
-                          writeFileIfChanged)
-import Rice.Codegen.FieldReps (FieldRepTable, emptyReps, fieldRepTable, interfaceReps,
-                                addLiftedReps,
-                                unionReps, lintFieldReps, showFieldReps)
-import Rice.Codegen.C.ToH (toHeader)
-import Rice.Codegen.C.ToC (toSource, writeMain, MainMode (..))
-import Rice.Diagnostics (timeIO, timePure)
+import Rice.Optimize.Inline   (optimizeProg, optimizeRules)
+import Rice.Build.Deps        (ModuleGraph, buildModuleGraph, topoSort)
+import Rice.Build.Cache       (needsRecompile, readCachedOpt, writeOptIfChanged,
+                               cPaths, fcyPath, readCachedFcy,
+                               writeFcyIfChanged, writeFileIfChanged)
+import Rice.Codegen.FieldReps (FieldRepTable, emptyReps, fieldRepTable,
+                               interfaceReps, addLiftedReps, unionReps,
+                               lintFieldReps, showFieldReps)
+import Rice.Codegen.C.ToH     (toHeader)
+import Rice.Codegen.C.ToC     (toSource, writeMain, MainMode (..))
+import Rice.Diagnostics       (timeIO, timePure)
 
 main :: IO ()
-main = do args <- getArgs
-          let (opts, files, errors') = getOpt RequireOrder optDescrs args
-          if SHelp `elem` opts
-           then putStrLn (usageInfo usageHeader optDescrs)
-           else do
-             let errors = if length files /= 1
-                           then "Too many files to compile. Pick 1" : errors'
-                           else errors'
-             if not (null errors)
-              then mapM_ putStrLn errors
-              else do
-                let timing = SCompilerTime `elem` opts
-                graph <- buildModuleGraph timing (head files)
-                case topoSort graph of
-                  Left cyc    -> putStrLn $
-                    "Cyclic import involving: " ++ unwords cyc
-                  Right modNames -> do
-                    let rootModule = last modNames
-                    _ <- timeIO timing "compile all modules"
-                           (foldM (run graph rootModule opts) (Map.empty, [], emptyReps) modNames)
-                    timeIO timing "build+link executable"
-                      (buildExecutable opts modNames)
+main = do
+  args <- getArgs
+  let (opts, files, optErrors) = getOpt RequireOrder optDescrs args
+      fileErrors = if length files /= 1
+                     then ["Expected exactly one file to compile"]
+                     else []
+      errors = fileErrors ++ optErrors
+  if SHelp `elem` opts
+    then putStrLn (usageInfo usageHeader optDescrs)
+    else if not (null errors)
+      then mapM_ putStrLn errors
+      else compileProgram opts (head files)
 
 usageHeader :: String
 usageHeader = "Usage: rice [OPTIONS] FILE.curry"
 
--- Compiles one module (by name -- `graph` has its imports already, and
--- its `TProg` is only fetched here if it turns out to actually need
--- recompiling; see `Rice.Build.Deps.buildModuleGraph`) given (a) the
--- FunTable entries of everything already compiled (its own imports,
--- since `modNames` is in dependency order) and (b) their FlatCurry
--- `Prog`s -- needed so ICurry generation sees Rice's own synthetic
--- boxed-type declarations for Prelude's Int/Char/Float (added by
--- `unbox`, in memory only) instead of silently re-reading Prelude's
--- untouched interface off disk and failing case completion on a boxed
--- value it doesn't recognize. Returns both, extended with this module's
--- own contribution, for whatever gets compiled next.
+--- Compiles `file` and every module it imports, then links the executable.
+compileProgram :: [CompilerOptions] -> String -> IO ()
+compileProgram opts file = do
+  let timing = SCompilerTime `elem` opts
+  graph <- buildModuleGraph timing file
+  case topoSort graph of
+    Left cyc       -> putStrLn ("Cyclic import involving: " ++ unwords cyc)
+    Right modNames -> do
+      let rootModule = last modNames
+          start      = (Map.empty, [], emptyReps)
+      _ <- timeIO timing "compile all modules"
+             (foldM (run graph rootModule opts) start modNames)
+      timeIO timing "build+link executable" (buildExecutable opts modNames)
+
+--- Compiles one module, writing its `.h` and `.c`.
+---
+--- The accumulator holds what we know about the modules compiled so far,
+--- which are this module's imports, since `modNames` is in dependency order:
+--- their function tables (for inlining), their untyped FlatCurry (ICurry
+--- generation needs the boxed `Int`/`Char`/`Float` types `unbox` added to
+--- Prelude, which only exist in memory), and their field reps. We return it
+--- extended with this module.
+---
+--- There are two caches. If the module isn't stale, we read its optimized
+--- program (`.rtfcy`) instead of optimizing it again. If it isn't stale and
+--- no printing option needs the intermediate stages, we also read its
+--- untyped FlatCurry (`.rfcy`) and keep the `.h`/`.c` already on disk.
 run :: ModuleGraph -> String -> [CompilerOptions]
     -> (FunTable, [Prog], FieldRepTable) -> String
     -> IO (FunTable, [Prog], FieldRepTable)
-run graph rootModule opts (importedFT, impFcys, impReps) mname =
-  do let timing  = SCompilerTime `elem` opts
-         imports = Map.findWithDefault
-                     (error ("Rice.Main.run: " ++ mname ++ " missing from its own module graph"))
-                     mname graph
-         forcedModules = [n | SForceRecompileModule n <- opts]
-         forced  = (SForceRecompile `elem` opts && mname == rootModule)
-                   || mname `elem` forcedModules
-     -- `--printloops` is the only thing here that needs the raw,
-     -- untransformed TProg regardless of staleness -- everything else
-     -- either only needs `mname`/`imports` (both already known, no
-     -- parse required -- see `Rice.Build.Deps.buildModuleGraph`) or,
-     -- in the `stale` branch below, fetches the real TProg itself right
-     -- where it's actually needed.
-     when (SPrintLoops `elem` opts) (readTypedFlatCurry mname >>= showLoops)
-     stale <- if forced
-                then return True
-                else needsRecompile mname imports
-     optimized <- if stale
-       then do
-         putStrLn ("Compiling " ++ mname)
-         prog <- timeIO timing (mname ++ ": readTypedFlatCurry (stale)") (readTypedFlatCurry mname)
-         when (SStopRaw `elem` opts) $ do
-           showFlat prog
-           error "STOPPED before any transform (--stop-raw diagnostic)"
-         strProg <- timePure timing (mname ++ ": condenseStrings") (condenseStrings prog)
-         when (SPrintFlatCurry `elem` opts) (showFlat strProg)
-         when (SStopCondense `elem` opts) $ do
-           showFlat strProg
-           error "STOPPED after condenseStrings (--stop-condense diagnostic)"
-         unboxed <- timePure timing (mname ++ ": unbox") (unbox strProg)
-         when (SPrintUnbox `elem` opts) (showFlat unboxed)
-         when (SStopUnbox `elem` opts) $ do
-           showFlat unboxed
-           error "STOPPED after unbox (--stop-unbox diagnostic)"
-         replaced <- timeIO timing (mname ++ ": replace") $
-           if mname == "Prelude"
-           then replacePrim unboxed >>= replace
-           else replace unboxed
-         when (SPrintReplace `elem` opts) (showFlat replaced)
-         when (SStopReplace `elem` opts) $ do
-           showFlat replaced
-           error "STOPPED after replace (--stop-replace diagnostic)"
-         let (_, ownLoopBreakers) = orderFuns replaced
-             ownFT                = makeFunTable ownLoopBreakers (tProgTFuncs replaced)
-             fullFT               = Map.union ownFT importedFT
-         result <- if SNoOptimize `elem` opts
-                     then return replaced
-                     else timePure timing (mname ++ ": optimize") (optimizeProg fullFT replaced)
-         when (SStopOptimize `elem` opts) $ do
-           showFlat result
-           error "STOPPED after optimize (--stop-optimize diagnostic)"
-         when (STraceOptimize `elem` opts) $
-           mapM_ (\f -> do
-                    putStrLn ("== " ++ snd (tFuncName f) ++ " ==")
-                    let (_, trace, n) = showTransformExprDet (-1)
-                          (optimizeRules fullFT) (tFuncBody f)
-                    putStrLn trace
-                    putStrLn (show n ++ " steps"))
-                 (tProgTFuncs replaced)
-         timeIO timing (mname ++ ": writeOptIfChanged") (writeOptIfChanged mname result)
-         return result
-       else do
-         putStrLn ("Skipping " ++ mname)
-         timeIO timing (mname ++ ": readCachedOpt") (readCachedOpt mname)
-     let (_, loopBreakers) = orderFuns optimized
-         localFT           = makeFunTable loopBreakers (tProgTFuncs optimized)
-         ft                = Map.union localFT importedFT
-         reps              = unionReps (interfaceReps optimized) impReps
-     when (SPrintOptimize `elem` opts) (showFlat optimized)
-     (cPath, hPath) <- cPaths mname
-     fPath           <- fcyPath mname
-     -- Below (normalize/removeTypes/ICurry-generation/.h+.c-writing) is
-     -- exactly as expensive to redo as re-optimizing was -- for Prelude,
-     -- ANF normalization alone runs ~7s and the .h/.c write another
-     -- ~10s (--compiler-time will show this). `stale` (computed above,
-     -- already cascades correctly through imports -- see
-     -- `Rice.Build.Cache.needsRecompile`) tells us `optimized` is
-     -- unchanged from last time, which means this stage's output would
-     -- be byte-identical too, so skip it and read the cached
-     -- `.rfcy` instead -- unless a diagnostic flag needs the
-     -- intermediate value materialized to print it, or a cache file
-     -- is simply missing (e.g. upgrading from a build that predates
-     -- the `.rfcy` cache).
-     -- Linting only covers modules that get regenerated: an unchanged
-     -- module's result can't have changed either. To lint a cached
-     -- library module, force it (`--force-recompile-module`).
-     let lintReps = SLintFieldReps `elem` opts
-                    || any (> 0) [n | SDebug n <- opts]
-         inspecting = or [f `elem` opts |
-                          f <- [SPrintANF, SPrintICurry, SPrintFlatCurryRaw, SPrintC,
-                                SPrintFieldReps]]
-     cachesExist <- fmap and (mapM doesFileExist [cPath, hPath, fPath])
-     let regen = stale || inspecting || not cachesExist
-     fcy <- if regen
-       then do
-         anf <- timePure timing (mname ++ ": normalize (ANF)") (normalize optimized)
-         when (SPrintANF `elem` opts) (showFlat anf)
-         let ownReps = fieldRepTable anf
-         when (SPrintFieldReps `elem` opts)
-           (putStr (showFieldReps mname ownReps))
-         when lintReps $
-           case lintFieldReps (unionReps ownReps reps) ownReps anf of
-             []   -> return ()
-             msgs -> do mapM_ putStrLn msgs
-                        error ("field-rep lint: " ++ show (length msgs)
-                               ++ " problem(s) in " ++ mname)
-         newFcy <- timePure timing (mname ++ ": removeTypes") (removeTypes anf)
-         when (SPrintFlatCurryRaw `elem` opts) (print newFcy)
-         timeIO timing (mname ++ ": writeFcyIfChanged") (writeFcyIfChanged mname newFcy)
-         icy <- timeIO timing (mname ++ ": flatCurry2ICurryWithProgs")
-                  (flatCurry2ICurryWithProgs defaultICOptions impFcys newFcy)
-         when (SPrintICurry `elem` opts) (showICurry icy)
-         createDirectoryIfMissing True (takeDirectory hPath)
-         timeIO timing (mname ++ ": write .h/.c") $ do
-           let codeReps = addLiftedReps ownReps icy
-           writeFile hPath (pPrint (toHeader codeReps icy))
-           writeFile cPath (pPrint (toSource codeReps icy))
-         return newFcy
-       else timeIO timing (mname ++ ": readCachedFcy") (readCachedFcy mname)
-     return (ft, fcy : impFcys, reps)
+run graph rootModule opts (importedFT, impFcys, impReps) mname = do
+  let imports = Map.findWithDefault (error missingModule) mname graph
+      forced  = (has SForceRecompile && mname == rootModule)
+                || mname `elem` [n | SForceRecompileModule n <- opts]
+  when (has SPrintLoops) (readTypedFlatCurry mname >>= showLoops)
+  stale <- if forced then return True else needsRecompile mname imports
+  optimized <- if stale
+    then optimizeModule opts importedFT mname
+    else do putStrLn ("Skipping " ++ mname)
+            time "readCachedOpt" (readCachedOpt mname)
+  let (_, loopBreakers) = orderFuns optimized
+      localFT           = makeFunTable loopBreakers (tProgTFuncs optimized)
+      reps              = unionReps (interfaceReps optimized) impReps
+  when (has SPrintOptimize) (showFlat optimized)
+  (cPath, hPath) <- cPaths mname
+  fPath          <- fcyPath mname
+  cachesExist    <- fmap and (mapM doesFileExist [cPath, hPath, fPath])
+  let inspecting = any has [ SPrintANF, SPrintICurry, SPrintFlatCurryRaw
+                           , SPrintC, SPrintFieldReps ]
+  fcy <- if stale || inspecting || not cachesExist
+    then generateModule opts impFcys reps mname optimized
+    else time "readCachedFcy" (readCachedFcy mname)
+  return (Map.union localFT importedFT, fcy : impFcys, reps)
+ where
+  has opt = opt `elem` opts
 
---- Compile every module's already-written `.c`/`.h` (see `run`, above)
---- plus a freshly generated `main.c` for the root module (the last one in
---- dependency order) into one executable, linked against `runtime/`'s
---- pure-C core (`Rice.Build.Cache`'s buildable core -- see `STATUS.md`'s
---- Phase 0) plus `runtime/prelude.c` (Phase 2's rewrite of the old,
---- never-actually-linked `external.c`/`Prelude_external.c` -- see
---- `STATUS.md`). A program can still fail to link here if it calls into
---- one of the small number of primitives `prelude.c` only stubs (`catch`,
---- `ensureNotFree`, file I/O, `read*Literal`) -- everything else,
---- including `(=:=)`/`(=:<=)`, is a real implementation now.
+  time :: String -> IO a -> IO a
+  time stage = timeIO (has SCompilerTime) (mname ++ ": " ++ stage)
+
+
+  missingModule = "Rice.Main.run: " ++ mname ++ " missing from its own module graph"
+
+--- Reads a module's typed FlatCurry and runs the passes up to and including
+--- the optimizer, then writes the result to the `.rtfcy` cache.
+optimizeModule :: [CompilerOptions] -> FunTable -> String -> IO TProg
+optimizeModule opts importedFT mname = do
+  putStrLn ("Compiling " ++ mname)
+  prog <- timeIO timing (stage "readTypedFlatCurry (stale)")
+                 (readTypedFlatCurry mname)
+  stopIf SStopRaw "before any transform" prog
+  strProg <- timePure timing (stage "condenseStrings") (condenseStrings prog)
+  printIf SPrintFlatCurry strProg
+  stopIf SStopCondense "after condenseStrings" strProg
+  unboxed <- timePure timing (stage "unbox") (unbox strProg)
+  printIf SPrintUnbox unboxed
+  stopIf SStopUnbox "after unbox" unboxed
+  replaced <- timeIO timing (stage "replace") $
+                if mname == "Prelude"
+                  then replacePrim unboxed >>= replace
+                  else replace unboxed
+  printIf SPrintReplace replaced
+  stopIf SStopReplace "after replace" replaced
+  let (_, loopBreakers) = orderFuns replaced
+      ownFT             = makeFunTable loopBreakers (tProgTFuncs replaced)
+      fullFT            = Map.union ownFT importedFT
+  result <- if has SNoOptimize
+              then return replaced
+              else timePure timing (stage "optimize") (optimizeProg fullFT replaced)
+  stopIf SStopOptimize "after optimize" result
+  when (has STraceOptimize) (mapM_ (traceOptimize fullFT) (tProgTFuncs replaced))
+  timeIO timing (stage "writeOptIfChanged") (writeOptIfChanged mname result)
+  return result
+ where
+  has opt     = opt `elem` opts
+  timing      = has SCompilerTime
+  stage s     = mname ++ ": " ++ s
+  printIf opt p = when (has opt) (showFlat p)
+  stopIf opt msg p = when (has opt) $ do
+    showFlat p
+    error ("STOPPED " ++ msg)
+  traceOptimize ft (TFunc (_, name) _ _ _ rule) = case rule of
+    TExternal _ _ -> return ()
+    TRule ps e    -> do
+      putStrLn ("== " ++ name ++ " ==")
+      let (_, trace, n) = showTransformRuleDet (-1) (optimizeRules ft) ps e
+      putStrLn trace
+      putStrLn (show n ++ " steps")
+
+--- Runs the passes after the optimizer (ANF, field reps, removing types,
+--- ICurry), writes the module's `.rfcy`, `.h` and `.c`, and returns its
+--- untyped FlatCurry. `impReps` holds the field reps of every module
+--- compiled so far.
+generateModule :: [CompilerOptions] -> [Prog] -> FieldRepTable -> String
+               -> TProg -> IO Prog
+generateModule opts impFcys impReps mname optimized = do
+  (cPath, hPath) <- cPaths mname
+  anf <- timePure timing (stage "normalize (ANF)") (normalize optimized)
+  when (has SPrintANF) (showFlat anf)
+  let ownReps = fieldRepTable anf
+  when (has SPrintFieldReps) (putStr (showFieldReps mname ownReps))
+  when lintReps $
+    case lintFieldReps (unionReps ownReps impReps) ownReps anf of
+      []   -> return ()
+      msgs -> do mapM_ putStrLn msgs
+                 error ("field-rep lint: " ++ show (length msgs)
+                        ++ " problem(s) in " ++ mname)
+  fcy <- timePure timing (stage "removeTypes") (removeTypes anf)
+  when (has SPrintFlatCurryRaw) (print fcy)
+  timeIO timing (stage "writeFcyIfChanged") (writeFcyIfChanged mname fcy)
+  icy <- timeIO timing (stage "flatCurry2ICurryWithProgs")
+                (flatCurry2ICurryWithProgs defaultICOptions impFcys fcy)
+  when (has SPrintICurry) (showICurry icy)
+  createDirectoryIfMissing True (takeDirectory hPath)
+  timeIO timing (stage "write .h/.c") $ do
+    let codeReps = addLiftedReps ownReps icy
+    writeFile hPath (pPrint (toHeader codeReps icy))
+    writeFile cPath (pPrint (toSource codeReps icy))
+  return fcy
+ where
+  has opt  = opt `elem` opts
+  timing   = has SCompilerTime
+  stage s  = mname ++ ": " ++ s
+  -- Only modules we regenerate get linted. To lint a cached library
+  -- module, force it with --force-recompile-module.
+  lintReps = has SLintFieldReps || any (> 0) [n | SDebug n <- opts]
+
+------------------------------------------------------------------------------
+-- Building the executable
+------------------------------------------------------------------------------
+
+--- Compiles every module's `.c`, the runtime, and a generated `main.c` for
+--- the root module (the last in dependency order), and links them into one
+--- executable named after the root module. The runtime is found through
+--- `$RICEHOME/runtime`.
 ---
---- Resolves `runtime/` via `$RICEHOME` (`getEnv`, same convention
---- `Rice.Files.Replace` already uses for `$RICEHOME/replace/`), so this
---- works from any current directory as long as `RICEHOME` points at the
---- Rice project's own root.
----
---- Each `.c` is compiled to its own `.o` (`compileObj`, cached -- see
---- there), right next to it, and only the (much cheaper) link step
---- always runs. This is what makes an unchanged Prelude.c/.h (now
---- skipped entirely on a cache hit -- see `run`, above) actually pay
---- off at the executable-build stage too: previously every `rice`
---- invocation recompiled all of runtime/'s C core plus every module's
---- generated C from scratch, dwarfing however cheap the Curry-side
---- pipeline above got.
+--- Each `.c` is compiled to a `.o` next to it, and only when that `.o` is
+--- out of date (`compileObj`), so an unchanged Prelude isn't recompiled.
 buildExecutable :: [CompilerOptions] -> [String] -> IO ()
 buildExecutable opts modNames = do
   home <- getEnv "RICEHOME"
   let runtimeDir = home </> "runtime"
-  let rootModule = last modNames
+      rootModule = last modNames
   cHs <- mapM cPaths modNames
   (_, rootHPath) <- cPaths rootModule
   let mainPath = takeDirectory rootHPath </> "main.c"
-  writeFileIfChanged mainPath
-    (pPrint (writeMain rootModule (mainModeOpt opts)))
-  let cFiles  = map fst cHs
-      incDirs = nub (map (takeDirectory . snd) cHs)
-      cc      = if SUseGCC `elem` opts then "gcc" else "clang"
-      -- runtime/debug.h gates its leveled debug()/debug_expr()/etc.
-      -- macros behind a `DEBUG` level (LOW=1/MED=2/HIGH=3, or any plain
-      -- int); last --debug wins if given more than once, matching how
-      -- getOpt folds repeated flags elsewhere.
-      debugFlag = case [n | SDebug n <- opts] of
-        [] -> []
-        ns -> ["-DDEBUG=" ++ show (last ns)]
-      -- Raw passthrough to the C compiler -- e.g. -DOPT_EPOCH_TRAIL=1 to
-      -- flip one of runtime.h's independent backtracking-optimization
-      -- flags (src/backtracking-optimizations.md) away from its default
-      -- for benchmarking, without editing runtime.h itself. All
-      -- occurrences concatenate (each --cflags may itself list more than
-      -- one flag), unlike --debug's last-one-wins.
-      cflags = concatMap words [s | SCFlags s <- opts]
-      -- -O2 matters for more than speed here: setExpr's eager
-      -- X_hnf(root) calls (Rice.Codegen.C.ToC) are genuine C tail
-      -- calls for a tail-recursive Curry function, but nothing
-      -- guarantees the C compiler actually elides them into it without
-      -- being asked to optimize -- at -O0 every such call grows the C
-      -- stack, so a tail-recursive Curry function can still overflow it
-      -- on a large enough input, exactly the failure mode this was
-      -- meant to avoid.
-      compileFlags = ["-std=c11", "-O2"] ++ debugFlag ++ cflags ++
-                     map ("-I" ++) (runtimeDir : incDirs)
-      allCFiles = [runtimeDir </> "runtime.c", runtimeDir </> "trail.c",
-                   runtimeDir </> "machine.c", runtimeDir </> "heap.c",
-                   runtimeDir </> "gc.c",
-                   runtimeDir </> "prelude.c"] ++ cFiles ++ [mainPath]
-  -- Only runtimeDir's headers (runtime.h/debug.h/node.h/memory.h/trail.h
-  -- -- hand-edited, not regenerated by Rice) go into the coarse global
-  -- bound: every object includes at least one of them (Rice.Codegen.C.
-  -- {ToC,ToH}), and nothing else would ever notice one of them changing.
-  -- incDirs' per-module *generated* .h files are deliberately excluded
-  -- here -- Module.c and Module.h are always rewritten together
-  -- whenever that module regenerates (which already cascades correctly
-  -- through imports via `run`'s `.rtfcy` staleness check), so their own
-  -- ordinary .c-vs-.o mtime comparison already catches it; folding them
-  -- into this global bound too would mean recompiling *any* module
-  -- invalidates *every* object, including Prelude's and runtime/'s --
-  -- exactly the cost this cache exists to avoid. (Found by testing:
-  -- touching just one module's source was invalidating the whole
-  -- project's .o files before this fix.)
+  writeFileIfChanged mainPath (pPrint (writeMain rootModule (mainModeOpt opts)))
+  let incDirs      = nub (map (takeDirectory . snd) cHs)
+      compileFlags = ["-std=c11", "-O2"] ++ debugFlag ++ cflags
+                     ++ map ("-I" ++) (runtimeDir : incDirs)
+      runtimeFiles = map (runtimeDir </>) [ "runtime.c", "trail.c", "machine.c"
+                                          , "heap.c", "gc.c", "prelude.c" ]
+      allCFiles    = runtimeFiles ++ map fst cHs ++ [mainPath]
+  -- Only the hand-written runtime headers count here. A module's generated
+  -- .h is always rewritten together with its .c, so the ordinary .c-vs-.o
+  -- check already covers it; counting it here would make any module's
+  -- change recompile every object.
   hdrTime <- newestHeaderTime [runtimeDir]
   objs <- mapM (compileObj cc compileFlags hdrTime) allCFiles
   let cmd = unwords ([cc] ++ objs ++ ["-lm", "-o", rootModule])
@@ -291,20 +254,18 @@ buildExecutable opts modNames = do
   if code == 0
     then putStrLn ("Built ./" ++ rootModule)
     else putStrLn ("Link failed (exit code " ++ show code ++ ")")
+ where
+  cc = if SUseGCC `elem` opts then "gcc" else "clang"
+  -- The last --debug wins.
+  debugFlag = case [n | SDebug n <- opts] of
+    [] -> []
+    ns -> ["-DDEBUG=" ++ show (last ns)]
+  -- Every --cflags is used, and each can hold several flags.
+  cflags = concatMap words [s | SCFlags s <- opts]
 
---- Compile `cFile` to its `.o` (same directory, `.o` extension in place
---- of `.c`) with `cc`/`flags`, unless it's already up to date: the `.o`
---- exists, is newer than `cFile`, newer than `hdrTime` (from
---- `newestHeaderTime [runtimeDir]` at the call site -- the hand-edited
---- runtime headers every object includes; deliberately coarse, since we
---- don't track which object includes which of *those*, but deliberately
---- excludes per-module generated headers, whose staleness the ordinary
---- `.c`-vs-`.o` check below already covers -- see the call site's own
---- comment), and was last built with this exact same `cc`/`flags`
---- (recorded in a `.o.flags` sidecar) -- so e.g. adding `--debug=high`
---- after a plain build can't silently relink against a stale, non-debug
---- object. Returns the `.o` path either way, to feed straight into the
---- link command.
+--- Compiles `cFile` to a `.o` next to it, unless the `.o` is up to date:
+--- newer than `cFile` and than `hdrTime`, and built with the same command
+--- line, which we record in a `.o.flags` file beside it. Returns the `.o`.
 compileObj :: String -> [String] -> Maybe ClockTime -> FilePath -> IO FilePath
 compileObj cc flags hdrTime cFile = do
   let oFile      = replaceExtension cFile "o"
@@ -325,32 +286,20 @@ compileObj cc flags hdrTime cFile = do
       putStrLn ("Compiling: " ++ cmd)
       code <- system cmd
       if code == 0
-        -- Plain `writeFile`, not `writeFileIfChanged`: we're already
-        -- committed to recording the flags used for this compile, so
-        -- there's nothing to gain from comparing against the old
-        -- content first -- and doing so would mean two separate reads
-        -- of `flagsFile` in one `compileObj` call (this one plus
-        -- `readIfExists` above), which in practice raced with this
-        -- very write and failed with "resource busy (file is locked)"
-        -- until this was changed to a single forced read.
         then do writeFile flagsFile invocation
                 return oFile
         else error ("Compile failed (exit code " ++ show code ++ "): " ++ cFile)
  where
-  -- Forces the content immediately (`length s \`seq\``, same trick
-  -- `Rice.Build.Cache.writeFileIfChanged` uses) rather than returning a
-  -- lazy `readFile` thunk -- otherwise this handle can still be open
-  -- (unforced) when we later try to write the same path above.
+  -- `readFile` is lazy, so we force the whole file here. Otherwise the
+  -- handle could still be open when we write `flagsFile` above.
   readIfExists path = do
     exists <- doesFileExist path
     if not exists then return Nothing else do
       s <- readFile path
       length s `seq` return (Just s)
 
---- Newest modification time among every `*.h` file directly inside
---- `dirs` (no recursion -- `runtime/` and each module's own cache
---- directory are both flat), or `Nothing` if there are none. See
---- `compileObj`'s use of this as a coarse object-staleness bound.
+--- The newest modification time of the `.h` files directly in `dirs`, or
+--- `Nothing` if there aren't any.
 newestHeaderTime :: [FilePath] -> IO (Maybe ClockTime)
 newestHeaderTime dirs = do
   files <- concat <$> mapM headersIn dirs
@@ -363,28 +312,29 @@ newestHeaderTime dirs = do
       names <- getDirectoryContents d
       return [d </> n | n <- names, takeExtension n == ".h"]
 
-data CompilerOptions = SPrintFlatCurry | SPrintReplace  |
-                       SPrintFlatCurryRaw |
-                       SPrintUnbox     | SPrintICurry   |
-                       SPrintC         | SMakeExt       |
-                       SNoPrelude      | SUseGCC        |
-                       SPrintLoops      | SPrintANF     | SPrintFieldReps |
-                       SLintFieldReps   |
-                       SNoOptimize      | SStopReplace  |
-                       SStopCondense    | SStopUnbox    |
-                       SStopRaw         | SStopOptimize | SDebug Int   |
-                       SCFlags String   | SPrintOptimize |
-                       STraceOptimize   | SForceRecompile |
-                       SForceRecompileModule String |
-                       SCompilerTime    | SHelp     |
-                       SInteractive
- deriving(Show, Eq)
+------------------------------------------------------------------------------
+-- Options
+------------------------------------------------------------------------------
 
---- Parses --debug's argument into an SDebug level: runtime/debug.h's
---- named levels (low/med/high, case-insensitive, matching its
---- LOW/MED/HIGH macros) or a plain non-negative integer (0 disables it,
---- same as omitting --debug; anything above HIGH's 3 is accepted too,
---- since debug.h's `DEBUG >= level` checks impose no upper bound).
+data CompilerOptions
+  -- printing intermediate stages
+  = SPrintFlatCurry | SPrintFlatCurryRaw | SPrintUnbox | SPrintReplace
+  | SPrintOptimize  | STraceOptimize     | SPrintANF   | SPrintFieldReps
+  | SPrintICurry    | SPrintC            | SPrintLoops
+  -- stopping after a stage
+  | SStopRaw | SStopCondense | SStopUnbox | SStopReplace | SStopOptimize
+  -- compiling
+  | SNoOptimize | SLintFieldReps | SInteractive | SNoPrelude | SMakeExt
+  -- building the executable
+  | SUseGCC | SDebug Int | SCFlags String
+  -- caching
+  | SForceRecompile | SForceRecompileModule String
+  -- other
+  | SCompilerTime | SHelp
+ deriving (Show, Eq)
+
+--- Parses `--debug`'s argument: one of `runtime/debug.h`'s named levels
+--- (low, med, high), or a non-negative number. 0 turns debugging off.
 parseDebugLevel :: String -> CompilerOptions
 parseDebugLevel s = SDebug $ case map toLower s of
   "low"    -> 1
@@ -393,51 +343,66 @@ parseDebugLevel s = SDebug $ case map toLower s of
   "high"   -> 3
   other    -> case reads other of
     [(n, "")] | n >= 0 -> n
-    _ -> error ("--debug: expected low|med|high or a non-negative " ++
-                "integer, got " ++ show s)
+    _ -> error ("--debug: expected low|med|high or a non-negative "
+                ++ "integer, got " ++ show s)
 
---- Which top-level driver `writeMain` (Rice.Codegen.C.ToC) generates --
---- `Standalone` (the default, no flag needed) for an ordinary program's
---- `main :: IO _`, run exactly once; `Interactive` (`--interactive`) for
---- a REPL-style front end's generated goal-evaluation module, which wants
---- every solution `nf_all` can backtrack into -- see `MainMode`'s own
---- comment for the full reasoning.
+--- The driver the generated `main.c` runs `main` with (see `MainMode`).
 mainModeOpt :: [CompilerOptions] -> MainMode
 mainModeOpt opts = if SInteractive `elem` opts then Interactive else Standalone
 
 optDescrs :: [OptDescr CompilerOptions]
-optDescrs = [
-  Option []  ["printloops"] (NoArg SPrintLoops)      "print loops in call graph",
-  Option []  ["printANF"]   (NoArg SPrintANF)        "print code in A-Normal form",
-  Option "f" ["flatcurry"]  (NoArg SPrintFlatCurry)  "print FlatCurry",
-  Option []  ["fcy"]        (NoArg SPrintFlatCurryRaw) "print FlatCurry raw format",
-  Option "r" ["replace"]    (NoArg SPrintReplace)   "print replaced FlatCurry",
-  Option "u" ["unbox"]      (NoArg SPrintUnbox)     "print unboxed FlatCurry",
-  Option "i" ["icurry"]     (NoArg SPrintICurry)    "print ICurry",
-  Option []  ["print-fieldreps"] (NoArg SPrintFieldReps)
-                                                     "print which fields/variables hold raw Int#/Char#/Float# values (see src/field-reps-plan.md)",
-  Option []  ["lint-fieldreps"] (NoArg SLintFieldReps)
-                                                     "fail the compile if raw values could reach a pointer slot, in every module regenerated (also on with --debug)",
-  Option "c" []             (NoArg SPrintC)         "print C files",
-  Option "e" ["external"]   (NoArg SMakeExt)        "make/overwrite external file",
-  Option "p" ["noprelude"]  (NoArg SNoPrelude)      "don't include Prelude (for testing)",
-  Option "x" ["gcc"]        (NoArg SUseGCC)         "Use GCC instead of clang",
-  Option []  ["debug"]      (ReqArg parseDebugLevel "LEVEL")
-                                                     "build with runtime debug output (low|med|high, or a number; see runtime/debug.h)",
-  Option []  ["cflags"]     (ReqArg SCFlags "FLAGS")
-                                                     "extra, space-separated flags passed straight to the C compiler (e.g. \"-DOPT_EPOCH_TRAIL=1\"; repeatable)",
-  Option "o" ["optimize"]   (NoArg SPrintOptimize)  "print FlatCurry after optimize, before ANF",
-  Option []  ["trace-optimize"] (NoArg STraceOptimize) "print every optimizer rewrite step, per function (for testing)",
-  Option []  ["no-optimize"](NoArg SNoOptimize)     "skip Rice.Optimize.Inline (for testing)",
-  Option []  ["force-recompile"](NoArg SForceRecompile)
-                                                     "recompile+reoptimize the module given on the command line, ignoring its .rtfcy cache (its imports are still only rebuilt if stale; see --force-recompile-module)",
-  Option []  ["force-recompile-module"] (ReqArg SForceRecompileModule "MODULE")
-                                                     "also force-recompile MODULE (e.g. a stdlib module like Prelude) regardless of its .rtfcy cache; repeatable",
-  Option []  ["compiler-time"] (NoArg SCompilerTime) "print how long each compiler stage takes (TIME lines, in ms)",
-  Option []  ["interactive"](NoArg SInteractive)    "compile a REPL-style goal-evaluator instead of a standalone executable: print every solution main can backtrack into (nf_all), instead of running an IO main exactly once (run_io) -- for curry-repl-style front ends, not ordinary programs",
-  Option "h" ["help"]        (NoArg SHelp)          "print this help message and exit",
-  Option []  ["stop-replace"](NoArg SStopReplace)   "force+print replace's output then stop (for testing)",
-  Option []  ["stop-condense"](NoArg SStopCondense) "force+print condenseStrings's output then stop (for testing)",
-  Option []  ["stop-unbox"](NoArg SStopUnbox)       "force+print unbox's output then stop (for testing)",
-  Option []  ["stop-raw"](NoArg SStopRaw)           "force+print the raw, untransformed TProg then stop (for testing)",
-  Option []  ["stop-optimize"](NoArg SStopOptimize) "force+print optimize's output then stop (for testing)"]
+optDescrs =
+  -- printing intermediate stages, in pipeline order
+  [ Option "f" ["flatcurry"]       (NoArg SPrintFlatCurry)    "print FlatCurry"
+  , Option []  ["fcy"]             (NoArg SPrintFlatCurryRaw) "print FlatCurry raw format"
+  , Option "u" ["unbox"]           (NoArg SPrintUnbox)        "print unboxed FlatCurry"
+  , Option "r" ["replace"]         (NoArg SPrintReplace)      "print replaced FlatCurry"
+  , Option "o" ["optimize"]        (NoArg SPrintOptimize)     "print FlatCurry after optimize, before ANF"
+  , Option []  ["trace-optimize"]  (NoArg STraceOptimize)     "print every optimizer rewrite step, per function"
+  , Option []  ["printANF"]        (NoArg SPrintANF)          "print code in A-Normal form"
+  , Option []  ["print-fieldreps"] (NoArg SPrintFieldReps)    fieldRepsHelp
+  , Option "i" ["icurry"]          (NoArg SPrintICurry)       "print ICurry"
+  , Option "c" []                  (NoArg SPrintC)            "regenerate the C files (doesn't print them yet)"
+  , Option []  ["printloops"]      (NoArg SPrintLoops)        "print loops in call graph"
+
+  -- stopping after a stage
+  , Option []  ["stop-raw"]        (NoArg SStopRaw)           "print the untransformed program, then stop"
+  , Option []  ["stop-condense"]   (NoArg SStopCondense)      "print condenseStrings's output, then stop"
+  , Option []  ["stop-unbox"]      (NoArg SStopUnbox)         "print unbox's output, then stop"
+  , Option []  ["stop-replace"]    (NoArg SStopReplace)       "print replace's output, then stop"
+  , Option []  ["stop-optimize"]   (NoArg SStopOptimize)      "print optimize's output, then stop"
+
+  -- compiling
+  , Option []  ["no-optimize"]     (NoArg SNoOptimize)        "skip Rice.Optimize.Inline"
+  , Option []  ["lint-fieldreps"]  (NoArg SLintFieldReps)     lintHelp
+  , Option []  ["interactive"]     (NoArg SInteractive)       interactiveHelp
+  , Option "p" ["noprelude"]       (NoArg SNoPrelude)         "don't include Prelude (not implemented)"
+  , Option "e" ["external"]        (NoArg SMakeExt)           "make/overwrite external file (not implemented)"
+
+  -- building the executable
+  , Option "x" ["gcc"]             (NoArg SUseGCC)                  "use GCC instead of clang"
+  , Option []  ["debug"]           (ReqArg parseDebugLevel "LEVEL") debugHelp
+  , Option []  ["cflags"]          (ReqArg SCFlags "FLAGS")         cflagsHelp
+
+  -- caching
+  , Option []  ["force-recompile"]        (NoArg SForceRecompile)               forceHelp
+  , Option []  ["force-recompile-module"] (ReqArg SForceRecompileModule "MODULE") forceModuleHelp
+
+  -- other
+  , Option []  ["compiler-time"]   (NoArg SCompilerTime)      "print how long each compiler stage takes, in ms"
+  , Option "h" ["help"]            (NoArg SHelp)              "print this help message and exit"
+  ]
+ where
+  fieldRepsHelp   = "print which fields and variables hold raw Int#/Char#/Float# values"
+  lintHelp        = "fail the compile if a raw value could reach a pointer slot, "
+                    ++ "in every regenerated module (also on with --debug)"
+  interactiveHelp = "print every solution of main (nf_all), instead of running "
+                    ++ "an IO main once (run_io); for REPL front ends"
+  debugHelp       = "build with runtime debug output: low, med, high, or a number "
+                    ++ "(see runtime/debug.h)"
+  cflagsHelp      = "extra space-separated C compiler flags, e.g. "
+                    ++ "\"-DOPT_EPOCH_TRAIL=1\"; repeatable"
+  forceHelp       = "recompile the module on the command line, ignoring its cache "
+                    ++ "(its imports are only rebuilt if stale)"
+  forceModuleHelp = "also recompile MODULE (e.g. Prelude), ignoring its cache; "
+                    ++ "repeatable"

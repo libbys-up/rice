@@ -18,31 +18,18 @@ import FlatCurry.Typed.Files   (readTypedFlatCurry)
 import Rice.Build.Cache (readCachedImports, writeCachedImports)
 import Rice.Diagnostics (timeIO)
 
---- Every module reachable from some root, keyed by name, mapped to its
---- own (direct) imports -- deliberately not the full `TProg`. See
---- `buildModuleGraph`.
+--- Every module reachable from the root, mapped to its direct imports.
+--- It holds only names, so building it doesn't have to parse every module.
 type ModuleGraph = Map.Map String [String]
 
---- Discover every module reachable from `root` and each one's direct
---- imports, without ever forcing a full `TProg` for a module we don't
---- otherwise need one for. `root` (the file given on the command line)
---- is parsed for real -- there's no cheaper way to learn its true module
---- name, and as ordinary user code it's normally small, so this is fine.
---- Every module reachable from there, though, is referenced by its real
---- name (straight from some other module's own `tProgImports`), so for
---- those `Rice.Build.Cache.readCachedImports` is tried first: a tiny
---- side-cache of just the import list, valid exactly when the module's
---- `.tfcy` hasn't changed since it was last recorded. Only on a cache
---- miss (missing, or the `.tfcy` changed since) do we fall back to
---- `readTypedFlatCurry` and force `tProgImports` on the result -- which,
---- for a module the size of Prelude, is where "reading Prelude takes
---- ~4s" actually comes from (KiCS2's derived `Read TProg` instance
---- isn't incremental: forcing any one field reparses the whole ~2MB
---- `.tfcy`, confirmed by timing `tProgImports` alone). That fallback
---- case is also, not coincidentally, almost always exactly the case
---- where the module turns out to be stale and needs a real recompile
---- anyway (see `Rice.Build.Cache.needsRecompile`), so the cost isn't
---- wasted even when it's paid.
+--- Finds every module reachable from `root` and each one's imports.
+---
+--- We parse `root` itself, because that's the only way to learn its module
+--- name. For every other module we try the `.rimports` cache first
+--- (`Rice.Build.Cache.readCachedImports`), because reading any part of a
+--- `TProg` parses the whole `.tfcy`, which takes seconds for Prelude. We
+--- only parse a module when its `.tfcy` has changed, and then it's almost
+--- always stale and has to be recompiled anyway.
 buildModuleGraph :: Bool -> String -> IO ModuleGraph
 buildModuleGraph timing root = do
   rootProg <- timeIO timing (root ++ ": readTypedFlatCurry (root)") (readTypedFlatCurry root)
@@ -69,12 +56,8 @@ buildModuleGraph timing root = do
         writeCachedImports m imps
         return imps
 
---- Sort a module graph into dependency order (a module's imports always
---- come before it), returning module names -- `Rice.Main` fetches each
---- one's actual `TProg` itself, only once it knows whether that module
---- is actually stale. `Left` names a cyclic import -- Curry doesn't
---- allow those, so this is always a hard error to report, never
---- something to recover from.
+--- Sorts the module names so that a module's imports come before it.
+--- `Left` names the modules in an import cycle, which Curry doesn't allow.
 topoSort :: ModuleGraph -> Either [String] [String]
 topoSort graph =
   collect (scc (\(name,_) -> [name]) snd (Map.toList graph))

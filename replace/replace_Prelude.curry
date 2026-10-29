@@ -1,6 +1,7 @@
 module replace_Prelude where
 
--- replacements for Prelude that we need for RICE
+-- Rice's own definitions of some Prelude functions. Rice.Files.Replace
+-- swaps each one in for the Prelude function of the same name.
 
 aValueNat :: Int -> Int
 aValueNat n = n ? -n ? aValueNat (n+1)
@@ -28,18 +29,11 @@ aValueInt = 0 ? aValueNat 1
 --              else nat2float (m / 10) (i `div` 10) + m * fromInt (i `mod` 10)
 
 
--- Make sure these are all the PAKCS versions
--- except for =:<<=, (=:=), and (=:<=): kics2's own Prelude.curry (the
--- branch Rice's frontend actually selects -- see its own #else, not
--- #ifdef __PAKCS__) declares these two *without* PAKCS's `Data a =>`
--- constraint, so every call site anywhere already compiles them as plain
--- 2-argument calls. Giving the replacement definitions here PAKCS's
--- constrained signature instead made Rice's dictionary-passing add a real
--- (unused, since the body never references it) 3rd parameter that no call
--- site ever supplies -- reduce/inlineCall's subGrounded zips the callee's
--- 3 renamed parameters against the caller's 2 actual arguments and
--- silently drops the last one instead of erroring on the length
--- mismatch, leaving a dangling reference to a variable nothing binds.
+-- These follow PAKCS's Prelude, except for the types of (=:=) and (=:<=).
+-- The front end compiles Prelude's KiCS2 branch, where they have no
+-- `Data a =>` constraint, so every call passes two arguments. A replacement
+-- has to have the same type as the function it replaces: a constraint here
+-- would add a dictionary parameter that no call supplies.
 ioError :: IOError -> IO _
 ioError err = error (show err)
 

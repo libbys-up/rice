@@ -1,22 +1,11 @@
 ------------------------------------------------------------------------------
---- The inliner: a set of deterministic TypedFlatCurry rewrite rules
---- (built on `FlatCurry.Transform.Typed.ExecDet`) that cancel out
---- constructor/literal/case `Let`-bindings, and substitute calls to small
---- functions in place of the call.
+--- The optimizer: deterministic TypedFlatCurry rewrite rules, run to a
+--- fixpoint by `FlatCurry.Transform.Typed.ExecDet`. They inline small
+--- functions, cancel cases on known constructors, and drop dead bindings.
 ---
---- Currently runs directly on `replace`'s output, before any ANF
---- conversion at all -- correct regardless (see `subGrounded`: nothing
---- ever gets duplicated, independent of what ANF stage the expression is
---- in), but `inline`'s `Let`-cancellation rules only have much to do once
---- something has actually introduced `Let`s to cancel. The plan from
---- design discussion was a "limited" ANF pass (outlining calls/case
---- scrutinees but not constructors/literals) immediately before
---- optimization specifically to give those rules more to work with; that
---- pass (`normalizeLimited`, a sibling to `Rice.Transform.ANF.normalize`)
---- doesn't exist yet, so `reduce`/`caseCancel`/`deadCode` are doing most
---- of the real work for now.
----
---- Ported from old_rice's `Optimize/Inline.curry`.
+--- The optimizer runs before ANF, so there are few `Let`s for `inline` to
+--- cancel yet; most of the work is done by `reduce`, `caseCancel` and
+--- `deadCode`. See the developer's manual, "The optimizer".
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -28,37 +17,27 @@ module Rice.Optimize.Inline
  ) where
 
 import FlatCurry.Typed.Types
-import FlatCurry.Typed.Goodies (isCombTypeFuncCall, isCombTypeConsCall
-                                , updTProgTExps)
+import FlatCurry.Typed.Goodies (isCombTypeFuncCall, isCombTypeConsCall)
 
 import FlatCurry.Transform.Typed.Types   (TExprTransformationDet, combine)
 import FlatCurry.Transform.Typed.Utils   (newVar)
 import FlatCurry.Transform.Typed.Goodies
   (ground, nonRecursive, strict, hasVar, uses, sub, idSub, (@>), rename
   , isCons, isPart)
-import FlatCurry.Transform.Typed.ExecDet (transformExprDet)
+import FlatCurry.Transform.Typed.ExecDet (transformExprDet, transformFuncsInProgDet)
 
 import Rice.Optimize.FunTable
 
 ------------------------------------------------------------------------------
--- Constructors, partial applications and literals are deliberately never
--- outlined by `normalizeLimited` (see Rice.Transform.ANF), so they show
--- up sitting directly in `Let`s the way ordinary ANF-outlined
--- subexpressions do. This rule cancels those back out once they've served
--- their purpose as a case scrutinee or call argument.
---
---   let x = C v1..vn in e   ==>   e[x -> C v1..vn]
---   let x = <literal> in e  ==>   e[x -> <literal>]
---
--- A `Case` binding gets the same treatment, but only when `x` is used
--- exactly once and in a position guaranteed to force it anyway (`strict`)
--- -- otherwise this would just relocate the case, not simplify anything,
--- and could even duplicate it.
--- One equation dispatching via `case` (rather than several top-level
--- equations ending in a catch-all), so this stays deterministic instead
--- of the compiler treating the clauses as potentially-overlapping
--- choices -- see FlatCurry.Transform.Typed.Goodies' note on kics2's
--- nondeterminism overhead.
+--- Substitutes a `Let`-bound constructor, partial application or literal
+--- into the body:
+---
+---   let x = C v1..vn in e   ==>   e[x -> C v1..vn]
+---   let x = <literal> in e  ==>   e[x -> <literal>]
+---
+--- A bound `Case` is substituted only when `x` is used exactly once, in a
+--- position that forces it anyway (`strict`). Otherwise we'd just move the
+--- case, or duplicate it.
 inline :: TExprTransformationDet
 inline _ expr = case expr of
   TLet [((x,_), f@(TComb _ ct _ _))] e
@@ -72,26 +51,13 @@ inline _ expr = case expr of
   _ -> Nothing
 
 ------------------------------------------------------------------------------
--- case-of-known-constructor / case-of-known-literal:
---
---   case (C e1..en) of { ...; C x1..xn -> e; ... }  ==>  e[xi -> ei]
---   case <lit> of { ...; <lit> -> e; ... }           ==>  e
---
--- Matches through any TTyped wrapping the scrutinee first (stripTyped),
--- not just a bare TComb/TLit -- an explicitly type-annotated literal
--- (`(3 :: Int)`, as opposed to a bare `3` inferred from context) compiles
--- to exactly that: `TTyped (TLit ... 3) IntType`, which the two patterns
--- below didn't match at all before this, falling through to `_ ->
--- Nothing` and leaving the whole case (and everything inlined on top of
--- it -- this is exactly the shape REDUCE's own inlining produces for
--- `eqInt`'s boxed-Int unwrapping) permanently uncancelled. Confirmed via
--- a minimal repro: `if (3 :: Int) == 4 then 1 else 0` failed to compile
--- outright ("use of undeclared identifier") because the un-cancelled
--- `fcase` left a variable substitution (subGrounded, elsewhere in this
--- module) that never happened, while codegen downstream still expected
--- it to have; `if 3 == 4 then ...` (no annotation on either literal,
--- both inferred from `main`'s own return type) compiled and ran
--- correctly, isolating the annotation itself as the trigger.
+--- Case of a known constructor or literal:
+---
+---   case (C e1..en) of { ...; C x1..xn -> e; ... }  ==>  e[xi -> ei]
+---   case <lit> of { ...; <lit> -> e; ... }           ==>  e
+---
+--- The scrutinee may be wrapped in `TTyped`: an annotated literal like
+--- `(3 :: Int)` is `TTyped (TLit ...) Int`.
 caseCancel :: TExprTransformationDet
 caseCancel _ expr = case expr of
   TCase _ scrutinee bs -> case stripTyped scrutinee of
@@ -107,20 +73,7 @@ caseCancel _ expr = case expr of
     _ -> Nothing
   _ -> Nothing
 
---- Strip any number of `TTyped` wrappers down to the expression
---- underneath -- a type annotation never changes an expression's own
---- shape, only what type-level fact is attached to it, so this is safe
---- to do unconditionally before pattern-matching on that shape.
----
---- Written with a `case` (rather than two top-level equations) for the
---- same reason isIOType (elsewhere in this module) already is: the
---- compiler can't prove `TTyped e _` and a bare-variable catch-all are
---- mutually exclusive, so two equations here compile to a genuinely
---- nondeterministic Or instead of deterministic dispatch -- confirmed
---- directly, not just by analogy: caught by the *exact* "List data with
---- no ground term" symptom this session's isIOType fix was for,
---- reintroduced by writing this function the same wrong way the first
---- time round.
+--- Removes any `TTyped` wrappers.
 stripTyped :: TExpr -> TExpr
 stripTyped e = case e of
   TTyped e' _ -> stripTyped e'
@@ -143,16 +96,11 @@ findLitBranch l bs = case filter isMatch bs of
                      TBranch (TPattern _ _ _) _ -> False
 
 ------------------------------------------------------------------------------
---- Prune bindings nothing refers to.
+--- Drops bindings nothing refers to.
 ---
---- A `Let`'s bound expression is *not* safe to drop just because its
---- variable goes unused when that expression has type `IO a`: running it
---- is the whole reason `>>`/`*>`'s desugaring (a `do`-block's non-final
---- statements ANF-normalize to exactly `let _ = statement in rest`) put
---- it there -- the returned value is meant to be discarded, but the
---- *effect* still has to happen. Every other type in Curry is pure (no
---- observable effect from evaluating and discarding a value of it), so
---- this only needs to special-case `IO`.
+--- An unused `Let` of type `IO a` has to stay: a `do` block's non-final
+--- statement can become `let _ = statement in rest`, and the statement's
+--- effect still has to happen. Every other type is pure.
 deadCode :: TExprTransformationDet
 deadCode _ expr = case expr of
   TFree [] e -> Just (e, "DEAD_CODE", 0)
@@ -165,49 +113,23 @@ deadCode _ expr = case expr of
     | x == y && not (hasVar x e) -> Just (e, "DEAD_CODE", 0)
   _ -> Nothing
 
---- Whether a type is (an application of) `Prelude.IO`. Only looks at the
---- outermost type constructor: a `Let`'s bound expression is always a
---- saturated value of exactly this type, never a partial application
---- still building up to one.
----
---- Written with a `case` (rather than two top-level equations, which the
---- compiler warned it can't prove are mutually exclusive: "Function
---- `isIOType' is potentially non-deterministic due to overlapping
---- rules") so this stays deterministic -- see FlatCurry.Transform.Typed.
---- Goodies' note on kics2's nondeterminism overhead for the same fix
---- elsewhere. Left as two equations, `deadCode`'s `TLet` rule (the only
---- caller) would nondeterministically choose between dropping and
---- keeping *any* dead `Let` -- including non-`IO` ones like a dropped
---- dictionary argument from `subGrounded` -- which silently poisons the
---- whole optimized module with unresolved choice: forcing it later (e.g.
---- `Rice.Build.Cache.writeOptIfChanged`'s `show`) fails outright with
---- "Non-determinism in IO occured", surfacing downstream as KiCS2's
---- generic "List data with no ground term" once the resulting broken
---- `String` is bridged back to a real Haskell one for `writeFile`.
+--- Is this type `Prelude.IO t`?
 isIOType :: TypeExpr -> Bool
 isIOType ty = case ty of
   TCons ("Prelude", "IO") _ -> True
   _                         -> False
 
 ------------------------------------------------------------------------------
---- Substitute a function call's arguments for its parameters. Ground
---- arguments (variables, literals, ground constructor applications) get
---- substituted directly; everything else gets exactly one `Let`, so it's
---- evaluated at most once regardless of how many times the parameter
---- occurs in the body. This is the whole reason inlining here is safe
---- without caring which ANF stage the expression is in: nothing that
---- could be shared or non-deterministic ever gets duplicated.
---- `vs` and `args` must be the same length -- a mismatch means the
---- callee's declared parameter count doesn't match how many arguments
---- this call site actually supplies (a real arity bug upstream, e.g. a
---- `replace_*.curry` override declared with a different type than the
---- real function it replaces -- see `replace/replace_Prelude.curry`'s own
---- note on `(=:=)`/`(=:<=)` for a caught instance). `zip` would silently
---- truncate to the shorter list instead of erroring, leaving whichever
---- parameters ran out of arguments as dangling references nothing binds
---- -- checked explicitly so that surfaces here, at the mismatch, instead
---- of much later as a mysterious "undeclared identifier" from the C
---- compiler.
+--- Substitutes a call's arguments for the callee's parameters `vs`.
+--- Ground arguments (variables, literals, ground constructor applications)
+--- are substituted directly. Everything else is bound once with a `Let`, so
+--- it's still evaluated at most once and shared. That's what makes
+--- inlining safe: we never duplicate work or a choice.
+---
+--- `vs` and `args` must be the same length. If they aren't, the callee was
+--- declared with the wrong arity (for example a `replace/` override with a
+--- different type from the function it replaces), and we stop here rather
+--- than leave a parameter unbound.
 subGrounded :: TExpr -> [VarIndex] -> [TExpr] -> TExpr
 subGrounded e vs args
   | length vs /= length args = error $
@@ -254,6 +176,6 @@ optimizeExpr ft = transformExprDet (optimizeRules ft)
 
 --- Run the optimizer over every function body in a program.
 optimizeProg :: FunTable -> TProg -> TProg
-optimizeProg ft = updTProgTExps (optimizeExpr ft)
+optimizeProg ft = transformFuncsInProgDet (optimizeRules ft)
 
 ------------------------------------------------------------------------------

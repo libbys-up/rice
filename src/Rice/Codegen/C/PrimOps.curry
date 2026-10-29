@@ -1,39 +1,18 @@
 ------------------------------------------------------------------------------
---- The table of primitive operations (`replace/replace_Prim.curry`'s
---- `prim_*` externals) that get compiled to an inline C expression at every
---- call site, instead of an actual function call -- these are the
---- unboxed-argument, unboxed-result primitives `Rice.Transform.Unbox`'s
---- design assumes exist (see `archetecture.md`'s Unboxing section): by the
---- time one of these is called, its arguments are already raw `field`
---- members (an already-unboxed `Int#`/`Char#`/`Float#`), never a boxed
---- node, so there's never a reason to pay for an actual C function call --
---- reading `field .= <op>;` (or `(field)(cast)(<op>)` in expression
---- position) is the whole function body.
+--- The primitive operations that compile to an inline C expression at
+--- every call site instead of a call: the `prim_*` externals of
+--- `replace/replace_Prim.curry`. Their arguments are already raw `Int#`,
+--- `Char#` or `Float#` values, so the operation is just a C operator or a
+--- math library call.
 ---
---- Confirmed against the *real* names Rice actually generates (not
---- old_rice's or fast_backtrack's assumed `primAddInt`-style names, both
---- of which predate `replace_Prim.curry`'s current naming) by compiling a
---- small test program and reading its `--icurry` output directly.
+--- Each entry says what it computes and the raw type of its result;
+--- `primMake` and `primSet` build the expression and statement forms
+--- from that.
 ---
---- Each entry only needs to say what it computes and which raw type its
---- result belongs to; `primMake`/`primSet` below derive both the
---- expression form and the statement form from that one description --
---- see `src/codegen-runtime-review.md`'s case for this over old_rice's
---- ~15 independently hand-written `make`/`set` pairs.
----
---- Deliberately **not** in this table: `prim_show*Literal` and
---- `prim_putChar` -- `prim_show*Literal` returns a `String` (not a raw
---- scalar); `prim_putChar` reads a raw `Char#` argument like everything
---- else here, but can't be inlined this way regardless, because every
---- entry in this table compiles to a plain C *expression*, evaluated as
---- soon as C's own control flow reaches the `Let` that binds it --
---- correct only because every other primitive here is pure, so *when*
---- the expression actually runs is unobservable. `prim_putChar` has a
---- real side effect that `bindIO`'s sequencing has to control the order
---- of, so it can't be run early. Both are instead genuine `_hnf`
---- functions in `runtime/prelude.c`, dispatched the ordinary way (an
---- `IExternal` function, not inlined) so they only run when something
---- actually forces them -- same as `getChar`.
+--- An inline primitive runs as soon as control reaches the `let` that
+--- binds it, which is only safe because it's pure. So `prim_putChar`
+--- isn't here, and neither are the `prim_show*Literal`s (which return a
+--- `String`). They're ordinary externals in `runtime/prelude.c`.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -61,9 +40,7 @@ data PrimEntry
   = PrimArith { peArgType :: CType, peResType :: CType, peCompute :: [CExpr] -> CExpr }
   | PrimCmp   { peArgType :: CType, peOp :: CExpr -> CExpr -> CExpr }
 
---- Which raw type a primitive's arguments should be read as (needed by
---- the caller to project each `IExpr` argument via `showPrim` before
---- `primMake`/`primSet` ever sees it).
+--- The raw type a primitive's arguments are read as (`ToC.showPrim`).
 primArgType :: PrimEntry -> CType
 primArgType (PrimArith t _ _) = t
 primArgType (PrimCmp   t _)   = t
@@ -78,9 +55,7 @@ makeCtor n = call ("make_" ++ mangle n) [int 0]
 setCtor :: IQName -> CExpr -> CStmt
 setCtor n root = scall ("set_" ++ mangle n) [root, int 0]
 
---- The full expression for a primitive call, given its already-projected
---- (`showPrim`) arguments -- used wherever the call appears as an
---- expression (`showExpr`).
+--- A primitive call as an expression, given its raw arguments.
 primMake :: PrimEntry -> [CExpr] -> CExpr
 primMake entry args = case entry of
   PrimArith _ resTy compute -> toUnion resTy (compute args)
@@ -88,10 +63,8 @@ primMake entry args = case entry of
     [x,y] -> op x y <+> text "?" <+> makeCtor trueQ <+> text ":" <+> makeCtor falseQ
     _     -> error "Rice.Codegen.C.PrimOps: comparison primitive needs exactly 2 arguments"
 
---- The statement form: assign the primitive's result directly into
---- `root`'s raw field -- used wherever the call is the immediate
---- right-hand side of a `Let` (`setExpr`), avoiding the allocation
---- `primMake`'s standalone expression form would otherwise need.
+--- A primitive call that is a function's result: store the result
+--- straight into `root`.
 primSet :: PrimEntry -> CExpr -> [CExpr] -> [CStmt]
 primSet entry root args = case entry of
   PrimArith _ resTy compute -> [rawField resTy root .= compute args]
@@ -118,12 +91,8 @@ bin f args = case args of
 libCall :: CName -> [CExpr] -> CExpr
 libCall = call
 
---- Keyed by (module, name) only, *not* the full `IQName` triple: ICurry's
---- third component is a per-module function-numbering index assigned at
---- ICurry-generation time (see `ICurry.Types`' own doc comment on
---- `IQName`), not something this table can predict or should depend on --
---- matching on it would make every lookup here silently miss. A
---- primitive's true identity is (module, name); the index is incidental.
+--- Keyed by module and name. An `IQName` also carries an index that
+--- ICurry assigns, which we can't know here.
 primOpsTable :: Map.Map (String,String) PrimEntry
 primOpsTable = Map.fromList
   [ -- comparisons
@@ -140,8 +109,7 @@ primOpsTable = Map.fromList
   , (("Prelude","prim_timesInt"), arith "int" "int" (bin (.*)))
   , (("Prelude","prim_divInt"),   arith "int" "int" (bin (\x y -> libCall "prim_div" [x,y])))
   , (("Prelude","prim_modInt"),   arith "int" "int" (bin (\x y -> libCall "prim_mod" [x,y])))
-  -- quot/rem are already exactly C's native `/`/`%` (truncating toward
-  -- zero, same sign as the dividend) -- see runtime/prim.h's comment.
+  -- quot and rem truncate toward zero, which is what C's / and % do.
   , (("Prelude","prim_quotInt"),  arith "int" "int" (bin (./)))
   , (("Prelude","prim_remInt"),   arith "int" "int" (bin (.%)))
 
@@ -177,8 +145,7 @@ primOpsTable = Map.fromList
   , (("Prelude","prim_atanhFloat"), arith "float" "float" (un (\x -> libCall "atanh" [x])))
   ]
 
---- Look up a call site's `IQName` against the primitive table -- see
---- `primOpsTable`'s own comment on why this drops the index.
+--- The primitive a call refers to, if it's one.
 lookupPrim :: IQName -> Maybe PrimEntry
 lookupPrim (m,n,_) = Map.lookup (m,n) primOpsTable
 

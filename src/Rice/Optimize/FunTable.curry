@@ -1,8 +1,7 @@
 ------------------------------------------------------------------------------
---- A table of per-function facts (size, params, body, recursion status)
---- the optimizer's rules consult to decide whether a call is worth
---- inlining. Ported from old_rice's `Optimize/FunTable.curry` onto
---- TypedFlatCurry.
+--- A table of facts about each function (size, parameters, body, whether
+--- it's a loop breaker) that the optimizer uses to decide whether to
+--- inline a call.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -42,9 +41,8 @@ data FunInfo = FunInfo
 
 type FunTable = Map.Map QName FunInfo
 
---- Build a table from a module's functions, given the set of function
---- names that are unsafe to inline (see `Rice.Transform.Order.
---- recursiveNames`).
+--- Builds a table from a module's functions, given the loop breakers,
+--- which must never be inlined (`Rice.Transform.Order.orderFuns`).
 makeFunTable :: [QName] -> [TFuncDecl] -> FunTable
 makeFunTable loopBreakers = foldr (addEntry loopBreakers) Map.empty
 
@@ -57,8 +55,7 @@ addEntry loopBreakers f tab = Map.insert (tFuncName f) entry tab
    | otherwise    = FunInfo False isBreaker (isCaseless b) (tFuncArity f)
                              ps freshV (getSize b) b
 
-  -- Never actually read: `inlinable`/`simple` are both false for an
-  -- external before anything would look at fiBody.
+  -- Never read: `inlinable` and `simple` are false for an external.
   noExternalBody = error "FunTable: no body for an external function"
 
   isBreaker = tFuncName f `elem` loopBreakers
@@ -110,18 +107,15 @@ freshVar ft n = maybe 0 fiFreshVar (lookupFI ft n)
 isLoopBreaker :: FunTable -> QName -> Bool
 isLoopBreaker ft n = maybe False fiLoopBrk (lookupFI ft n)
 
---- Is a fully-saturated call to this function safe and worth substituting
---- in place? Not external, not (mutually or directly) recursive, and
---- small enough that duplicating its body is worth it.
+--- Is a saturated call to this function safe and worth inlining? It has
+--- to be defined here (not external), not a loop breaker, and small.
 inlinable :: FunTable -> QName -> Bool
 inlinable ft n = case lookupFI ft n of
   Nothing -> False
   Just fi -> not (fiExternal fi || fiLoopBrk fi) && fiSize fi < sizeLimit
 
---- A stricter tier of `inlinable`: small, and doesn't itself do any case
---- analysis (so inlining it can't grow the number of branches the caller
---- has to consider). Used to justify inlining more eagerly than the
---- general `inlinable` gate alone would.
+--- Inlinable, very small, and without a case, so inlining it can't add
+--- branches to the caller.
 simple :: FunTable -> QName -> Bool
 simple ft n = case lookupFI ft n of
   Nothing -> False

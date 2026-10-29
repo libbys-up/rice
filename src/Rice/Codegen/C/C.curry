@@ -1,25 +1,11 @@
 ------------------------------------------------------------------------------
---- A small DSL for emitting C source, built on `Text.Pretty`'s `Doc` --
---- see `src/codegen-runtime-review.md`'s case for this over old_rice's
---- `String`-typed version: correct indentation/line-breaking falls out of
---- `Doc` structurally (via `nest`/`$$`), instead of every helper having to
---- hand-thread a `tab` depth and get it right. Modeled on the same idiom
---- the external `icurry` package's own `ICurry.Pretty` already uses for a
---- structurally similar job (blocks, statements, expressions) -- `nest`
---- for indentation, `$$` to stack lines, `<+>`/`<>` for same-line
---- concatenation.
+--- A small DSL for writing C source, built on `Text.Pretty`'s `Doc`, the
+--- same way `ICurry.Pretty` prints ICurry: `nest` indents, `$$` stacks
+--- lines, and `<+>`/`<>` join them.
 ---
---- `CStmt`/`CExpr` are both just `Doc`: a `CStmt` is one complete,
---- semicolon-or-brace-terminated statement (possibly itself a multi-line
---- block), and a sequence of statements is `vcat` of them, not a separate
---- list type -- there's no `[CStmt]` vs `CStmt` distinction to keep
---- straight the way old_rice's list-of-lines version needed.
----
---- Deliberately excluded (see `STATUS.md`'s Phase 1 scoping): every
---- RET/case-shortcutting-specific helper old_rice's `Compile.C` had
---- (`ret_hnf`, `backup`, `nbackup`, `make_restore`, `fwd`, `isRET`,
---- `hasRET`) -- that machinery is Phase 2 work, and porting the helpers
---- now with nothing to call them would just be unused code to maintain.
+--- `CStmt` and `CExpr` are both `Doc`. A `CStmt` is one complete statement,
+--- ending in `;` or `}`, possibly over several lines; a sequence of
+--- statements is just their `vcat`.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -36,10 +22,8 @@ type CType = String
 --- A C identifier.
 type CName = String
 
---- One complete C statement -- a single line (`x = y;`) or a whole nested
---- block (an `if`, a `switch`, a function definition); either way, one
---- `Doc` that renders as itself, no wrapping required to sequence it with
---- others (just `vcat`/`$$`).
+--- One complete C statement: a line (`x = y;`) or a whole block (an `if`,
+--- a `switch`, a function definition).
 type CStmt = Doc
 
 --- A C expression.
@@ -82,11 +66,7 @@ x .|| y = binop "||" x y
 x .&  y = binop "&"  x y
 x .|  y = binop "|"  x y
 
---- A complete, semicolon-terminated assignment statement -- unlike
---- old_rice's `(.=)`, which returned a bare `CExpr` and left every call
---- site to remember its own trailing `;` (a real, repeated source of bugs
---- when ported verbatim -- see the review doc), this always finishes the
---- statement.
+--- An assignment statement, with its `;`.
 (.=) :: CExpr -> CExpr -> CStmt
 x .= e = x <+> equals <+> e <> semi
 
@@ -97,42 +77,22 @@ x .|= e = x <+> text "|=" <+> e <> semi
 -- Preprocessor
 ------------------------------------------------------------------------------
 
---- `file` is a module name, possibly hierarchical (e.g. `Test.Prop.Types`).
---- `Rice.Build.Cache`'s `moduleBase`/`modNameToPath` lays such a module's
---- `.c`/`.h` out in a directory tree matching its qualification
---- (`Test/Prop/Types.h`), named only by its *last* component
---- (`Types.h`, not `Test.Prop.Types.h`) -- `Rice.Main.buildExecutable`'s
---- `-I` flags (one per module's own directory) are what make plain
---- `"Types.h"` resolve correctly from anywhere it's included, so this
---- must include just that base name, not the full dotted one. Confirmed
---- by actually compiling a module with a hierarchical name (`Test.Prop`,
---- `Test.Prop.Types`): using the dotted name here verbatim compiled fine
---- for the many modules with plain (undotted) names every prior test
---- exercised, but failed as soon as one actually had a dot in it --
---- `clang: fatal error: 'Test.Prop.Types.h' file not found`, since no
---- file by that literal (dotted) name exists anywhere on the include
---- path.
+--- Includes a module's header. A hierarchical module `Test.Prop.Types`
+--- has its header at `Test/Prop/Types.h` (`Rice.Build.Cache`), and
+--- `Rice.Main` passes each module's directory with `-I`, so we include
+--- just `"Types.h"`.
 cinclude :: CName -> CStmt
 cinclude file = text "#include" <+> dquotes (text (baseModName file) <> text ".h")
 
---- The last component of a (possibly hierarchical) module name --
---- `"Test.Prop.Types"` -> `"Types"`. The identity on an already-unqualified
---- name (`"runtime"`, `"debug"`, ...), so this is safe to apply uniformly
---- regardless of which kind of name `cinclude` was actually given.
+--- The last component of a module name: `"Test.Prop.Types"` -> `"Types"`.
 baseModName :: CName -> CName
 baseModName = reverse . takeWhile (/= '.') . reverse
 
 cdefine :: CName -> Int -> CStmt
 cdefine name val = text "#define" <+> text name <+> int val
 
---- Wrap statements in `#if COND` / `#endif` -- e.g. gating a field access
---- behind the same build flag that determines whether the field exists at
---- all (`Rice.Codegen.C.ToH`'s epoch stamping, `OPT_EPOCH_TRAIL`). `cond`
---- is spliced in verbatim as a macro name, not an expression needing its
---- own escaping -- same trust level as `cdefine`'s own `name`. `CStmt`
---- being a plain `Doc` (this module's own header comment) is what makes
---- this possible with no DSL extension: a `#if`/`#endif` line is just
---- another `Doc` to stack via `$$`, not a construct needing its own type.
+--- Wraps statements in `#if cond` ... `#endif`, for code that only exists
+--- under a build flag, like `OPT_EPOCH_TRAIL`'s epoch field.
 cifdef :: CName -> [CStmt] -> CStmt
 cifdef cond body = (text "#if" <+> text cond) $$ vcat body $$ text "#endif"
 
@@ -140,15 +100,17 @@ cifdef cond body = (text "#if" <+> text cond) $$ vcat body $$ text "#endif"
 -- Blocks and control flow
 ------------------------------------------------------------------------------
 
---- Indent width for a nested block -- matches `STYLE_GUIDE.md`'s C
---- convention (4-space indent, Allman braces: opening and closing braces
---- both at the enclosing statement's own indentation, only the body
---- nested).
+--- The indentation of a block's body. Blocks use Allman braces, the same
+--- as the hand-written runtime (`STYLE_GUIDE.md`).
 blockIndent :: Int
 blockIndent = 4
 
 cblock :: [CStmt] -> CStmt
-cblock body = lbrace $$ nest blockIndent (vcat body) $$ rbrace
+cblock body = case body of
+  [] -> lbrace $$ rbrace
+  -- The line break has to be inside the `nest`, or the first statement
+  -- isn't indented.
+  _  -> lbrace <> nest blockIndent (linebreak <> vcat body) $$ rbrace
 
 cif :: CExpr -> [CStmt] -> CStmt
 cif c body = text "if" <> parens c $$ cblock body
@@ -162,8 +124,7 @@ cElseIf c body = text "else if" <> parens c $$ cblock body
 cifElse :: CExpr -> [CStmt] -> [CStmt] -> CStmt
 cifElse c t f = cif c t $$ celse f
 
---- An if/else-if/.../else chain -- one `CStmt` per condition, falling
---- through to a final, unconditional block.
+--- An if / else if / ... / else chain, ending in an unconditional block.
 cifCase :: [(CExpr, [CStmt])] -> [CStmt] -> CStmt
 cifCase []            fallback = cblock fallback
 cifCase ((c,b):rest) fallback =
@@ -224,10 +185,8 @@ sig ret name ps = text ret <+> text name <> cparams ps
 cfunDefn :: CType -> CName -> [(CType,CName)] -> [CStmt] -> CStmt
 cfunDefn ret name ps body = sig ret name ps $$ cblock body
 
---- A function meant to be force-inlined -- every `make_X`/`set_X` in the
---- generated header is one of these (matches `runtime.h`'s own
---- `__attribute__((always_inline)) static inline` convention for exactly
---- the same functions, hand-written there for the built-in constructors).
+--- A function definition that's always inlined, like every `make_X` and
+--- `set_X` in a generated header and in `runtime.h`.
 hfunDefn :: CType -> CName -> [(CType,CName)] -> [CStmt] -> CStmt
 hfunDefn ret name ps body =
   text "__attribute__((always_inline))" $$
@@ -237,14 +196,8 @@ hfunDefn ret name ps body =
 cfunDecl :: CType -> CName -> [(CType,CName)] -> CStmt
 cfunDecl ret name ps = sig ret name ps <> semi
 
---- One entry of a designated-initializer list (`.field = value`, no
---- trailing `;` and no trailing `,` -- `carray`'s own `punctuate comma`
---- handles joining). Deliberately distinct from `(.=)`: that produces a
---- complete, semicolon-terminated *statement*; this produces one
---- comma-separated *entry* inside a `{ ... }` literal -- conflating the
---- two was a real bug risk in old_rice's version, which used the same
---- combinator for both and relied on every call site to manually append
---- or omit the right punctuation.
+--- One entry of a designated initializer, `.field = value`, with no
+--- punctuation (`carray` adds the commas). Compare `(.=)`, a statement.
 dinit :: String -> CExpr -> CExpr
 dinit field val = text ('.':field) <+> equals <+> val
 
@@ -256,8 +209,7 @@ cargs :: [CExpr] -> CExpr
 cargs = parens . hsep . punctuate comma
 
 --- An empty list prints as `(void)`: in C, `()` declares a function with
---- unspecified parameters, not none. (One rule with a `case`: two
---- overlapping rules would make `[]` print both ways, nondeterministically.)
+--- unspecified parameters, not none.
 cparams :: [(CType,CName)] -> CExpr
 cparams ps = case ps of
   [] -> text "(void)"
@@ -271,10 +223,8 @@ carray = braces . hsep . punctuate comma
 -- Boxed-value payload access
 ------------------------------------------------------------------------------
 
---- Which `union field` member (`node.h`) a given `CType` lives in --
---- `"int"`/`"char"`/`"float"` are the type names used everywhere else in
---- this DSL (matching `litType`'s convention), but the union's own member
---- names are the single letters `.i`/`.c`/`.f`, not the full words.
+--- The `union field` member (`node.h`) for a raw type: `"int"` is `i`,
+--- `"char"` is `c`, `"float"` is `f`.
 fieldMember :: CType -> String
 fieldMember t = case t of
   "int"   -> "i"
@@ -282,18 +232,12 @@ fieldMember t = case t of
   "float" -> "f"
   _       -> error ("Rice.Codegen.C.C.fieldMember: unknown type " ++ t)
 
---- Project a `field`-typed C expression down to one specific raw member
---- (`.i`/`.c`/`.f`) -- used both for a primitive operation's already-`field`
---- variable arguments (`showPrim` in `Rice.Codegen.C.PrimOps`) and for
---- comparing a literal-case scrutinee against a branch's literal value.
+--- The raw value in a `field`: `e.i`, `e.c` or `e.f`.
 rawField :: CType -> CExpr -> CExpr
 rawField t e = e <> dot <> text (fieldMember t)
 
---- The reverse: wrap a raw C value up as a `field`, via the GCC/clang
---- cast-to-union extension (`runtime.h`'s own `union field` and every
---- `__attribute__` in it already depend on GCC/clang, so this isn't a new
---- portability requirement). Used for a bare literal appearing directly
---- as an expression, not as a primitive operation's argument.
+--- The reverse: a raw C value as a `field`, using the GCC/clang
+--- cast-to-union extension. The runtime needs GCC or clang anyway.
 toUnion :: CType -> CExpr -> CExpr
 toUnion t e = case t of
   "int"   -> text "(field)(long)"          <> parens e
@@ -305,10 +249,8 @@ toUnion t e = case t of
 -- Children access
 ------------------------------------------------------------------------------
 
---- `child_at(n, i0)`, or `child_at(child_at(n, i0), i1)` for a nested
---- position -- `INodeAssign`'s `[Int]` position list is only ever more
---- than one element deep when assigning into an already-nested child, so
---- folding `child_at` is exactly the right traversal.
+--- The child of `n` at a path of child indices:
+--- `child_at(child_at(n, i0), i1)` for `[i0, i1]`.
 children :: CExpr -> [Int] -> CExpr
 children n ixs = foldl childAt n ixs
  where childAt x i = call "child_at" [x, int i]
@@ -338,23 +280,9 @@ contParams = [("union field", "_root"), ("Frame*", "sp")]
 tag :: IQName -> CName
 tag n = mangle n ++ "_TAG"
 
---- ICurry variable naming: `x0` is always the incoming node itself -- the
---- one index `ICurry.Types` itself documents as reserved (its own
---- `IVarDecl` note) -- so `v == 0` is the only special case here. Both
---- reference implementations this was designed against also hardcoded
---- `v == 1` to the name `"scrutinee"`, on the assumption a case's
---- scrutinee variable is always numbered 1; that's not actually reserved
---- by ICurry at all (confirmed empirically: an ordinary, unrelated
---- variable can just as easily be numbered 1), and the collision is a
---- real bug, not a hypothetical one -- `Rice.Codegen.C.ToC.showConsCase`'s
---- own internal scrutinee-copy variable (`scrutinee` below) is a genuinely
---- separate thing from whichever ICurry variable is being scrutinized,
---- and when that variable *happened* to be numbered 1, the naming
---- collision produced `field scrutinee = scrutinee;` -- self-referential
---- under C's scoping rules (the RHS names the just-declared local, not
---- any outer one), silently reading uninitialized memory. `varName` gives
---- the bare identifier (for parameter lists and declarations, which need a
---- plain `CName`, not an expression); `var` is the same name as a `CExpr`.
+--- The C name of an ICurry variable. Variable 0 is the node being
+--- reduced, `root`; every other variable `n` is `vn`. `varName` is the
+--- identifier, and `var` is the same name as an expression.
 varName :: IVarIndex -> CName
 varName v
   | v == 0    = "root"
@@ -369,10 +297,9 @@ var = text . varName
 fieldDecl :: IVarIndex -> CStmt
 fieldDecl v = text "field" <+> var v <+> equals <+> text "{0}" <> semi
 
---- `root` names the incoming node (ICurry variable 0, see `varName`).
---- `scrutinee` is a name `Rice.Codegen.C.ToC.showConsCase` alone owns for
---- its own internal case-walking copy -- prefixed so it can never collide
---- with a real `"v" ++ show n` variable name (see `varName`'s note above).
+--- `root` is the node being reduced. `scrutinee` is the case loop's
+--- working copy of the scrutinee (`Rice.Codegen.C.ToC`); its leading `_`
+--- keeps it from clashing with a variable's `vn`.
 root, scrutinee :: CExpr
 root      = text "root"
 scrutinee = text "_scrutinee"
@@ -389,18 +316,15 @@ symname    v = symbol v <> text "->name"
 symarity   v = symbol v <> text "->arity"
 nondet     v = v <> text ".n->nondet"
 missing    v = v <> text ".n->missing"
---- `node.h`'s `Node.epoch` -- only actually a field under `OPT_EPOCH_TRAIL`
---- (see its own doc comment there); every generated reference to it is
---- correspondingly always wrapped in `cifdef "OPT_EPOCH_TRAIL"`, never used
---- bare.
+--- `epoch` only exists under `OPT_EPOCH_TRAIL` (`node.h`), so it must
+--- always be used inside `cifdef "OPT_EPOCH_TRAIL"`.
 epoch      v = v <> text ".n->epoch"
 
 nullf :: CExpr
 nullf = text "(field)(Node*)NULL"
 
---- The two debug-trace calls every function/case leaves with, matching
---- `archetecture.md`'s documented runtime convention (`debug`/`debug_expr`,
---- no-ops unless built with `-DDEBUG`).
+--- The trace every function and case prints when it leaves, under
+--- `--debug` (`runtime/debug.h`).
 debugLeave :: String -> [CStmt]
 debugLeave msg =
   [ scall "debug"      [text "LOW", dquotes (text ("leaving " ++ msg ++ "\\n"))]

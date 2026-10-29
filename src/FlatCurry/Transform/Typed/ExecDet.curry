@@ -11,13 +11,14 @@
 ------------------------------------------------------------------------------
 
 module FlatCurry.Transform.Typed.ExecDet
-  ( transformFuncsInProgDet
+  ( transformFuncsInProgDet, transformRuleDet
   , transformExprDet, transformExprMaxDet, showTransformExprDet
+  , showTransformRuleDet
  ) where
 
 import Data.Tuple.Extra        ( second )
 import FlatCurry.Typed.Types
-import FlatCurry.Typed.Goodies ( updTProgTExps )
+import FlatCurry.Typed.Goodies ( updTProgTFuncs, updTFuncTRule )
 
 import FlatCurry.Transform.Typed.Types
 import FlatCurry.Transform.Typed.Utils ( ReWriter(..)
@@ -36,7 +37,21 @@ import Text.Pretty                 ( pPrint )
 --- according to some deterministic(!) expression transformation provided
 --- as the first argument.
 transformFuncsInProgDet :: TExprTransformationDet -> TProg -> TProg
-transformFuncsInProgDet trans = updTProgTExps (transformExprDet trans)
+transformFuncsInProgDet trans =
+  updTProgTFuncs (map (updTFuncTRule (transformRuleDet trans)))
+
+--- Transforms the body of a function's rule. New variables are numbered
+--- above the parameters too, not just the body: a parameter the body never
+--- uses still has its number.
+transformRuleDet :: TExprTransformationDet -> TRule -> TRule
+transformRuleDet trans rule = case rule of
+  TRule ps e    -> TRule ps (fst (runTrExpr trans (-1) (ruleNewVar ps e) e))
+  TExternal _ _ -> rule
+
+--- The first variable index that's free in a rule with parameters `ps`
+--- and body `e`.
+ruleNewVar :: [(VarIndex, TypeExpr)] -> TExpr -> VarIndex
+ruleNewVar ps e = foldr (max . (+ 1) . fst) (newVar e) ps
 
 --- Transforms an expression by applying some deterministic(!) expression
 --- transformation as long as possible with a bottom-up strategy.
@@ -56,6 +71,14 @@ showTransformExprDet :: Int -> TExprTransformationDet
                      -> TExpr -> (TExpr, String, Int)
 showTransformExprDet n trans e
   = let (e', steps) = runTrExpr trans n (newVar e) e
+    in (e', showTransSteps e steps, length steps)
+
+--- `showTransformExprDet` for a rule with parameters `ps` and body `e`,
+--- numbering new variables the same way `transformRuleDet` does.
+showTransformRuleDet :: Int -> TExprTransformationDet
+                     -> [(VarIndex, TypeExpr)] -> TExpr -> (TExpr, String, Int)
+showTransformRuleDet n trans ps e
+  = let (e', steps) = runTrExpr trans n (ruleNewVar ps e) e
     in (e', showTransSteps e steps, length steps)
 
 runTrExpr :: TExprTransformationDet -> Int -> VarIndex -> TExpr

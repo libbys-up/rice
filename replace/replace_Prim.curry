@@ -1,6 +1,9 @@
 module replace_Prim where
 
--- replacements for Prelude that we need for RICE
+-- Rice's definitions of Prelude's functions on Int, Char and Float. Each
+-- one takes its arguments' boxes apart and calls a raw primitive (prim_*).
+-- Rice.Files.Replace renames Int_SH, Char_SH and Float_SH to Int#, Char#
+-- and Float#, and swaps these in for Prelude's own definitions.
 
 import Prelude hiding (Int,Char,Float)
 
@@ -310,8 +313,8 @@ ord c = fcase c of
 prim_ord :: Char_SH -> Int_SH
 prim_ord external
 
--- n < 0 returns 0
--- n > 1114111 returns 1114111
+-- prim_chr doesn't check its argument (Rice.Codegen.C.PrimOps): an Int
+-- outside 0..1114111 gives a Char that isn't a code point.
 chr :: Int -> Char
 chr n = fcase n of
               Int n' -> Char (prim_chr n')

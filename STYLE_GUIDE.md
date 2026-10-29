@@ -19,21 +19,6 @@ Modules are named with a dotted hierarchy that mirrors the directory path:
 `Rice.Files.Info` at `src/Rice/Files/Info.curry`, etc. Keep doing this for any
 new module.
 
-**Inconsistency to fix:** the `Rice/Codegen/` subtree doesn't follow this —
-`src/Rice/Codegen/CodeGen.curry:1` declares `module CodeGen where`,
-`src/Rice/Codegen/Options.curry:1` declares `module CodeGen.Options where`,
-`src/Rice/Codegen/C/C.curry:11` declares `module Codegen.C.C where` (lowercase
-"g"), while its sibling `src/Rice/Codegen/C/ToC.curry:1` uses
-`module Rice.CodeGen.C.ToC` (capital "G") and `ToH.curry:1` uses
-`module Rice.Codegen.C.ToH` (lowercase "g") — three different casings of
-"Codegen" in one directory. Pick one canonical form — `Rice.Codegen.*` (matches
-the directory name on disk) — and rename all of them when this subtree gets
-rewritten.
-
-Similarly, `src/Rice/Data/Functional/DList.curry:2` and
-`src/Rice/Data/Logic/DList.curry:1` both drop the `Rice.` prefix
-(`module Data.Functional.DList`, `module Data.Logic.DList`). Restore it.
-
 **Structural exception, not a violation:** `replace/replace_Prelude.curry` and
 `replace/replace_Prim.curry` use flat, non-dotted, lowercase-led names
 (`module replace_Prelude where`). This is required by the loader —
@@ -57,11 +42,7 @@ lapse. Any new `replace_<Library>.curry` file should follow the same pattern.
 ### Type signatures
 
 Every top-level binding gets an explicit signature, even trivial one-liners —
-this holds across essentially all of `Rice.Util`, `Rice.Transform.*`. The one
-exception is `run` in `src/Rice/Main.curry:28`, which has no signature.
-**Suggestion:** give it one (`run :: [CompilerOptions] -> TProg -> IO ()`) to
-match the rest of the codebase; it's a straightforward oversight, not a
-deliberate style choice.
+this holds across the whole compiler.
 
 Untyped helper bindings inside `where`/`let` are fine and idiomatic (matches
 Haskell/Curry convention generally).
@@ -76,7 +57,7 @@ import FlatCurry.Typed.Goodies (updQNamesInTProg, updQNamesInTFunc,
                                  tProgName, updTRuleExtDecl, updTFuncTRule)
 ```
 Group external-library imports above project-local (`Rice.*`) imports with a
-blank line between the groups, as in `src/Rice/Main.curry:3-16`. This isn't
+blank line between the groups, as in `src/Rice/Main.curry:13-54`. This isn't
 enforced everywhere yet — keep it in mind for new files.
 
 `src/ICurry/Goodies.curry` used to import bare `Util`/`Sort` modules that
@@ -114,18 +95,19 @@ below: history goes in a `.md` file, not in the code.
 ### Data types
 
 Plain sum types with positional constructors are the default, e.g.
-`src/Rice/Main.curry:46-52`:
+`src/Rice/Main.curry:317`:
 ```
-data CompilerOptions = SPrintFlatCurry | SPrintReplace | ...
+data CompilerOptions
+  = SPrintFlatCurry | SPrintFlatCurryRaw | ...
  deriving (Show, Eq)
 ```
 Reach for a record only when a type genuinely has several independent,
-named config-style fields — the one example in the codebase,
-`src/Rice/Codegen/Options.curry:22-30`'s `CompileOptions`, is exactly this
-case. Don't default to records for ordinary ADTs.
+named fields that are mostly used one at a time, like `FieldRepTable`
+(`src/Rice/Codegen/FieldReps.curry:49`). Don't default to records for
+ordinary ADTs.
 
 `newtype` is for zero-cost single-field wrappers, e.g.
-`newtype DList a = DList ([a] -> [a])` (`src/Rice/Data/Functional/DList.curry:8`).
+`newtype ReWriter a` (`src/FlatCurry/Transform/Typed/Utils.curry:76`).
 
 ### Pattern matching: flexible equations vs. rigid `case`
 
@@ -223,13 +205,16 @@ We write three kinds of comments, and each one has its own home.
    make a new reader stop and ask "why?", answer it here.
 2. **Architecture.** How the pieces fit together, and why the system is
    designed the way it is: the node representation, the evaluation machine, the
-   trail, the garbage collector. These go in `src/architecture.tex`, which
-   explains the whole design in one place for someone new to the project. A code
-   comment can point to it in a line, but shouldn't repeat it.
+   trail, the garbage collector, the compiler's passes. These go in the
+   developer's manual, `src/developers-manual.tex`, which explains the whole
+   design in one place for someone new to the project. A code comment can point
+   to it in a line (or to a paper or web page for a general idea), but shouldn't
+   repeat it.
 3. **Process.** What we tried that didn't work, old bugs and how we found them,
    measurements, and things that are no longer true. These go in a `.md` file
-   (`src/runtime-history.md` for the runtime, or the plan document for the
-   piece of work), where future sessions can find them. People reading the code
+   (`src/runtime-history.md` for the runtime, `src/compiler-history.md` for the
+   compiler, or the plan document for the piece of work), where future sessions
+   can find them. People reading the code
    don't need them, and they go stale as soon as the code changes again.
 
 A quick test: if the comment would still be true and useful after the bug it
@@ -343,11 +328,11 @@ These aren't style rules so much as loose ends worth tidying when convenient
 - `test/a.out` (a compiled binary) is checked into the repo and isn't covered
   by `.gitignore` (`*~`, `.cpm`, `.curry` — see `.gitignore:1-3`). Either
   delete it or add a build-artifact ignore rule.
-- `src/archetecture.md` has a typo'd filename (should be `architecture.md`)
-  and is the only real design doc in the repo; `src/Rice/Codegen/CodeGen.txt`
-  and `Scrutinee.txt` are informal first-person design/proof notes sitting
-  next to source files. Consider consolidating all three into one
-  `ARCHITECTURE.md` at some point, once the codegen design settles down.
+- ~~`src/archetecture.md` has a typo'd filename~~ — resolved (2026-10-27): it
+  and `src/architecture.tex` are replaced by `src/developers-manual.tex`, with
+  the case shortcutting design moved to `src/case-shortcutting-plan.md`.
+  `src/Rice/Codegen/C/CodeGen.txt` and `Scrutinee.txt` are still informal
+  design notes sitting next to source files.
 - ~~`runtime/external.c` and `runtime/Prelude_external.c` currently implement
   overlapping externals differently~~ — resolved (2026-09-04): both deleted,
   superseded by the single `runtime/prelude.c` (see `STATUS.md`'s Phase 2).

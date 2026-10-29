@@ -15,32 +15,22 @@ import Rice.Util
 loops :: TProg -> [[String]]
 loops (TProg _ _ _ fs _) = (map . map) name $ scc (\x -> [name x]) calls fs
 
---- A module's functions, reordered so that (as much as the call graph
---- allows) a function comes after everything it calls, together with the
---- names of the functions picked as "loop breakers": one per irreducible
---- cycle in the call graph, chosen by `inlineScore` (a rough
---- "how much would inlining this cost" estimate -- the priciest member of
---- a cycle is excluded, so the rest of the cycle stays safely inlinable
---- instead of the whole group being excluded).
+--- Chooses the loop breakers: a set of functions that, if we never inline
+--- them, makes inlining terminate. Every cycle in the call graph has one,
+--- the member with the highest `inlineScore`, so the rest of a recursive
+--- group can still be inlined. Returns the module's functions (the
+--- breakers last) and the breakers' names.
 ---
---- Ported from old_rice's `Optimize/LoopBreakers.curry` (`orderFuns`/
---- `sccSort`). The breaker-selection heuristic itself is expected to
---- change -- what matters is the pattern: exclude exactly enough
---- functions to make inlining terminate, not an entire recursive group.
+--- The scoring heuristic is a placeholder; what matters is that we exclude
+--- just enough functions, not a whole recursive group.
 orderFuns :: TProg -> ([TFuncDecl], [QName])
 orderFuns (TProg m _ _ fs _) =
   case sccSort fs of
     (ok, breakers) -> (ok ++ breakers, map (\f -> (m, name f)) breakers)
 
---- Recursively decompose the call graph on `fs` by repeatedly removing
---- the highest-`inlineScore` member of each cycle (as reported by
---- `Data.SCC.scc`, recomputed on what's left after each removal) until
---- every remaining component is acyclic. Returns the functions that are
---- safe to inline and the ones chosen as loop breakers, each in no
---- particular order.
--- One equation dispatching via `case` (rather than two top-level
--- equations, which the compiler can't always prove are mutually
--- exclusive) to stay deterministic.
+--- Repeatedly removes the highest-`inlineScore` member of each strongly
+--- connected component of the call graph until none is left with a cycle.
+--- Returns the functions that are safe to inline, and the loop breakers.
 sccSort :: [TFuncDecl] -> ([TFuncDecl], [TFuncDecl])
 sccSort fs = case fs of
   [f] | name f `elem` calls f -> ([], [f])
@@ -59,10 +49,8 @@ sccSort fs = case fs of
 concatComps :: [([a],[a])] -> ([a],[a])
 concatComps = foldr (\(as,bs) (ass,bss) -> (as ++ ass, bs ++ bss)) ([],[])
 
---- A rough estimate of how expensive inlining this function's body would
---- be: bigger for control-flow-heavy shapes (`Case`/`Or`), smaller for
---- data construction. Used only to pick the "worst" (priciest) member of
---- a recursive group as its loop breaker.
+--- A rough cost of inlining this body: high for control flow (`Case`,
+--- `Or`), low for building data. Only used to pick loop breakers.
 inlineScore :: TExpr -> Int
 inlineScore (TVarE _ _)        = 0
 inlineScore (TLit _ _)         = 0

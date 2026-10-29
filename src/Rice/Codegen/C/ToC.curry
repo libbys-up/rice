@@ -1,39 +1,16 @@
 ------------------------------------------------------------------------------
---- ICurry -> C source (`ModuleName.c`) generation -- the core translation.
+--- Generates a module's C source (`Module.c`) from ICurry.
 ---
---- Generated code runs on the evaluation machine (`runtime/machine.h`,
---- `src/explicit-stack-plan.md`): every function body and every
---- constructor case (lifted into its own *case block*) is a
---- `RICE_CC void f(void)` that moves control only by `musttail` jumps and
---- `RETURN()`. A case evaluates its scrutinee by saving its state in its
---- frame and jumping to the scrutinee's code; tail calls are jumps. So
---- evaluation depth lives on Rice's own stack, not the C stack. An `_hnf`
---- function's contract is unchanged: when it returns, `root` is in head
---- normal form (or a forward/failure that the consumer resolves).
+--- The generated code runs on the evaluation machine (`runtime/machine.h`):
+--- each function is an `_hnf` function, and each constructor case in it is
+--- a separate C function, a *case block*, whose frame on the machine stack
+--- is its continuation. Control moves only by `musttail` jumps and
+--- `RETURN()`, so the C stack doesn't grow. See the developer's manual,
+--- "Generated code".
 ---
---- Deliberately excluded (matching `STATUS.md`'s Phase 1 scoping):
---- free-variable narrowing for a *literal* case's scrutinee. Ordinary
---- constructor cases (`ICaseCons`, always complete per `ICurry.Types`' own
---- contract) narrow a free scrutinee among their listed constructors as
---- normal. But by the time a value reaches an `ICaseLit` scrutinee, it's
---- been extracted directly out of a box's child slot (`IVarAccess`) --
---- which, for an *already-bound* box, is a raw scalar, but for a box that
---- was itself narrowed from a free variable via the generic
---- `make_X_free`/`set_X_free` machinery, would instead be a real
---- `FREE_TAG` node sharing the same `field` slot -- and nothing in this
---- codebase disambiguates those two representations safely (the closest
---- prior art, `runtime.c`'s `n.i < 1000001` check in `print_expr`, is a
---- fragile is-this-plausibly-a-heap-pointer heuristic, not something to
---- build real dispatch logic on without it being verified first). Rather
---- than guess at unverified pointer-safety logic, `ICaseLit` here assumes
---- its scrutinee is always already forced to a concrete literal -- true
---- for every case this session's test coverage exercises, false only for
---- a free variable of primitive type reaching a literal pattern match
---- (e.g. `let x free in x + 1`) -- and fails cleanly (falls through to the
---- same `fail(root)` an unmatched literal already produces) rather than
---- risking undefined behavior. A real fix needs the free/raw
---- disambiguation question resolved first; noted in `STATUS.md` as a
---- known Phase 1 gap, not silently absorbed.
+--- A literal case can't narrow a free variable: the scrutinee is a raw
+--- value, and a free variable can't be one. We never get there, since
+--- narrowing to a box with a raw child is an error (`narrow_raw_error`).
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------
@@ -68,27 +45,14 @@ toSource reps (IProg name imps _ allFuns) = vcat $
 isApply :: IQName -> Bool
 isApply (m,n,_) = m == "Prelude" && n == "apply"
 
---- Which top-level driver generated `main()` should run the root module's
---- `main` through -- see `writeMain`, and `Rice.Main`'s `--interactive`
---- flag that produces this.
+--- How the generated `main()` runs the root module's `main`.
 ---
---- `Standalone` (the default) is what an ordinary compiled Curry program
---- wants: `main :: IO _`, run exactly once via `run_io` (runtime.c) --
---- no retry-on-backtracking loop, and no printing of a "result" (an IO
---- action's output is whatever side effects it already performed).
+--- `Standalone` (the default) runs `main :: IO t` once with `run_io`.
 ---
---- `Interactive` keeps this compiler's original, and still useful,
---- behavior: `nf_all` (runtime.c) evaluates the root `main` -- which
---- need not be `IO`-typed at all -- and prints *every* solution it can
---- backtrack its way into, exactly the "evaluate an arbitrary goal
---- expression, show every answer" behavior a REPL-style front end (e.g.
---- the `curry-repl` package's generated main-expression modules) needs
---- when it compiles a user's typed-in expression. Most of this
---- compiler's own `old_rice`-derived regression/benchmark corpus is
---- itself written in this older, bare-goal style (`main :: [Int]`, not
---- `IO ()`) rather than as real standalone programs, so `tests/run.sh`
---- passes this for those, not because it's the right default for
---- `rice` itself.
+--- `Interactive` (`--interactive`) evaluates `main`, which can have any
+--- type, with `nf_all`, and prints every solution. That's what a REPL
+--- front end needs for a goal the user typed. Many of the test programs
+--- are written this way too (`main :: [Int]`).
 data MainMode = Standalone | Interactive
  deriving (Show, Eq)
 
@@ -96,13 +60,9 @@ mainDriverCall :: MainMode -> CStmt
 mainDriverCall Standalone  = scall "run_io" [root]
 mainDriverCall Interactive = scall "nf_all" [root]
 
---- The generated `main.c` for the root module: sets up the runtime's two
---- globals, evaluates the root module's `main` to normal form, and runs
---- it through whichever top-level driver `mode` selects (see `MainMode`).
---- No constant/flyweight preallocation (old_rice's/fast_backtrack's
---- `writeMain`'s `Num[256]`/`makeCrap`, needing a whole-program
---- `DataTable` this pass doesn't build) -- Phase 1 deliberately excludes
---- it, see `STATUS.md`.
+--- The generated `main.c`: defines the runtime's globals, initializes the
+--- runtime, builds a node for the root module's `main`, and runs it with
+--- the driver for `mode`.
 writeMain :: String -> MainMode -> Doc
 writeMain rootModule mode = vcat
   [ text "#include <stdio.h>"
@@ -130,14 +90,9 @@ writeMain rootModule mode = vcat
 -- Functions
 ------------------------------------------------------------------------------
 
---- A function's code runs on the evaluation machine (`runtime/machine.h`,
---- `src/explicit-stack-plan.md`). Its body up to the first constructor
---- case is `f_hnf` itself; every constructor case is lifted into its own
---- C function, a *case block* (`f_hnf_case<k>`), whose frame on the
---- machine stack is also its continuation: evaluating the scrutinee jumps
---- to the scrutinee's code, which returns by jumping back into the case
---- block. Control only ever moves by `musttail` jumps and `RETURN()`, so
---- the C stack doesn't grow with evaluation depth.
+--- What we know while generating one function. Its body up to the first
+--- constructor case is `f_hnf`; each constructor case is a case block
+--- `f_hnf_case<k>`.
 ---
 --- @field gName  the function, for naming its case blocks
 --- @field gLabel its source name, for `--debug` messages
@@ -176,33 +131,28 @@ funSource reps (IFunction name _ _ _ body) = case body of
        , text "" ] ++
        concat [ d ++ [text ""] | CaseBlock _ d <- cs ]
 
---- `REWRITE_STAMP()` (runtime.h) records the epoch that nodes built by
---- this body get under the write barrier, for a body (or literal-case
---- branch) that writes `root` with no enclosing constructor case. Such a
---- write is deterministic, so the stamp only depends on `root`'s own flag
---- and age, and nothing between here and the write forces anything.
---- Like every OPT_* macro, it expands to nothing when its flag is off:
---- codegen never forks on an OPT_* flag, only the macros' expansion does.
+--- A function's entry code: a GC safe point, then its block.
+---
+--- `REWRITE_STAMP()` (runtime.h) records the epoch that nodes built for a
+--- rewrite of `root` get under the write barrier. A rewrite outside any
+--- constructor case is deterministic, so the stamp at entry is right.
+--- Like every `OPT_*` macro, it expands to nothing when its flag is off;
+--- the generated code is the same for every flag setting.
 showBody :: Gen -> IBlock -> G [CStmt]
 showBody gen block = do
   b <- showBlock gen block
   return $
-    -- A safe point (src/gc-plan.md): the only live pointers here are
-    -- root, the frames, the trail and C roots, so a collection may run.
+    -- At entry every live pointer is in root, a frame, the trail or a C
+    -- root, so the collector can run here.
     [ scall "GC_SAFE_POINT" [root, text "sp"]
     , scall "REWRITE_STAMP" []
     , scall "debug"      [text "LOW", dquotes (text ("HNF " ++ gLabel gen ++ ":\\n"))]
     , scall "debug_expr" [text "LOW", root]
     ] ++ b
 
---- `RetryCtx` is `Just v` while generating a case branch's own body (`v`
---- being *that* case's own scrutinee variable, from `showConsBranch`),
---- and `Nothing` everywhere else (top level, `Nothing`'s own default
---- case in a `case` block, etc.) -- `IExempt`'s own handling (`showStmt`)
---- uses it to retry the *innermost enclosing* case's scrutinee, if
---- there is one; a nested case's own branches get their own `Just`
---- (shadowing the outer one), so nesting resolves to "innermost wins"
---- for free, matching ordinary lexical scoping.
+--- `Just v` inside a branch of a constructor case on `v`, and `Nothing`
+--- outside any constructor case. A nested case replaces it, so it's
+--- always the innermost case: the one a failure retries (`showStmt`).
 type RetryCtx = Maybe IVarIndex
 
 showBlock :: Gen -> IBlock -> G [CStmt]
@@ -210,12 +160,8 @@ showBlock gen (IBlock decls asgns stmt) = do
   st <- showStmt gen stmt
   return (map showDecl (dedupDecls decls) ++ map showAsgn asgns ++ st)
 
---- The real ICurry the external `icurry` package generates can list the
---- same variable's `IVarDecl` more than once in one block (confirmed
---- empirically, e.g. Prelude's own `_def#===#...` methods) -- harmless at
---- the ICurry level (a second `declare x1` is redundant, not
---- contradictory), but `field x1;` twice in the same C scope is a hard
---- redefinition error. Keeps the first occurrence of each variable index.
+--- ICurry can declare the same variable twice in one block, which is a
+--- redefinition in C. Keeps the first declaration of each variable.
 dedupDecls :: [IVarDecl] -> [IVarDecl]
 dedupDecls = dedupBy declIdx
  where declIdx (IVarDecl  v) = v
@@ -236,24 +182,14 @@ showAsgn :: IAssign -> CStmt
 showAsgn (INodeAssign v ixs e) = children (var v) ixs .= showExpr e
 showAsgn (IVarAssign  v e)     = var v .= showExpr e
 
---- `IExempt` -- no branch matches -- is `Rice.Codegen.C.ToC`'s own header
---- comment's "incomplete pattern match", and per whoever's asking (the
---- session that added this) the main real-world way a program actually
---- fails. With an enclosing case's own scrutinee variable in scope
---- (`Just v`, from `showConsBranch`), try SCOPED_RETRY first: if
---- `undo` finds and flips a choice point made since that case began
---- (its cutoff), resetting `_scrutinee` to the case's original
---- scrutinee (frame slot 1) and looping lets the SAME case-dispatch loop
---- (already present, already handling FORWARD_TAG the same way)
---- redispatch whatever undo restored, without ever touching `root` at all.
---- With no enclosing case (`Nothing` -- a function that's unconditionally
---- undefined), there's no local scrutinee to retry against, so this falls
---- straight through to the unmodified `fail`.
---- A failed retry pops the `trail_node(root, nondet)` frame that
---- `showConsBranch` already pushed for this branch, so SCOPED_RESAVE
---- re-saves `root` before `fail` (see runtime.h) -- otherwise `fail(root)`
---- would be an unlogged write. It always trails, whatever `nondet` says
---- (backtracking_proofs.md, #3 rule 1).
+--- A statement ends its block.
+---
+--- `IExempt` means no branch matched. Inside a constructor case we first
+--- try scoped backtracking (#3, `SCOPED_RETRY` in runtime.h): if `undo`
+--- flips a choice made since the case began, we dispatch again on the
+--- case's original scrutinee. Otherwise we fail `root`. The failed retry
+--- may have popped the trail entry the branch pushed for `root`, so
+--- `SCOPED_RESAVE` trails `root` again before the `fail`.
 showStmt :: Gen -> IStatement -> G [CStmt]
 showStmt gen st = case st of
   IExempt ->
@@ -269,10 +205,9 @@ showStmt gen st = case st of
   ICaseLit  v bs -> showLitCase gen v bs
  where ctx = gRetry gen
 
---- Leaves the current code: pops the enclosing case block's frame first,
---- if there is one (`gRetry`), since control is leaving that case for
---- good -- every statement ends its block, so this is always a tail
---- position. `term` is the final transfer: `RETURN()` or a jump.
+--- Leaves the current code. Inside a case block we pop its frame first,
+--- because we're leaving the case for good. `term` is the final transfer
+--- of control: `RETURN()` or a jump.
 leave :: Gen -> [CStmt] -> [CStmt]
 leave gen term = maybe [] (const [text "sp" .= call "frame_pop" [text "sp"]]) (gRetry gen) ++ term
 
@@ -287,19 +222,10 @@ returnStmt = [text "RETURN()" <> semi]
 jumpTo :: CExpr -> [CStmt]
 jumpTo code = [ call "TAIL_CALL" [code] <> semi ]
 
---- The trail point for a write to `root` that no constructor-case branch
---- covers (`Nothing`: a function body, or literal-case branch, with no
---- enclosing `showConsBranch`, whose own `trail_node` would otherwise have
---- run just before). Nothing nondeterministic was read on the way here,
---- so `nondet` is false: with OPT_NONDET_TRAIL on, `needs_trail` is
---- constant false and this compiles to nothing. With it off this is the
---- baseline trail every rewrite needs -- without it, #5 alone was unsound:
---- an old node rewritten here, untrailed, to point at a node younger than
---- the active choice point is exactly the #1+#5 failure (opt_conflict.md),
---- reproduced by counterexamples/StaleApply.curry, whose `o` is a let-
---- lifted function with no case. Emitted right before the write, after
---- any forcing, so the epoch check sees the choice points that forcing
---- created (setExpr itself never forces before writing `root`).
+--- Trails a rewrite of `root` outside any constructor case. (Inside one,
+--- the branch already called `trail_node`.) Nothing nondeterministic was
+--- read, so with #1 on this is nothing; with #1 off, every rewrite has to
+--- be trailed, this one included.
 uncaseTrail :: RetryCtx -> [CStmt]
 uncaseTrail Nothing  = [scall "trail_node" [root, cfalse]]
 uncaseTrail (Just _) = []
@@ -311,28 +237,16 @@ uncaseTrail (Just _) = []
 nondetVar :: CExpr
 nondetVar = text "nondet"
 
---- Write the loop's resolved value back into the *original* scrutinee
---- variable (`var v`) -- necessary because the ICurry block doesn't just
---- use the scrutinee for this one `case`; a matched branch's own body
---- (`IVarAccess v [...]`/`INodeAssign v [...]`) keeps referring to `var v`
---- directly, and needs to see the fully-resolved node (past any
---- FUNCTION_TAG/CHOICE_TAG/FORWARD_TAG the loop walked through), not the
---- original, possibly-still-pending one. Confirmed as a real bug, not a
---- hypothetical: a recursive function's result, read back this way
---- without the write-back, silently reinterpreted a `Node*` (the *original*
---- variable, left pointing at an intermediate FORWARD_TAG node) as a raw
---- `long` -- correct-looking control flow, silently wrong arithmetic.
+--- Points the scrutinee variable at the node the loop ended on. A branch
+--- reads the scrutinee's children through `v`, so `v` has to be the
+--- constructor, not a FORWARD or a call that led to it. The graph itself
+--- still points at the original node (see "FORWARD nodes" in the manual).
 ---
---- Skipped when `v == 0`: that's `root` itself (`ICurry.Types`' own
---- reserved variable), and reassigning it here would be a *different*,
---- worse bug -- `root` is the specific `Node` the caller expects this
---- `_hnf` call to mutate in place; writing a resolved-but-different
---- pointer into the local `root` parameter would leave the caller's own
---- copy of it completely untouched, silently discarding this function's
---- entire result.
+--- We never do this to `root` (variable 0): `root` is the node we were
+--- asked to rewrite, and has to stay that node.
 writeBack :: IVarIndex -> CStmt
 writeBack v
-  | v == 0    = comment "root scrutinized directly -- no write-back (see writeBack's own note)"
+  | v == 0    = comment "root is the scrutinee: no write-back"
   | otherwise = var v .= scrutinee
 
 --- A constructor case: push its frame, filled from the variables in
@@ -347,17 +261,14 @@ writeBack v
 ---               SCOPED_MARK_CUTOFF in runtime.h)
 --- with reps from `gReps`, so the GC can trace it.
 ---
---- The loop's `nondet` starts at `root`'s own flag, not false
---- (backtracking_proofs.md, nondet tracking rules 2 and 3). Flags are
---- sticky: a node rewritten nondeterministically before stays that way
---- for its later rewrites. For a nested case this also carries the
---- enclosing case's flag in, since that case's `trail_node` set `root`'s
---- flag if it read anything nondeterministic.
+--- The loop's `nondet` starts at `root`'s own flag, not false: a node that
+--- was rewritten nondeterministically stays that way. For a nested case,
+--- this also brings in the enclosing case's flag, which its `trail_node`
+--- put on `root`. (`backtracking_proofs.md`, nondet tracking rules 2, 3.)
 ---
 --- The retry cutoff is per case, not per function: a retry only redoes
 --- this case's dispatch, so it may only flip choices made since this case
---- began. A choice an enclosing case's dispatch read is older than that
---- (backtracking_proofs.md, #3 rule 2).
+--- began (`backtracking_proofs.md`, #3 rule 2).
 enterCase :: Gen -> IVarIndex -> [IConsBranch] -> G [CStmt]
 enterCase gen v bs = do
   (k, done) <- get
@@ -478,12 +389,8 @@ declBlock (IBlock decls asgns st) =
     ICaseLit  _ lbs -> concat [ declBlock b | ILitBranch _ b <- lbs ]
     _               -> []
 
---- `v` (this case's own scrutinee) is `_scrutinee` reaching FAIL_TAG
---- directly -- an upstream failure propagating through, as opposed to
---- `IExempt`'s "this scrutinee is fine, just unhandled". SCOPED_RETRY
---- goes first, before `root` is touched at all: `undo()` only walks the
---- trail stack, so it doesn't need `root` mutated first, and if it finds
---- nothing to flip, we fail `root`. With #3 on, that write is always
+--- The scrutinee failed, so `root` fails too, unless scoped backtracking
+--- finds another choice to try first. With #3 on, the `fail` is always
 --- trailed (`SCOPED_FAIL_TRAIL`, runtime.h), since the retry may have
 --- popped entries the write depends on.
 failBlock :: Gen -> CStmt
@@ -509,15 +416,16 @@ choiceBlock :: CStmt
 choiceBlock = ccase (text "CHOICE_TAG")
   [scall "SCOPED_MARK_CUTOFF" [], scall "choose" [scrutinee], cbreak]
 
---- `follow_forward` (runtime.h) is one hop, or path compression under
---- OPT_PATH_COMPRESS.
+--- `follow_forward` (runtime.h) moves one hop, or does path compression
+--- under `OPT_PATH_COMPRESS`.
 forwardBlock :: CStmt
 forwardBlock = ccase (text "FORWARD_TAG")
   [ scrutinee .= call "follow_forward" [scrutinee], cbreak ]
 
---- `bs` is always non-empty (`ICaseCons`'s own well-formedness contract --
---- there's no value to scrutinize a zero-constructor type's variable at
---- all), but matched defensively rather than partially.
+--- Narrowing (see "Free variables and narrowing" in the manual): `x`
+--- becomes the first constructor, and the trail gets a choice for each
+--- other one and an entry that makes `x` free again at the end.
+--- ICurry never has a case without branches, but we handle it anyway.
 freeCaseBlock :: IVarIndex -> [IConsBranch] -> CStmt
 freeCaseBlock _ []                                  =
   ccase (text "FREE_TAG")
@@ -560,14 +468,9 @@ litValue (IInt   i) = int i
 litValue (IFloat f) = float f
 litValue (IChar  c) = int (ord c)
 
---- Takes the enclosing `RetryCtx` and threads it through *unchanged* --
---- a literal case doesn't establish its own SCOPED_RETRY-eligible
---- scrutinee (its own scrutinee is already an extracted raw scalar by
---- here, not a `field` `undo` can restore in place -- see runtime.h's
---- own note on SCOPED_RETRY), but an `IExempt` from a *further* nested
---- case inside one of these branches should still retry against
---- whichever constructor-case scrutinee most recently enclosed it, not
---- lose that context just because a literal case sits in between.
+--- A literal case is an if/else chain on the raw value. It isn't a retry
+--- point (`undo` can't restore a raw value), so its branches keep the
+--- enclosing constructor case's `gRetry`.
 showLitCase :: Gen -> IVarIndex -> [ILitBranch] -> G [CStmt]
 showLitCase gen v bs = do
   conds <- mapM branchCond bs
@@ -582,11 +485,8 @@ showLitCase gen v bs = do
 -- Expressions -- building a new node
 ------------------------------------------------------------------------------
 
---- Project a primitive operation's already-bound argument down to its raw
---- value -- primitive arguments are always either a plain variable (a
---- `field` already holding the right raw member) or a literal constant;
---- anything else would mean `Rice.Transform.Unbox` produced something this
---- wasn't designed against.
+--- A primitive's argument as a raw C value. After ANF it's always a
+--- variable or a literal.
 showPrim :: CType -> IExpr -> CExpr
 showPrim typ e = case e of
   IVar v -> rawField typ (var v)
@@ -620,9 +520,8 @@ showPart :: IQName -> Int -> [IExpr] -> CExpr
 showPart f m es = stamped (call ("make_" ++ mangle f) (missingArgs es m))
 
 --- A node built for `root`'s new value takes the rewrite's stamp under
---- the write barrier (`STAMPED`, runtime.h; backtracking_proofs.md). A
---- string constant's cells don't: they're constructors, which are never
---- rewritten, so their stamp is never read.
+--- the write barrier (`STAMPED`, runtime.h). A string constant's cells
+--- don't need it: they're constructors, which are never rewritten.
 stamped :: CExpr -> CExpr
 stamped e = call "STAMPED" [e]
 
@@ -633,20 +532,14 @@ missingArgs es m = map showExpr es ++ replicate m nullf ++ [int m]
 -- Expressions -- reducing root in place (IReturn)
 ------------------------------------------------------------------------------
 
--- IVar/IVarAccess are "collapse points" (backtracking-optimizations.md's
--- #4): the function body's final value is just an already-existing node
--- reference, not a freshly-built one. `collapse` (runtime.h) is
--- set_forward under OPT_COPY_COLLAPSE=0 (the default), and only becomes an
--- eager, indirection-free copy when the flag is on *and* the referenced
--- node happens to already be a safe, non-nondet value at this point --
--- both branches are always sound, this is a runtime-flag-gated eager/lazy
--- trade, not a correctness fork here in codegen.
---
--- Returns the statements that rewrite `root`, and how control then leaves:
--- `RETURN()` when `root` is already in head normal form, or a tail jump to
--- the code that reduces it further (a function call, `?`, `apply`). The
--- jump is a `musttail` call, so a tail-recursive Curry function runs in
--- constant C stack.
+--- Rewrites `root` with the value of a `return`. Returns the statements,
+--- and how control leaves: `RETURN()` when `root` is already in head
+--- normal form, or a tail jump to the code that reduces it further (a
+--- function call, `?`, `apply`).
+---
+--- Returning an existing node (`IVar`, `IVarAccess`) is a collapsing rule:
+--- `collapse` (runtime.h) makes `root` a FORWARD to it, or a copy under
+--- `OPT_COPY_COLLAPSE` (#4).
 setExpr :: IExpr -> ([CStmt], [CStmt])
 setExpr (IVar v)           = ([scall "collapse" [root, var v]], returnStmt)
 setExpr (IVarAccess v ixs) = ([scall "collapse" [root, children (var v) ixs]], returnStmt)
