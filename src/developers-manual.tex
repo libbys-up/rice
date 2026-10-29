@@ -288,7 +288,9 @@ FlatCurry expressions, which the \code{flatcurry-typed} package lacks.
 \file{trail.h}, \file{.c} & the trail \\
 \file{memory.h}, \file{heap.c} & the heap and \code{alloc} \\
 \file{gc.h}, \file{.c} & the garbage collector \\
-\file{prelude.c} & the Prelude's external functions \\
+\file{ext/M.c} & module \code{M}'s external functions
+  (\S\ref{sec:externals}) \\
+\file{ext.h}, \file{.c} & helpers for writing them \\
 \file{prim.h} & C helpers for primitives (\code{div}, \code{mod}, rounding) \\
 \file{debug.h} & leveled debug output \\
 \file{Makefile} & builds the runtime alone, for \file{test/runtime_smoke.c} \\
@@ -380,7 +382,7 @@ one of the Curry system it was built with.  \file{lib/} is a copy of KiCS2's,
 made by \file{tools/sync-lib.sh}, with the CPP symbol \code{__KICS2__} renamed
 to \code{__RICE__}: the runtime implements the externals of the KiCS2
 branches.  \file{lib/VERSION} says which KiCS2 it came from.  After a sync,
-check whether Prelude's externals still match \file{runtime/prelude.c} and
+check whether Prelude's externals still match \file{runtime/ext/Prelude.c} and
 \file{replace/}.
 
 \code{Rice.Frontend} runs the front end itself, with \code{-D__RICE__}, and
@@ -526,7 +528,7 @@ eqInt x y = fcase x of
 \end{lstlisting}
 \file{replace_Prelude.curry} holds everything else: generators for free
 variables of primitive type, and the unification operators, which are
-externals in \file{runtime/prelude.c}.
+externals in \file{runtime/ext/Prelude.c}.
 
 A replacement must have the same type as the function it replaces, including
 type class constraints, because every call site was compiled against the
@@ -799,16 +801,20 @@ external.
 
 \paragraph{Externals.}  A function declared \code{external} has no body in the
 generated code.  Its \code{_hnf} is written by hand in
-\file{runtime/prelude.c}, under its mangled name
-(\code{Prelude__prim_USputChar_hnf}).  A few are stubs that stop with an error:
-\code{catch}, file IO, and the \code{read...Literal} functions.
+\file{runtime/ext/M.c} for module \code{M}, under its mangled name
+(\code{Prelude__prim_USputChar_hnf} in \file{runtime/ext/Prelude.c}); see
+\S\ref{sec:externals}.
 
 \subsection{Building the executable}
 
 \code{buildExecutable} writes \file{rice-main.c} for the root module, compiles every
 module's \file{.c}, the runtime's \file{.c} files and \file{rice-main.c} with
 \code{clang -std=c11 -O2}, and links them into an executable named after the
-root module.  \file{rice-main.c} initializes the trail, the heap and the machine,
+root module, along with \file{runtime/ext/M.c} for every module \code{M} that
+has externals (\code{externalFiles}).  If one of those files is missing, rice
+stops and names the module and its externals, before running the C compiler.
+\file{rice-main.c} also keeps the command line and Rice's home directory for the
+externals.  It initializes the trail, the heap and the machine,
 builds a node for \code{main}, and hands it to a driver: \code{run_io}, which
 runs an \code{IO} action once, or, with \code{--interactive}, \code{nf_all},
 which prints every value \code{main} has (\S\ref{sec:drivers}).
@@ -1099,7 +1105,7 @@ can't see those.  So there are global copies, \code{rice_root} and
   \item Afterwards it reloads \code{sp = rice_sp}, because a nested run can grow
     the stack, which moves it.
 \end{itemize}
-The \code{_hnf} entry points at the bottom of \file{prelude.c} are this
+The \code{_hnf} entry points at the bottom of \file{ext/Prelude.c} are this
 pattern, written out for each primitive implemented as ordinary C.
 
 \paragraph{Entering and leaving the machine.}  C code runs the machine with
@@ -1120,7 +1126,7 @@ The continuation starts with \code{EVAL_OR_CONTINUE}: if the value isn't settled
 yet, save it in the frame and jump to its code, which returns right back into
 the same continuation.  Once it's settled, pop the frame first (after reading
 any slots you need, because the next push overwrites them), and finish.
-\code{strict_k} for \code{$!} in \file{prelude.c} is the simplest example.
+\code{strict_k} for \code{$!} in \file{ext/Prelude.c} is the simplest example.
 
 %----------------------------------------------------------------------
 \subsection{Nondeterminism}
@@ -1335,18 +1341,45 @@ walking a chain, we also point every node on it at the end (path compression),
 so another pointer into the middle doesn't walk it again.
 
 %----------------------------------------------------------------------
-\subsection{The Prelude's externals}
+\subsection{External functions}
+\label{sec:externals}
 
-\file{runtime/prelude.c} implements the Prelude functions declared
-\code{external}: IO (\code{bindIO}, \code{returnIO}, \code{getChar},
-\code{prim_putChar}), strictness (\code{$!}, \code{$!!}, \texttt{\$\#\#}),
-\code{&}, \code{cond}, \code{apply}, unification (\code{constrEq},
-\code{nonstrictEq}), \code{ensureNotFree}, \code{failed}, \code{prim_error},
-and showing literals.  A few are stubs that stop with an error, because nothing
-needed them yet: \code{catch}, file IO (\code{prim_readFile},
-\code{prim_writeFile}, \code{prim_appendFile}) and the
-\code{prim_read...Literal} functions.  It also has \code{toCurryString} and
-\code{setCurryString}, which build string literals.
+The externals of module \code{M} are in \file{runtime/ext/M.c}, named after the
+module: \file{ext/Prelude.c}, \file{ext/System.IO.c},
+\file{ext/System.Directory.c}, and so on.  \code{Rice.Main} links one whenever
+its module is part of the program.  The files for modules outside
+\file{lib/}, from packages (\code{System.Directory}, \code{System.Process},
+\code{Data.Time}, \code{System.IOExts}, \code{ReadShowTerm}), live here too.
+
+\file{ext/Prelude.c} is the largest.  Its externals are IO (\code{bindIO},
+\code{returnIO}, \code{getChar}, \code{prim_putChar}, \code{prim_readFile},
+\code{prim_writeFile}, \code{prim_appendFile}), strictness (\code{$!},
+\code{$!!}, \texttt{\$\#\#}), \code{&}, \code{cond}, \code{apply},
+unification (\code{constrEq}, \code{nonstrictEq}), \code{ensureNotFree},
+\code{failed}, \code{prim_error}, and showing and reading literals.  It also has
+\code{toCurryString} and \code{toCStr}, which convert strings.
+
+The other files use the helpers in \file{runtime/ext.h}.  \code{EXT(f)} defines
+\code{f_hnf} and has it call the body that follows, with \code{root} the call
+node.  The body reads the arguments with \code{ext_int}, \code{ext_string},
+\code{ext_tag} and so on, which evaluate them, then overwrites \code{root}
+with the result (\code{ext_return} and friends).  An IO action is no
+different: evaluating it runs it.  Reading an argument runs the machine, which
+can collect, so a body keeps \code{root} in a \code{GC_ROOT} until it has read
+every argument.
+
+A \code{Handle} (\file{ext/System.IO.c}) is a node with two raw fields, the
+\code{FILE*} and whether it can be read and written.  \code{Handle} is an
+\code{external data} type, so it has no generated constructor, and
+\file{ext/System.IO.c} defines the symbol.
+
+There's no exception handling yet: \code{catch} is a stub, and a failed IO
+operation ends the program with the C library's reason
+(\code{ext_io_error}).  Stubs that stop with an error (\code{ext_unsupported}):
+\code{catch}, \code{System.IOExts}'s commands with pipes, and
+\code{ReadShowTerm}, which would need a table of every constructor.  Modules
+with externals and no file yet: \code{Data.IORef}, \code{System.IO.Unsafe},
+and \code{Control.Search.*}.
 
 Most are written as machine code with a continuation (\code{bind_k},
 \code{strict_k}, \code{lu_k}); those are the examples to copy when you write a

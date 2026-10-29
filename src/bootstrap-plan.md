@@ -40,8 +40,20 @@ Done since this plan was written:
   driver `main.c` overwriting a module `Main`'s `Main.c` on a
   case-insensitive file system.
 
-What's left to link: the 49 externals below, in 10 modules. `catch` stays
-a stub for now: rice's closure has it only in functions rice doesn't call.
+- **Phase A.1–A.2, externals.** `runtime/ext/M.c` holds module `M`'s
+  externals (`ext.h` has the helpers), and `Rice.Main` links the ones the
+  program's modules need, or names what's missing. Done: System.IO
+  (handles), System.Directory, System.Environment, System.Process,
+  System.CPUTime, Data.Time, Curry.Compiler.Distribution. Stubs:
+  System.IOExts's commands, ReadShowTerm, `catch`; rice doesn't call them.
+- **rice1 exists.** `rice Rice.Main` links (about 6 minutes, 61 MB), and
+  that rice1 compiles and links a hello world that runs. Against rice0
+  (KiCS2-built), with Prelude already cached: 43 s and 5.7 GB peak, against
+  12 s and 4.5 GB. 35 s of that is reading the cached Prelude (`.rtfcy`,
+  `.rfcy`) with derived `Read` (B.4).
+
+Next: Phase C. rice1 compiles the test suite (and its C compared with
+rice0's), then rice1 compiles Rice into rice2.
 
 ------------------------------------------------------------------------------
 

@@ -34,7 +34,7 @@ src/*.log
 src/*.out
 
 # rice's objects, one directory per compiler and flags (Rice.Main.objDirName)
-runtime/obj-*/
+obj-*/
 
 # make frontend's output
 /bin/

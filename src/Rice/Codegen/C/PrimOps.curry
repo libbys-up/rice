@@ -12,7 +12,7 @@
 --- An inline primitive runs as soon as control reaches the `let` that
 --- binds it, which is only safe because it's pure. So `prim_putChar`
 --- isn't here, and neither are the `prim_show*Literal`s (which return a
---- `String`). They're ordinary externals in `runtime/prelude.c`.
+--- `String`). They're ordinary externals in `runtime/ext/Prelude.c`.
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------

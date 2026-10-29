@@ -1,4 +1,4 @@
--- Exercises the show*Literal external primitives (runtime/prelude.c's
+-- Exercises the show*Literal external primitives (runtime/ext/Prelude.c's
 -- hand-written _hnf functions, not inlined like the arithmetic table):
 -- prim_showIntLiteral, prim_showFloatLiteral, prim_showCharLiteral,
 -- prim_showStringLiteral (via ordinary `show`/`print` on each literal

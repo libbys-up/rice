@@ -748,7 +748,7 @@ void setCurryString(union field root, char* str);
 char* toCStr(union field string);
 
 // Escape one character the way Curry's derived Show does (runtime.c).
-// Shared by prelude.c's show*Literal and runtime.c's printing of solutions.
+// Shared by ext/Prelude.c's show*Literal and runtime.c's printing of solutions.
 char* appendEscaped(char* buf, char c, char quote);
 
 

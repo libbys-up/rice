@@ -23,10 +23,11 @@ import Data.Time          (ClockTime)
 import qualified Data.Map as Map
 import Data.List          (nub, last, maximum)
 import Data.Char          (toLower, ord)
-import Control.Monad      (when, foldM)
+import Control.Monad      (when, foldM, filterM)
 import Text.Pretty        (pPrint)
 
-import FlatCurry.Types                   (Prog)
+import FlatCurry.Types                   (Prog (..), FuncDecl (..), Rule (..),
+                                          QName)
 import FlatCurry.Typed.Types             (TProg, TFuncDecl (..), TRule (..))
 import FlatCurry.Typed.Goodies           (tProgTFuncs)
 import FlatCurry.Transform.Typed.ExecDet (showTransformRuleDet)
@@ -87,9 +88,10 @@ compileProgram opts file = do
     Right modNames -> do
       let rootModule = last modNames
           start      = (Map.empty, [], emptyReps)
-      _ <- timeIO timing "compile all modules"
-             (foldM (run graph rootModule opts) start modNames)
-      timeIO timing "build+link executable" (buildExecutable opts modNames)
+      (_, fcys, _) <- timeIO timing "compile all modules"
+                        (foldM (run graph rootModule opts) start modNames)
+      timeIO timing "build+link executable"
+             (buildExecutable opts modNames (externalsOf fcys))
 
 --- Compiles one module, writing its `.h` and `.c`.
 ---
@@ -237,11 +239,13 @@ generateModule opts impFcys impReps mname optimized = do
 --- isn't recompiled, and builds with different flags (`--cflags`,
 --- `--debug`, `--gcc`) keep separate objects instead of overwriting the
 --- runtime's and Prelude's.
-buildExecutable :: [CompilerOptions] -> [String] -> IO ()
-buildExecutable opts modNames = do
+buildExecutable :: [CompilerOptions] -> [String] -> Map.Map String [QName]
+                -> IO ()
+buildExecutable opts modNames externals = do
   home <- riceHome
   let runtimeDir = home </> "runtime"
       rootModule = last modNames
+  extFiles <- externalFiles runtimeDir modNames externals
   cHs <- mapM cPaths modNames
   (_, rootHPath) <- cPaths rootModule
   -- A hierarchical module's header is in a subdirectory (A/B/C.h for
@@ -256,9 +260,10 @@ buildExecutable opts modNames = do
       codeFlags    = ["-std=c11", "-O2"] ++ debugFlag ++ cflags
       incFlags     = map ("-I" ++) (runtimeDir : incDirs)
       runtimeFiles = map (runtimeDir </>) [ "runtime.c", "trail.c", "machine.c"
-                                          , "heap.c", "gc.c", "prelude.c" ]
-      allCFiles    = runtimeFiles ++ map fst cHs ++ [mainPath]
-  writeFileIfChanged mainPath (pPrint (writeMain rootModule (mainModeOpt opts)))
+                                          , "heap.c", "gc.c", "ext.c" ]
+      allCFiles    = runtimeFiles ++ extFiles ++ map fst cHs ++ [mainPath]
+  writeFileIfChanged mainPath
+    (pPrint (writeMain rootModule home (mainModeOpt opts)))
   -- Only the hand-written runtime headers count here. A module's generated
   -- .h is always rewritten together with its .c, so the ordinary .c-vs-.o
   -- check already covers it; counting it here would make any module's
@@ -281,6 +286,33 @@ buildExecutable opts modNames = do
     ns -> ["-DDEBUG=" ++ show (last ns)]
   -- Every --cflags is used, and each can hold several flags.
   cflags = concatMap words [s | SCFlags s <- opts]
+
+--- Each module's external functions, from its untyped FlatCurry. Only the
+--- ones the optimizer kept are there, which are the ones the program uses.
+externalsOf :: [Prog] -> Map.Map String [QName]
+externalsOf fcys = Map.fromList
+  [ (m, exts) | Prog m _ _ funs _ <- fcys
+              , let exts = [ f | Func f _ _ _ (External _) <- funs ]
+              , not (null exts) ]
+
+--- The C files with the externals of the modules in `modNames`:
+--- `runtime/ext/M.c` for module `M` (`runtime/ext.h`). If a module has
+--- externals but no such file, we stop here and name them, rather than
+--- leave the linker to report each one as an undefined symbol.
+externalFiles :: FilePath -> [String] -> Map.Map String [QName] -> IO [FilePath]
+externalFiles runtimeDir modNames externals = do
+  let needed = [ (m, exts) | m <- modNames
+                           , Just exts <- [Map.lookup m externals] ]
+      file m = runtimeDir </> "ext" </> m <.> "c"
+  missing <- filterM (fmap not . doesFileExist . file . fst) needed
+  if null missing
+    then return (map (file . fst) needed)
+    else do
+      mapM_ (\(m, exts) -> putStrLn
+               ("Rice doesn't implement the external functions of " ++ m
+                ++ " (" ++ file m ++ "): " ++ unwords (map snd exts)))
+            missing
+      exitWith 1
 
 --- Compiles `cFile` to a `.o` in its `obj-<hash>` directory, unless the
 --- `.o` is up to date: newer than `cFile` and than `hdrTime`, and built

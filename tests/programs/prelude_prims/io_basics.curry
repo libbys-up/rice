@@ -1,5 +1,5 @@
 -- Exercises the core IO externals: bindIO, returnIO, prim_putChar
--- (runtime/prelude.c's hand-written _hnf functions) via ordinary
+-- (runtime/ext/Prelude.c's hand-written _hnf functions) via ordinary
 -- do-notation sequencing (>>=/>>/return desugar to bindIO/returnIO).
 main :: IO ()
 main = do

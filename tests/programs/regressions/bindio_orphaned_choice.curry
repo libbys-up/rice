@@ -1,6 +1,6 @@
 -- rice-mode: interactive
 --
--- Prelude__bindIO_hnf (runtime/prelude.c) didn't commit choices made
+-- Prelude__bindIO_hnf (runtime/ext/Prelude.c) didn't commit choices made
 -- while settling its first argument: `m = settle(m, NULL, HNF_SETTLE)`
 -- can dispatch a CHOICE_TAG node reached along the way (here, forcing
 -- `1 ? 2` inside `print`), which pushes a real frame onto bt_stack via

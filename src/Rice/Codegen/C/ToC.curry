@@ -62,9 +62,10 @@ mainDriverCall Interactive = scall "nf_all" [root]
 
 --- The generated `rice-main.c`: defines the runtime's globals, initializes the
 --- runtime, builds a node for the root module's `main`, and runs it with
---- the driver for `mode`.
-writeMain :: String -> MainMode -> Doc
-writeMain rootModule mode = vcat
+--- the driver for `mode`. It also keeps the command line and rice's home,
+--- `home`, for library externals (`runtime/ext.h`).
+writeMain :: String -> String -> MainMode -> Doc
+writeMain rootModule home mode = vcat
   [ text "#include <stdio.h>"
   , cinclude "node"
   , cinclude "trail"
@@ -74,9 +75,14 @@ writeMain rootModule mode = vcat
   , text ""
   , text "Trail* trail;"
   , text "unsigned long mem;"
+  , text "int rice_argc;"
+  , text "char** rice_argv;"
+  , text "const char* rice_install_dir" <+> equals <+> cstring home <> semi
   , text ""
-  , cfunDefn "int" "main" [] $
-      [ text "trail" <+> equals <+> call "trail_new" [] <> semi
+  , cfunDefn "int" "main" [("int","argc"), ("char**","argv")] $
+      [ text "rice_argc = argc;"
+      , text "rice_argv = argv;"
+      , text "trail" <+> equals <+> call "trail_new" [] <> semi
       , scall "memory_init" []
       , scall "machine_init" []
       , text "field root" <+> equals <+>
@@ -118,7 +124,7 @@ type G a = State (Int, [CaseBlock]) a
 
 funSource :: FieldRepTable -> IFunction -> [CStmt]
 funSource reps (IFunction name _ _ _ body) = case body of
-  IExternal _     -> []  -- hand-written in runtime/prelude.c
+  IExternal _     -> []  -- hand-written in runtime/ext/<module>.c
   IFuncBody block ->
     let (m, n, _) = name
         gen = Gen name (toName name)

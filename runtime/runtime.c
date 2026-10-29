@@ -683,8 +683,8 @@ void print_tuple(union field n, int i)
  * a bare '"' is fine inside 'x', and a bare '\'' is fine inside "...".
  * Named escapes match GHC's derived Show (\a \b \f \n \r \t \v, \\, and the delimiter).
  * Anything else that isn't printable gets a decimal escape.
- * This lives here instead of prelude.c because the runtime library
- * (runtime/Makefile) doesn't include prelude.c, and our printing needs it.
+ * This lives here instead of ext/Prelude.c because the runtime library
+ * (runtime/Makefile) doesn't include ext/Prelude.c, and our printing needs it.
  */
 char* appendEscaped(char* buf, char c, char quote)
 {

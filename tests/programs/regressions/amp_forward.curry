@@ -1,4 +1,4 @@
--- Prelude___AN_hnf (runtime/prelude.c, backing `&`) called `nf(x)` and
+-- Prelude___AN_hnf (runtime/ext/Prelude.c, backing `&`) called `nf(x)` and
 -- then read `x.n->symbol->tag` directly -- broken the same way
 -- strictApply's own pre-settle() bug was (see strictapply_forward.curry):
 -- `nf` takes its argument *by value*, and internally chases FORWARD_TAG

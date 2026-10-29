@@ -4,7 +4,7 @@
 -- constructor name against "char" (lowercase), which was never a real
 -- constructor name under either the old or new storage convention --
 -- the real one is "Char" (Prelude's own boxed constructor -- see
--- runtime/prelude.c's toCurryString, which every String literal actually
+-- runtime/ext/Prelude.c's toCurryString, which every String literal actually
 -- builds through at runtime, via setCurryString/condenseStrings). Neither
 -- half of this had ever been exercised by a test whose `main` returns a
 -- String directly (see printlist.curry).

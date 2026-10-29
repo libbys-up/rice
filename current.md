@@ -164,6 +164,14 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
+## Bootstrapping (2026-10-29)
+
+rice1 exists: rice compiles `Rice.Main` (from `src/`, with `CURRYPATH`
+set to `packageLoadPath` from `Rice.PackageConfig`), and the result
+compiles a hello world that runs. Status and next steps are in
+`src/bootstrap-plan.md`. Externals of library modules are in
+`runtime/ext/<Module>.c` (developer's manual, "External functions").
+
 ## Distribution (2026-10-29)
 
 Done:

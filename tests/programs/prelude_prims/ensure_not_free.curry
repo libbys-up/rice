@@ -1,6 +1,6 @@
 -- ensureNotFree is a real, exported Prelude function ($# is defined
 -- directly in terms of it: `f $# x = f $! (ensureNotFree x)`).
--- runtime/prelude.c's Prelude__ensureNotFree_hnf now settles its
+-- runtime/ext/Prelude.c's Prelude__ensureNotFree_hnf now settles its
 -- argument (chasing FORWARD_TAG, redispatching through
 -- FUNCTION_TAG/CHOICE_TAG) and returns it unchanged -- correct for
 -- everything except a genuinely-still-unbound free variable, which

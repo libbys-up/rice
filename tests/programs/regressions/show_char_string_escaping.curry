@@ -1,4 +1,4 @@
--- prim_showCharLiteral/prim_showStringLiteral (runtime/prelude.c) just
+-- prim_showCharLiteral/prim_showStringLiteral (runtime/ext/Prelude.c) just
 -- returned the raw character/string content, with no quoting or
 -- escaping at all -- `show 'x'` gave the bare string "x" instead of
 -- "'x'", `show "hi"` gave "hi" instead of "\"hi\"". The same gap
@@ -8,7 +8,7 @@
 -- a Curry program calls `show` itself) -- confirmed by diffing raw
 -- bytes against real kics2's own output for this exact program.
 --
--- Fixed by adding proper derived-Show escaping (prelude.c's
+-- Fixed by adding proper derived-Show escaping (ext/Prelude.c's
 -- appendEscaped, shared via runtime.h with runtime.c) to all three
 -- places: the named escapes GHC's derived Show uses (\a\b\f\n\r\t\v,
 -- plus \\ and the enclosing delimiter), decimal \NNN for anything else

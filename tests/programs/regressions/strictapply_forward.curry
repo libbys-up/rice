@@ -1,4 +1,4 @@
--- strictApply (runtime/prelude.c, backing seq/$!/$!!/$##) called
+-- strictApply (runtime/ext/Prelude.c, backing seq/$!/$!!/$##) called
 -- force(x) once and then read x's tag/nondet directly, without ever
 -- chasing FORWARD_TAG -- forward_hnf is a deliberate no-op, so if x was
 -- already a forward wrapper (e.g. the result of some earlier collapse

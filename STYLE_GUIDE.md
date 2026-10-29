@@ -170,7 +170,7 @@ rather than erroring.
 declared in `runtime/runtime.h`, defined in `runtime/runtime.c`) is the right tool
 specifically for "this is deliberately not implemented yet" — the C
 runtime uses it this way consistently for unimplemented externals (`catch`,
-`ensureNotFree`, `read*Literal`, file I/O, etc. in `runtime/prelude.c`).
+`ensureNotFree`, `read*Literal`, file I/O, etc. in `runtime/ext/Prelude.c`).
 Keep using it that way rather than for ordinary recoverable failure.
 
 ### State-monad usage
@@ -288,7 +288,7 @@ reader knows the history of the file.
 - **File organization:** one file per concern — `node.h` (representation),
   `trail.h`/`.c` (the trail), `machine.h`/`.c` (the evaluation machine),
   `memory.h`/`heap.c` (allocation), `gc.h`/`.c` (the collector),
-  `runtime.h`/`.c` (the reduction engine), `prelude.c` (Prelude externals),
+  `runtime.h`/`.c` (the reduction engine), `ext/Prelude.c` (Prelude externals),
   `macros.h`/`debug.h`/`prim.h` (small cross-cutting utilities). Keep new
   runtime code similarly separated rather than growing one of the big files
   further.
@@ -297,7 +297,7 @@ reader knows the history of the file.
   trail, the machine stack, C strings) uses `malloc`/`free`. Never `free` a
   node.
 - **Error handling:** one central `error(msg, expr)` helper (`runtime.c`) that
-  prints and exits. `runtime/prelude.c` routes every fatal path, real and
+  prints and exits. `runtime/ext/Prelude.c` routes every fatal path, real and
   stubbed, through it. Check the result of `malloc`/`realloc` in runtime data
   structures.
 - **Macros:** used deliberately for the `child_at_N` dispatch table
@@ -335,4 +335,4 @@ These aren't style rules so much as loose ends worth tidying when convenient
   design notes sitting next to source files.
 - ~~`runtime/external.c` and `runtime/Prelude_external.c` currently implement
   overlapping externals differently~~ — resolved (2026-09-04): both deleted,
-  superseded by the single `runtime/prelude.c` (see `STATUS.md`'s Phase 2).
+  superseded by the single `runtime/ext/Prelude.c` (see `STATUS.md`'s Phase 2).

@@ -7,7 +7,7 @@
 # memory.h, debug.h, trail.{h,c}, machine.{h,c}, heap.c, gc.{h,c},
 # runtime.{h,c} -- into a static library.
 #
-# prelude.c is deliberately NOT part of this target: it #includes a
+# ext/Prelude.c is deliberately NOT part of this target: it #includes a
 # per-program-generated "Prelude.h" (codegen output -- e.g.
 # Prelude__LB_RB_TAG, set_Prelude__True) that doesn't exist until a real
 # module is compiled, so it can't be built standalone against just this
