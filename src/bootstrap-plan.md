@@ -52,8 +52,22 @@ Done since this plan was written:
   12 s and 4.5 GB. 35 s of that is reading the cached Prelude (`.rtfcy`,
   `.rfcy`) with derived `Read` (B.4).
 
-Next: Phase C. rice1 compiles the test suite (and its C compared with
-rice0's), then rice1 compiles Rice into rice2.
+- **Phase C, the triple test, passes** (2026-10-30, `tests/bootstrap.sh`):
+  rice0 builds rice1 and rice1 builds rice2, each from scratch in a fresh
+  copy of the tree, and all 157 generated `.c`/`.h` files are identical.
+  rice1 building rice2 took 31 minutes and 4.6 GB in an earlier run.
+  Getting there found three runtime bugs, fixed in `649adf4`: `read`
+  didn't know Haskell's escapes (`'\DEL'`), a failed IO action was
+  silently skipped, and `show` on Float was C's `%f`, so rice1 compiled
+  float constants to six decimals.
+
+Next:
+- B.4: rice1 spends most of a small compile reading cached `.rtfcy` and
+  `.rfcy` files with derived `Read` (35 of 43 s on hello world). A
+  hand-written reader would help rice0 too.
+- `tests/bootstrap.sh --fixpoint` (rice2 builds rice3) hasn't been run.
+- B.3: the `Int` width audit.
+- Phase D: the seed C, and building without KiCS2.
 
 ------------------------------------------------------------------------------
 

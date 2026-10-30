@@ -166,9 +166,8 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 
 ## Bootstrapping (2026-10-29)
 
-rice1 exists: rice compiles `Rice.Main` (from `src/`, with `CURRYPATH`
-set to `packageLoadPath` from `Rice.PackageConfig`), and the result
-compiles a hello world that runs. Status and next steps are in
+Rice is self-hosting: `tests/bootstrap.sh` (the triple test) passes, with
+rice1's generated C identical to rice0's for all 157 files. Status and next steps are in
 `src/bootstrap-plan.md`. Externals of library modules are in
 `runtime/ext/<Module>.c` (developer's manual, "External functions").
 
