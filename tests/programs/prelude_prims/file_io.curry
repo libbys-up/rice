@@ -1,13 +1,12 @@
--- readFile/writeFile/appendFile: all three now real implementations in
--- runtime/ext/Prelude.c (whole-file, not lazy/streaming -- a separate,
--- bigger design question, same category as real exception handling).
--- A failure (missing file, permission denied, ...) is still fatal --
--- real Curry signals that as a catchable IOError, but exception
--- handling isn't designed yet (`catch` is still a stub) -- not
--- exercised here for that reason.
+-- readFile/writeFile/appendFile (runtime/ext/Prelude.c). readFile is lazy,
+-- so the string is forced before the file is appended to: reading a file
+-- lazily while writing it isn't defined (KiCS2 stops with "resource busy").
+-- A failure (missing file, permission denied, ...) is fatal, since `catch`
+-- is still a stub; not exercised here for that reason.
 main :: IO ()
 main = do
   writeFile "file_io.tmp" "hello\n"
   s <- readFile "file_io.tmp"
-  appendFile "file_io.tmp" "more\n"
+  length s `seq` appendFile "file_io.tmp" "more\n"
   putStr s
+  readFile "file_io.tmp" >>= putStr

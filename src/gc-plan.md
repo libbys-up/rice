@@ -302,3 +302,60 @@ Open questions
   dedicated chunk per oversized request is enough.
 - **Generational collection** would help programs with a large live set.
   Defer until measurements say so.
+
+------------------------------------------------------------------------------
+
+Stage 7: generational collection (2026-10-30)
+---------------------------------------------
+
+**Why.** A program with a large live set copies all of it at every
+collection. Compiling hello world, a self-compiled rice collects 134
+times and copies 59.6 GB, with up to 1.5 GB live (current.md, "Rice vs
+KiCS2"). Most live data is old and stays live, so the usual fix applies:
+collect the young data often and the old data rarely.
+
+**Design.** Two generations, as in most functional language runtimes.
+
+- **The nursery** is where everything is allocated: one chunk of
+  `GC_NURSERY_BYTES` (8 MB to start), plus overflow chunks if a stretch
+  between safe points allocates more. A safe point collects when the
+  nursery is full.
+- **A minor collection** copies the live young nodes into the old
+  generation (everything that survives is promoted at once; no aging yet),
+  then empties the nursery. Its roots are the usual ones (root, the
+  machine stack, the trail, the C roots) plus the remembered set. It
+  copies only young nodes: a pointer to an old node is left alone, and
+  old nodes aren't scanned unless they're remembered.
+- **A major collection** is today's collector over both generations. It
+  runs when the old generation passes its threshold: twice the live size
+  after the last major collection, and at least `GC_MIN_THRESHOLD`.
+- **The write barrier.** Graph reduction rewrites nodes in place, so an
+  old node can come to point at a young one. Every function that writes
+  pointers into an existing node (the generated `set_X`, the runtime's
+  `set_*`, `set_copy`, `set_free_constructor`, `set_child_at`, `apply`'s
+  argument filling, and `undo`) first calls `gc_remember(node)`: if the
+  node is old and not yet remembered, it's marked and added to the
+  remembered set. A minor collection scans each remembered node's children
+  and then forgets them all. Writes into a node allocated since the last
+  safe point need no barrier, since that node is young.
+- **Age** is a bit in `Node.gc_bits` (`GC_OLD`), set on every copy into
+  the old generation. Whole-node copies (`set_copy`, `undo`,
+  `save_snapshot`) go through one helper that keeps the destination's own
+  `gc_bits`, so a snapshot of an old node is still young and a restored
+  old node is still old. A spill array's age is in its header word: 0
+  while young, `GC_OLD_ARRAY` once promoted (during a collection it holds
+  the forwarding address, as before).
+- **FORWARD elision** in a minor collection only skips young forwards;
+  old nodes are never changed by it.
+
+**Checking.** A missing barrier leaves an old node pointing into a freed
+nursery, so: under `GC_STRESS` every safe point does a minor collection
+(and every 64th a major one), and the freed nursery is poisoned. Under
+`GC_VERIFY`, before each minor collection, everything reachable is walked
+and any old node pointing at a young one without being remembered is
+reported.
+
+**Costs left for later.** A minor collection still scans the whole
+machine stack and the whole trail. A deep recursion or a long trail makes
+every minor collection pay for it; GHC marks stack chunks dirty for this,
+and the trail could keep a watermark of entries already scanned.

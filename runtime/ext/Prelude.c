@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "runtime.h"
 #include "Prelude.h"
 
@@ -1004,93 +1006,160 @@ static RICE_CC void notfree_k(union field _root, Frame* sp)
 }
 
 // ----------------------------------------------------------------------
-// File I/O. Reads/writes the whole file in one call (no streaming/lazy
-// I/O -- readFile's own Curry-level laziness is a bigger, separate
-// design question, same category as exceptions below). A failure
-// (nonexistent file, permission denied, ...) is fatal -- real Curry
-// signals this as a catchable IOError, but real exception handling
-// isn't designed yet (see catch's own stub just below), so this can
-// only ever be the uncatchable, whole-program-ending kind of failure
-// for now.
+// File I/O. A failure (nonexistent file, permission denied, ...) ends
+// the program: real Curry raises a catchable IOError, but we don't have
+// exceptions yet (see catch below).
+//
+// readFile is lazy, as in KiCS2: the string is read a block at a time as
+// it's used, so the part already used can be collected. A block is a
+// thunk, a node with chunk_symbol holding the file and an offset. When
+// it's evaluated, it reads the block at that offset with pread and becomes
+// the block's characters followed by the thunk for the next block, or []
+// at the end of the file. Backtracking can undo that rewrite, so a block
+// may be evaluated twice; reading by offset makes the second time give
+// the same characters.
 // ----------------------------------------------------------------------
 
-/* Read the whole file at `path` into a fresh, NUL terminated buffer.
- * The caller frees it.
- * `what` is the name of the Curry function, for the error message.
- * Since we use C strings, an embedded NUL byte in the file
- * would cut the Curry string short.
- */
-static char* readWholeFile(const char* path, const char* what)
+#define CHUNK_BYTES 4096
+
+// One file being read. The descriptor is closed at the end of the file,
+// and opened again if an undone block is evaluated after that.
+typedef struct
 {
-    FILE* f = fopen(path, "r");
-    if(f == NULL)
+    char* path;
+    int fd;
+} LazyFile;
+
+static void open_lazy_file(LazyFile* lf, field root)
+{
+    lf->fd = open(lf->path, O_RDONLY);
+    if(lf->fd < 0)
     {
         char msg[512];
-        snprintf(msg, sizeof(msg), "%s: %s: %s", what, path, strerror(errno));
-        error(msg, make_Prelude___LP_RP(0));
+        snprintf(msg, sizeof(msg), "readFile: %s: %s", lf->path, strerror(errno));
+        error(msg, root);
     }
-    size_t cap = 4096;
-    size_t len = 0;
-    char* buf = (char*)malloc(cap);
-    size_t n;
-    while((n = fread(buf + len, 1, cap - len, f)) > 0)
-    {
-        len += n;
-        if(len == cap)
-        {
-            cap *= 2;
-            buf = (char*)realloc(buf, cap);
-        }
-    }
-    fclose(f);
-    buf[len] = '\0';
-    return buf;
 }
 
+static const unsigned char chunk_reps[] = { R_INT, R_INT };
+static RICE_CC void chunk_hnf(union field root, Frame* sp);
+static Symbol chunk_symbol =
+    { .tag = FUNCTION_TAG, .arity = 2, .name = "readFile block",
+      .reps = chunk_reps, .hnf = &chunk_hnf };
+
+static field make_chunk(LazyFile* lf, long offset)
+{
+    field n;
+    n.n = (Node*)alloc(sizeof(Node));
+    #if OPT_EPOCH_TRAIL
+    n.n->epoch = current_epoch;
+    #endif
+    n.n->symbol = &chunk_symbol;
+    n.n->missing = 0;
+    n.n->children[3].a = NULL;
+    child_at(n, 0).i = (long)lf;
+    child_at(n, 1).i = offset;
+    return n;
+}
+
+static RICE_CC void chunk_hnf(union field root, Frame* sp)
+{
+    GC_SAFE_POINT(root, sp);
+    LazyFile* lf = (LazyFile*)child_at_i(root, 0);
+    long offset = child_at_i(root, 1);
+    if(lf->fd < 0)
+    {
+        open_lazy_file(lf, root);
+    }
+    char buf[CHUNK_BYTES];
+    ssize_t n = pread(lf->fd, buf, sizeof buf, (off_t)offset);
+    if(n < 0)
+    {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "readFile: %s: %s", lf->path, strerror(errno));
+        error(msg, root);
+    }
+    // Nothing here runs the machine, so the list needs no GC_ROOT.
+    field list;
+    if(n == 0)
+    {
+        close(lf->fd);
+        lf->fd = -1;
+        list = make_Prelude___LB_RB(0);
+    }
+    else
+    {
+        list = make_chunk(lf, offset + n);
+        for(ssize_t i = n - 1; i >= 0; i--)
+        {
+            field c = make_Prelude__Char((field)(unsigned long)(unsigned char)buf[i], 0);
+            list = make_Prelude___CO(c, list, 0);
+        }
+    }
+    // Reading a file doesn't depend on a choice, so nondet is false.
+    trail_node(root, false);
+    set_copy(root, list);
+    RETURN();
+}
+
+// readFile opens the file (so a missing one fails here, not when the
+// string is first used) and returns the thunk for its first block.
 static void Prelude__prim_USreadFile_impl(void)
 {
     field root = rice_root;
     GC_ROOT(root);  // toCStr runs the machine
     char* path = toCStr(child_at(root, 0));
     GC_UNROOT(1);
-    char* content = readWholeFile(path, "readFile");
-    free(path);
-    overwrite_root(root, toCurryString(content));
-    free(content);
+    LazyFile* lf = (LazyFile*)malloc(sizeof(LazyFile));
+    lf->path = path;
+    open_lazy_file(lf, root);
+    trail_node(root, false);
+    set_forward(root, make_chunk(lf, 0));
 }
 
 // Shared by writeFile ("w", truncate) and appendFile ("a", append).
 // mode is the fopen mode letter.
+// The content is written as it's evaluated, so the part already written
+// can be collected. For that, nothing may hold the string's head: root is
+// overwritten with its result, (), before we start, and we keep only the
+// current cell.
 static void writeToFile(field root, char mode)
 {
-    GC_ROOT(root);  // toCStr runs the machine
+    GC_ROOT(root);  // toCStr and settle run the machine
     char* path = toCStr(child_at(root, 0));
-    char* content = toCStr(child_at(root, 1));
-    GC_UNROOT(1);
     char fmode[2] = { mode, '\0' };
     FILE* f = fopen(path, fmode);
     if(f == NULL)
     {
-        const char* what;
-        if(mode == 'w')
-        {
-            what = "writeFile";
-        }
-        else
-        {
-            what = "appendFile";
-        }
         char msg[512];
-        snprintf(msg, sizeof(msg), "%s: %s: %s", what, path, strerror(errno));
-        free(path);
-        free(content);
+        snprintf(msg, sizeof(msg), "%s: %s: %s",
+                 mode == 'w' ? "writeFile" : "appendFile", path, strerror(errno));
         error(msg, root);
     }
-    fputs(content, f);
-    fclose(f);
     free(path);
-    free(content);
+    field s = child_at(root, 1);
+    trail_node(root, false);
     set_Prelude___LP_RP(root, 0);
+    GC_ROOT(s);
+    s = settle(s, NULL, eval_hnf);
+    while(s.n->symbol->tag == Prelude___CO_TAG)
+    {
+        field c = settle(child_at(s, 0), NULL, eval_hnf);
+        if(TAG(c) == FAIL_TAG)
+        {
+            break;
+        }
+        putc((int)child_at_c(c, 0), f);
+        s = settle(child_at(s, 1), NULL, eval_hnf);
+    }
+    fclose(f);
+    // A content that fails partway fails the action, after what came
+    // before it was written.
+    if(s.n->symbol->tag != Prelude___LB_RB_TAG)
+    {
+        fail(root);
+    }
+    GC_UNROOT(2);
 }
 
 static void Prelude__prim_USwriteFile_impl(void)
