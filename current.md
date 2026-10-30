@@ -164,6 +164,30 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
+## Rice vs KiCS2 (2026-10-30)
+
+Both compilers' default settings, best of 3, the KiCS2 and old_rice
+benchmark sets (scaled versions where there are any):
+
+- Nondeterministic programs: rice far ahead. ExpSimpFunPats 469x,
+  SearchMAC 59x, cent 22x, Half 19x, fib 13x, PermSort 10x; SearchKanMis
+  and SearchSMM time out (120 s) under KiCS2.
+- Deterministic programs: KiCS2 2-8x ahead. Primes, PrimesBuiltin,
+  Queens, QueensUser, ShareNonDet, primesort, queens_det about 6x; TakPeano
+  3.7x; Tak, sieve, schedule about 2x.
+
+Profiles of PrimesBuiltin and Queens are mostly type-class dispatch:
+`apply_k`, instance dictionaries rebuilt on every call (the
+`_inst#...#Int` LETs), and default methods (`/=` through `==`). Same
+finding as gc/strict_fold. Old rice predates type classes, which is
+likely why it used to win on these too.
+
+rice1 (deterministic, string-heavy) is slow for that reason plus its live
+heap: compiling hello world it collects 134 times and copies 59.6 GB,
+with up to 1.5 GB live while reading the cached Prelude (96 bytes per
+character of a string, readFile is eager, and the collector isn't
+generational).
+
 ## Bootstrapping (2026-10-29)
 
 Rice is self-hosting: `tests/bootstrap.sh` (the triple test) passes, with
