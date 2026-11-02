@@ -251,8 +251,8 @@ RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
  * Then that frame is replaced by a commit frame [cutoff] while `apply f m` runs,
  * and commit_k drops the trail back to the cutoff once root is in head normal form.
  */
-static const unsigned char bind_reps[] = { R_PTR, R_PTR, R_INT, R_INT };
-static const unsigned char commit_reps[] = { R_INT };
+static const unsigned char bind_reps[] = { R_PTR, R_PTR, R_INT, R_TRAIL };
+static const unsigned char commit_reps[] = { R_TRAIL };
 static RICE_CC void bind_k(union field _root, Frame* sp);
 static RICE_CC void commit_k(union field _root, Frame* sp);
 static const FrameInfo bind_info =
@@ -581,6 +581,8 @@ static bool raw_equal(field a, field b, FieldRep r)
         case R_FLOAT:
             return a.f == b.f;
         case R_PTR:
+        case R_TRAIL:   // frame slots only; never a node's field
+        case R_CUTOFF:
             break;
     }
     return false;
@@ -741,7 +743,7 @@ typedef struct
 static LazyResult lu_result;
 
 static const unsigned char lu_reps[] =
-    { R_PTR, R_PTR, R_PTR, R_PTR, R_INT, R_INT, R_INT, R_INT };
+    { R_PTR, R_PTR, R_PTR, R_PTR, R_INT, R_INT, R_INT, R_TRAIL };
 static RICE_CC void lu_k(union field _root, Frame* sp);
 static const FrameInfo lu_info =
     { .code = lu_k, .size = 8, .reps = lu_reps, .name = "=:<= pair" };

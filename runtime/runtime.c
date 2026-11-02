@@ -853,6 +853,8 @@ static void print_raw(union field v, FieldRep r)
     switch(r)
     {
         case R_INT:
+        case R_TRAIL:
+        case R_CUTOFF:
             printf("%ld", v.i);
             break;
         case R_CHAR:

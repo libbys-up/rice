@@ -811,9 +811,184 @@ static union field collect_minor(union field root, Frame* sp)
     return root;
 }
 
+// --- trail compaction (LEAKS.md, leak 2) -----------------------------------
+
+#ifndef GC_NO_TRAIL_COMPACT
+/* A stop height is a trail size at which an undo or pop_to can end: the
+ * index of each choice entry (undo pops it, then stops), and every height
+ * the program holds (R_TRAIL and R_CUTOFF frame slots), plus 0 and the
+ * top. A segment is the stretch between two neighboring stop heights.
+ * Every undo and pop_to handles whole segments, and nothing reads the heap
+ * partway through one (LEAKS.md, S1-S3).
+ *
+ * D1: within a segment, only a node's lowest entry matters. undo restores
+ * the higher ones first, and the lowest one overwrites them, so we drop
+ * them. A segment's bottom entry is always some node's lowest, so the
+ * epoch undo and pop_to read from it stays.
+ *
+ * Then the trail is compacted, and every height the program holds becomes
+ * the number of entries kept below it.
+ */
+static size_t* stop = NULL;
+static size_t  stop_n = 0, stop_cap = 0;
+static size_t* kept_below = NULL;  // kept_below[h]: entries kept below height h
+static size_t  kept_cap = 0;
+
+static void add_stop(size_t h)
+{
+    if(stop_n == stop_cap)
+    {
+        stop_cap = stop_cap == 0 ? 256 : stop_cap * 2;
+        stop = (size_t*)realloc(stop, stop_cap * sizeof(size_t));
+    }
+    stop[stop_n++] = h;
+}
+
+static int compare_size(const void* a, const void* b)
+{
+    size_t x = *(const size_t*)a, y = *(const size_t*)b;
+    return x < y ? -1 : x > y;
+}
+
+// The height h held by the program, after compaction. A height above the
+// top (the trail was popped below it) keeps its distance from the top.
+static size_t new_height(size_t h, size_t old_size)
+{
+    if(h > old_size)
+    {
+        return kept_below[old_size] + (h - old_size);
+    }
+    return kept_below[h];
+}
+
+// Apply f to every height slot in the frames.
+static void remap_frame_heights(Frame* sp, size_t old_size)
+{
+    for(Frame* f = sp; (union field*)f < rice_stack_hi;
+        f = (Frame*)((union field*)f + 1 + f->info->size))
+    {
+        for(unsigned short i = 0; i < f->info->size; i++)
+        {
+            FieldRep r = field_rep(f->info->reps, i);
+            if(r == R_TRAIL)
+            {
+                f->slots[i].i = (long)new_height((size_t)f->slots[i].i, old_size);
+            }
+            else if(r == R_CUTOFF && f->slots[i].i > 0)
+            {
+                f->slots[i].i = (long)new_height((size_t)f->slots[i].i - 1, old_size) + 1;
+            }
+        }
+    }
+}
+
+static void compact_trail(Frame* sp)
+{
+    size_t size = trail->size;
+    if(size == 0)
+    {
+        return;
+    }
+
+    // The stop heights, sorted, without duplicates.
+    stop_n = 0;
+    add_stop(0);
+    add_stop(size);
+    for(size_t i = 0; i < size; i++)
+    {
+        if(trail->array[i].choice)
+        {
+            add_stop(i);
+        }
+    }
+    for(Frame* f = sp; (union field*)f < rice_stack_hi;
+        f = (Frame*)((union field*)f + 1 + f->info->size))
+    {
+        for(unsigned short i = 0; i < f->info->size; i++)
+        {
+            FieldRep r = field_rep(f->info->reps, i);
+            if(r == R_TRAIL)
+            {
+                add_stop((size_t)f->slots[i].i);
+            }
+            else if(r == R_CUTOFF && f->slots[i].i > 0)
+            {
+                add_stop((size_t)f->slots[i].i - 1);
+            }
+        }
+    }
+    qsort(stop, stop_n, sizeof(size_t), compare_size);
+
+    if(kept_cap < size + 1)
+    {
+        kept_cap = size + 1;
+        kept_below = (size_t*)realloc(kept_below, kept_cap * sizeof(size_t));
+    }
+
+    // D1, segment by segment, keeping entries in place as we go.
+    size_t kept = 0;
+    size_t s = 0;  // the next stop height above the current segment
+    size_t seg_start = 0;
+    for(size_t i = 0; i < size; i++)
+    {
+        // Entering a new segment: forget the last one's nodes.
+        while(s < stop_n && stop[s] <= i)
+        {
+            if(stop[s] == i && i > seg_start)
+            {
+                for(size_t j = kept_below[seg_start]; j < kept; j++)
+                {
+                    Node* l = trail->array[j].lhs.n;
+                    if(l != NULL)
+                    {
+                        l->gc_bits &= (unsigned char)~GC_SEEN;
+                    }
+                }
+                seg_start = i;
+            }
+            s++;
+        }
+        kept_below[i] = kept;
+        TrailEntry e = trail->array[i];
+        Node* l = e.lhs.n;
+        if(l != NULL && !e.choice && (l->gc_bits & GC_SEEN))
+        {
+            continue;  // a lower entry in this segment restores this node
+        }
+        if(l != NULL)
+        {
+            l->gc_bits |= GC_SEEN;
+        }
+        trail->array[kept++] = e;
+    }
+    kept_below[size] = kept;
+    for(size_t j = kept_below[seg_start]; j < kept; j++)
+    {
+        Node* l = trail->array[j].lhs.n;
+        if(l != NULL)
+        {
+            l->gc_bits &= (unsigned char)~GC_SEEN;
+        }
+    }
+
+    remap_frame_heights(sp, size);
+    trail->size = kept;
+    if(trail->clean > kept)
+    {
+        trail->clean = kept;
+    }
+#ifdef GC_STATS
+    fprintf(stderr, "gc trail: %zu entries, %zu kept, %zu stop heights\n", size, kept, stop_n);
+#endif
+}
+#endif
+
 // Copy everything live into a new old generation.
 static union field collect_major(union field root, Frame* sp)
 {
+#ifndef GC_NO_TRAIL_COMPACT
+    compact_trail(sp);
+#endif
     minor = false;
     live_bytes = 0;
     void* from_space = heap_begin_major();

@@ -284,7 +284,10 @@ enterCase gen v bs = do
       ndS   = 3 + length frees
       cutS  = ndS + 1
       repOf x = Map.findWithDefault RPtr x (gReps gen)
-      slotReps = [RPtr, RPtr, RPtr] ++ map repOf frees ++ [RInt, RInt]
+      -- the nondet flag, then the retry cutoff, which the collector
+      -- adjusts when it compacts the trail (runtime/node.h, R_CUTOFF)
+      slotReps = map repLit ([RPtr, RPtr, RPtr] ++ map repOf frees)
+                 ++ ["R_INT", "R_CUTOFF"]
       inner = gen { gRetry = Just v }
   body <- caseBody inner v frees ndS cutS bs
   (k', done') <- get
@@ -301,23 +304,26 @@ enterCase gen v bs = do
     , text "MUSTTAIL return" <+> text fname <> text "(root, sp)" <> semi ]
 
 --- The prototype, reps array and `FrameInfo` of case block `k`.
-caseDecls :: Gen -> Int -> CName -> [FieldRep] -> [CStmt]
+--- `slotReps` are the reps' C names.
+caseDecls :: Gen -> Int -> CName -> [String] -> [CStmt]
 caseDecls gen k fname slotReps =
   [ text ("static " ++ hnfRet) <+> text fname <> cparams contParams <> semi
   , (text "static const unsigned char" <+> text (fname ++ "_reps[]"))
-      .= carray (map repLit slotReps)
+      .= carray (map text slotReps)
   , (text "static const FrameInfo" <+> text (fname ++ "_info"))
       .= carray [ dinit "code" (text fname)
                 , dinit "size" (int (length slotReps))
                 , dinit "reps" (text (fname ++ "_reps"))
                 , dinit "name" (cstring (gLabel gen ++ " case " ++ show k)) ]
   ]
- where
-  repLit r = text $ case r of
-    RPtr   -> "R_PTR"
-    RInt   -> "R_INT"
-    RChar  -> "R_CHAR"
-    RFloat -> "R_FLOAT"
+
+--- A field rep's C name.
+repLit :: FieldRep -> String
+repLit r = case r of
+  RPtr   -> "R_PTR"
+  RInt   -> "R_INT"
+  RChar  -> "R_CHAR"
+  RFloat -> "R_FLOAT"
 
 --- A case block: reload the case's state from its frame, then run the
 --- dispatch loop. It's entered both from `enterCase` and, after its

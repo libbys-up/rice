@@ -77,7 +77,12 @@ typedef enum
     R_PTR = 0,  // pointer to a node
     R_INT,      // raw long   (union field .i)
     R_CHAR,     // raw char   (union field .c)
-    R_FLOAT     // raw double (union field .f)
+    R_FLOAT,    // raw double (union field .f)
+    // The next two are only for frame slots. Both are raw, and hold a
+    // height of the trail, which the collector can change when it
+    // compacts the trail (gc.c).
+    R_TRAIL,    // a height (.i)
+    R_CUTOFF    // a height + 1, or 0 for none yet: a scoped retry's cutoff (.i)
 } FieldRep;
 
 /*
