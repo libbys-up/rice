@@ -164,6 +164,18 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
+## Collector and IO (2026-11-01)
+
+- `readFile` is lazy (4 KB blocks, re-readable by offset), and
+  `writeFile`/`appendFile` stream (`13f2e76`).
+- The collector is generational (`5cc1a98`, gc-plan.md stage 7): nursery,
+  survivor space, old generation; write barrier `gc_remember` in every
+  rewrite; trail and stack watermarks. rice1 compiling hello world: 30 s,
+  2.6 GB (was 43 s, 5.7 GB). Programs that keep everything they allocate
+  are up to 1.8x slower than with the old collector, and fib and
+  SearchKanMis about 1.7-2.5x (their trails keep everything alive).
+- Open: a `GC_VERIFY` mode; tuning the nursery size; Leak 2.
+
 ## Rice vs KiCS2 (2026-10-30)
 
 Both compilers' default settings, best of 3, the KiCS2 and old_rice
