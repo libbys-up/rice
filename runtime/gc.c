@@ -4,17 +4,23 @@
 #include "runtime.h"
 #include "gc.h"
 
-/* A 2 space block allocated copy collector using a depth first search.
+/* A generational, block allocated copy collector using a depth first search
+ * (gc-plan.md, stage 7).
  * Block allocated, so we don't have to have an explicit to space until we run the collector.
+ *
+ *  * A minor collection copies only young nodes. A pointer to an old node is
+ *    left alone, and old nodes aren't scanned unless they're remembered
+ *    (gc_remember, gc.h). Everything it copies is promoted to the old
+ *    generation. A major collection copies everything, young and old.
+ *  * A node's age is the GC_OLD bit, set on every copy. A spill array's age
+ *    is its header word: NULL while young, GC_OLD_ARRAY once promoted.
  *
  *  * A node is copied whole (sizeof(Node)); the original's symbol becomes
  *    gc_moved_symbol and children[0] the copy's address.
- *  * A spill array is copied the first time any owner reaches it; its
- *    header (a[-1]) then records the copy's address, so a node and its
- *    trail snapshot that share one array still share it afterwards. The
- *    array's own children are traced once, when it's copied, using the
- *    layout of the owner that reached it first (both owners have the same
- *    symbol: an in-place rewrite always allocates a fresh array).
+ *  * A spill array is copied when its owner is (each array has one owner;
+ *    see alloc_spill in memory.h). Its header (a[-1]) records the copy's
+ *    address while we collect, and its children are traced when it's
+ *    copied, using its owner's layout.
  *  * A node's scan traces only slots 0-2; slots 3 and up are the array's.
  *  * If we have a FORWARD chain, we can usually remove a lot of it.
  *    The FORWARD nodes must be Indistinguishable from the target (see elidable)
@@ -29,14 +35,40 @@
  *    so we really want to get rid of them.
  */
 
-// The one bit we use in Node.gc_bits.
-// It marks a node that's on the trail, so we don't elide it
+// GC_TRAILED (gc.h) marks a node that's on the trail, so we don't elide it
 // even if it's a FORWARD node (see elidable).
 //
 // Here's why that matters.  choose() turns a choice node C = ?(l, r) into FORWARD(l)
 // and trails C.  If a parent P points at C, and we let P point straight at l,
 // then when undo() restores C and the search tries r, P still points at l.
-#define GC_TRAILED 1
+
+// Whether this collection is a minor one.
+static bool minor;
+
+// The remembered set: old nodes written since the last minor collection.
+static Node** remembered = NULL;
+static size_t remembered_n = 0;
+static size_t remembered_cap = 0;
+
+void gc_remember_slow(Node* n)
+{
+    if(remembered_n == remembered_cap)
+    {
+        remembered_cap = remembered_cap == 0 ? 1024 : remembered_cap * 2;
+        remembered = (Node**)realloc(remembered, remembered_cap * sizeof(Node*));
+        if(remembered == NULL)
+        {
+            fprintf(stderr, "Error: out of memory growing the remembered set\n");
+            exit(1);
+        }
+    }
+    n->gc_bits |= GC_REMEMBERED;
+    remembered[remembered_n++] = n;
+}
+
+// The old generation's size, and when to collect it.
+static size_t old_bytes = 0;
+static size_t old_threshold = GC_MIN_THRESHOLD;
 
 // This is our marker for when a node has been moved from space -> to space
 // There's exactly 1 child which is a pointer to the new node.
@@ -75,6 +107,7 @@ void gc_roots_grow(void)
 typedef struct
 {
     union field* a;    // the copied array
+    Node* owner;       // the node it belongs to
     Symbol* sym;       // its owner's symbol
     int missing;       // missing count so we can reconstruct representation.
     int len;           // length of the array
@@ -94,7 +127,7 @@ static size_t     node_cap = 0;                // capacity of node_work
 static SpillItem* spill_work = NULL;           // stack of spill arrays we've copied but not scanned
 static size_t     spill_n = 0;                 // size of spill_work
 static size_t     spill_cap = 0;               // capacity of spill_work
-static size_t     live_bytes;                  // number of bytes that are still live after copying
+static size_t     live_bytes;                  // bytes copied into the old generation (all of them, in a major collection)
 
 static void push_node_work(Node* n)
 {
@@ -145,53 +178,40 @@ static void push_spill_work(SpillItem it)
 
 // --- copying -------------------------------------------------------------
 
-// How many children of n live in its spill array.
-static int spill_len(Node* n)
-{
-    // Children 3 and up live in the spill array.
-    // An apply node has nargs + 1 children (the function, then the arguments),
-    // so nargs + 1 - 3 = nargs - 2 of them are in the spill array.
-    // An ordinary node has arity children, so arity - 3 are in the spill array.
-    // We compare before subtracting rather than using max(x - k, 0):
-    // C has no standard integer max, and with unsigned values x - k could wrap around.
-    if(n->missing < 0)
-    {
-        int nargs = -n->missing;
-        if(nargs > 2)
-        {
-            return nargs - 2;
-        }
-        return 0;
-    }
-    int arity = (int)n->symbol->arity;
-    if(arity > 3)
-    {
-        return arity - 3;
-    }
-    return 0;
-}
-
-// copy a spill array
-static union field* copy_spill(union field* a, int len, Symbol* sym, int missing)
+// copy a spill array, into the old generation or the survivor space
+static union field* copy_spill(union field* a, int len, Node* owner, Symbol* sym, int missing,
+                               bool to_old)
 {
     union field* header = a - 1;
 
+    // old, and this is a minor collection
+    if(header->a == GC_OLD_ARRAY)
+    {
+        if(minor)
+        {
+            return a;
+        }
+    }
     // already copied, through another owner
-    if(header->a != NULL)
+    else if(header->a != NULL)
     {
         return header->a;
     }
 
-    // b holds the copy of a
-    union field* b = alloc_spill((size_t)len);
+    // b holds the copy of a; b[-1] is its header
+    union field* b = (union field*)gc_alloc(((size_t)len + 1) * sizeof(union field), to_old) + 1;
     memcpy(b, a, (size_t)len * sizeof(union field));
+    b[-1].a = to_old ? GC_OLD_ARRAY : NULL;
 
     // We copied len fields + 1 header
-    live_bytes += ((size_t)len + 1) * sizeof(union field);
+    if(to_old)
+    {
+        live_bytes += ((size_t)len + 1) * sizeof(union field);
+    }
 
     header->a = b;
 
-    push_spill_work((SpillItem){ b, sym, missing, len });
+    push_spill_work((SpillItem){ b, owner, sym, missing, len });
     return b;
 }
 
@@ -204,16 +224,32 @@ static Node* copy_node(Node* n)
         return n->children[0].n;
     }
 
-    // copy node into to space
-    Node* c = (Node*)alloc(sizeof(Node));
+    // A minor collection leaves old nodes where they are.
+    if(minor && (n->gc_bits & GC_OLD))
+    {
+        return n;
+    }
+
+    // A young node's first minor collection moves it to the survivor space;
+    // its second promotes it. A major collection promotes everything.
+    bool to_old = !minor || (n->gc_bits & GC_AGED);
+    Node* c = (Node*)gc_alloc(sizeof(Node), to_old);
     memcpy(c, n, sizeof(Node));
-    live_bytes += sizeof(Node);
+    if(to_old)
+    {
+        c->gc_bits = (unsigned char)((c->gc_bits | GC_OLD) & ~(GC_REMEMBERED | GC_AGED));
+        live_bytes += sizeof(Node);
+    }
+    else
+    {
+        c->gc_bits |= GC_AGED;
+    }
 
     // copy spill array if we have any
-    int len = spill_len(n);
+    int len = gc_spill_len(n);
     if(len > 0 && n->children[3].a != NULL)
     {
-        c->children[3].a = copy_spill(n->children[3].a, len, n->symbol, n->missing);
+        c->children[3].a = copy_spill(n->children[3].a, len, c, n->symbol, n->missing, to_old);
     }
 
     // set symbol to moved in case anyone else copies it.
@@ -234,11 +270,19 @@ static inline void trace(union field* f)
 
 // --- forwarding chains -----------------------------------------------------
 
+// The first trail entry a collection looks at. A minor one skips the
+// clean entries (trail.h): their nodes are old, so it neither moves them nor
+// elides them.
+static size_t trail_from(void)
+{
+    return minor ? trail->clean : 0;
+}
+
 // Mark each lhs on the trail as trailed,
 // so we keep any FORWARD nodes that undo() might restore.
 static void mark_trailed(void)
 {
-    for(size_t i = 0; i < trail->size; i++)
+    for(size_t i = trail_from(); i < trail->size; i++)
     {
         if(trail->array[i].lhs.n != NULL)
         {
@@ -250,7 +294,7 @@ static void mark_trailed(void)
 // clear the trailed bit at the end of garbage collection
 static void clear_trailed(void)
 {
-    for(size_t i = 0; i < trail->size; i++)
+    for(size_t i = trail_from(); i < trail->size; i++)
     {
         if(trail->array[i].lhs.n != NULL)
         {
@@ -271,10 +315,12 @@ static void clear_trailed(void)
  *  * not an apply node, and forwarding to an actual node.
  *    Neither of these should happen (set_forward always sets missing to 0,
  *    and every caller forwards to an existing node), so these two checks are defensive.
+ *  * young, in a minor collection, which never changes an old node.
  */
 static bool elidable(Node* n)
 {
-    return n->missing >= 0 && 
+    return !(minor && (n->gc_bits & GC_OLD)) &&
+           n->missing >= 0 && 
            n->symbol->tag == FORWARD_TAG && 
            !n->nondet &&
            n->children[0].n != NULL && 
@@ -338,22 +384,44 @@ static inline void trace_child(union field* f)
 
 // --- scanning ------------------------------------------------------------
 
+// trace_child, and say whether the child is now young: still in the
+// survivor space after a minor collection.
+static inline bool trace_young(union field* f)
+{
+    trace_child(f);
+    return minor && f->n != NULL && !(f->n->gc_bits & GC_OLD);
+}
+
+// After a minor collection an old node can still point at a young one: its
+// child has moved to the survivor space, but isn't promoted yet. Then it
+// has to be in the remembered set for the next minor collection, or that
+// one wouldn't see the child.
+static inline void remember_if(Node* owner, bool young_child)
+{
+    if(young_child)
+    {
+        gc_remember(owner);
+    }
+}
+
 // We've copied c already, but we need to look at its children.
 // For each child we come across, copy it with trace_child which will put it on
 // the node stack.
 static void scan_node(Node* c)
 {
+    bool young = false;
     // apply: 
     // child 0 is the function, 
     // then the arguments
     if(c->missing < 0)
     {
         int nargs = -c->missing;
-        trace_child(&c->children[0]);
+        young |= trace_young(&c->children[0]);
         for(int i = 1; i <= nargs && i < 3; i++)
         {
-            trace_child(&c->children[i]);
+            young |= trace_young(&c->children[i]);
         }
+        remember_if(c, young);
         return;
     }
     Symbol* s = c->symbol;
@@ -362,11 +430,13 @@ static void scan_node(Node* c)
     switch(s->tag)
     {
         case FORWARD_TAG:
-            trace_child(&c->children[0]);
+            young |= trace_young(&c->children[0]);
+            remember_if(c, young);
             return;
         case CHOICE_TAG:
-            trace_child(&c->children[0]);
-            trace_child(&c->children[1]);
+            young |= trace_young(&c->children[0]);
+            young |= trace_young(&c->children[1]);
+            remember_if(c, young);
             return;
         default:
             break;
@@ -378,20 +448,23 @@ static void scan_node(Node* c)
     {
         if(child_rep(s, i) == R_PTR)
         {
-            trace_child(&c->children[i]);
+            young |= trace_young(&c->children[i]);
         }
     }
+    remember_if(c, young);
 }
 
 static void scan_spill(SpillItem it)
 {
+    bool young = false;
     // an apply node's arguments: all pointers
     if(it.missing < 0) 
     {
         for(int j = 0; j < it.len; j++)
         {
-            trace_child(&it.a[j]);
+            young |= trace_young(&it.a[j]);
         }
+        remember_if(it.owner, young);
         return;
     }
     // Find out how many arguments are filled (we might be a partial application).
@@ -407,9 +480,10 @@ static void scan_spill(SpillItem it)
         int i = j + 3;
         if(i < filled && child_rep(it.sym, i) == R_PTR)
         {
-            trace_child(&it.a[j]);
+            young |= trace_young(&it.a[j]);
         }
     }
+    remember_if(it.owner, young);
 }
 
 // Walk through the stacks and copy any nodes in there
@@ -432,41 +506,79 @@ static void drain(void)
 
 // --- the collection --------------------------------------------------------
 
-// actually run the collector
-// First copy all the roots and push them on the stack
-// then we call drain which runs the dfs copying.
-union field gc_collect(union field root, Frame* sp)
+// A NULL or old node.
+static bool is_old(union field f)
 {
-    // copies aren't program allocations
-    unsigned long saved_mem = mem;
+    return f.n == NULL || (f.n->gc_bits & GC_OLD);
+}
 
-    // set up garbage collection, and get from space so we can free it later.
-    void* from_space = heap_begin_collection();
+// A remembered node is old and was written since the last minor collection,
+// so its children may be young. Copy them, as if the node had just been.
+static void scan_remembered(Node* n)
+{
+    n->gc_bits &= (unsigned char)~GC_REMEMBERED;
+    scan_node(n);
+    int len = gc_spill_len(n);
+    union field* a = n->children[3].a;
+    if(len > 0 && a != NULL)
+    {
+        // A rewrite always allocates a fresh array, so a young array is
+        // copied (and scanned) like any other. An old one is scanned where
+        // it is.
+        if(a[-1].a != GC_OLD_ARRAY)
+        {
+            // The array goes where its owner is, so an old node never points
+            // at a young array.
+            n->children[3].a = copy_spill(a, len, n, n->symbol, n->missing, true);
+        }
+        else
+        {
+            scan_spill((SpillItem){ a, n, n->symbol, n->missing, len });
+        }
+    }
+}
 
-    live_bytes = 0;
-
+// Copy everything reachable from the roots that this collection copies:
+// young nodes in a minor collection, all nodes in a major one.
+static union field copy_reachable(union field root, Frame* sp)
+{
     // mark every node on the trail, so we don't elide it
     mark_trailed();
 
     trace(&root);
 
-    // trace each frame on the stack
-    for(Frame* f = sp; (union field*)f < rice_stack_hi;
+    // trace each frame on the stack. A minor collection stops at the clean
+    // part (machine.h), whose slots point only at old nodes.
+    // Meanwhile we find where the new clean part starts: just above the
+    // highest frame that still points at a young node, and never lower than
+    // just above the top frame, which the program is about to write.
+    union field* stop = minor ? rice_stack_hi - rice_stack_clean : rice_stack_hi;
+    union field* clean_from = (union field*)sp < rice_stack_hi
+                              ? (union field*)sp + 1 + sp->info->size
+                              : rice_stack_hi;
+    for(Frame* f = sp; (union field*)f < stop;
         f = (Frame*)((union field*)f + 1 + f->info->size))
     {
         const FrameInfo* info = f->info;
+        bool young = false;
         // trace each node in the frame, if the node is actually a pointer.
         for(unsigned short i = 0; i < info->size; i++)
         {
             if(field_rep(info->reps, i) == R_PTR)
             {
                 trace(&f->slots[i]);
+                young |= !is_old(f->slots[i]);
             }
+        }
+        union field* next = (union field*)f + 1 + info->size;
+        if(young && next > clean_from)
+        {
+            clean_from = next;
         }
     }
 
     // trace both lhs and rhs on the trail.
-    for(size_t i = 0; i < trail->size; i++)
+    for(size_t i = trail_from(); i < trail->size; i++)
     {
         trace(&trail->array[i].lhs);
         trace(&trail->array[i].rhs);
@@ -478,38 +590,103 @@ union field gc_collect(union field root, Frame* sp)
         trace(gc_roots[i]);
     }
 
+    // In a minor collection, the old nodes that may point at young ones.
+    // Scanning them can remember nodes again (remember_if), so we scan a
+    // copy of the set and start a new one.
+    // A major collection copies them anyway, so it just forgets them.
+    size_t scanning_n = remembered_n;
+    Node** scanning = NULL;
+    if(minor && scanning_n > 0)
+    {
+        scanning = (Node**)malloc(scanning_n * sizeof(Node*));
+        memcpy(scanning, remembered, scanning_n * sizeof(Node*));
+    }
+    remembered_n = 0;
+    for(size_t i = 0; i < (minor ? scanning_n : 0); i++)
+    {
+        scan_remembered(scanning[i]);
+    }
+    free(scanning);
+
     // run dfs
     drain();
 
     // reset gc_bits on the trail nodes.
     clear_trailed();
 
-    // reset memory tracking variables
-    heap_end_collection(from_space);
-    mem = saved_mem;
-    rice_heap_since_gc = 0;
+    // Move the clean height up past the entries that are all old now.
+    // After a major collection that's every entry.
+    size_t clean = trail_from();
+    while(clean < trail->size && is_old(trail->array[clean].lhs) && is_old(trail->array[clean].rhs))
+    {
+        clean++;
+    }
+    trail->clean = clean;
+    rice_stack_clean = (size_t)(rice_stack_hi - clean_from);
+    return root;
+}
 
-#ifndef GC_STRESS
-    // unless we're stress testing,
-    // set the heap threshold to be the max of 2 * live bytes or GC_MIN_THRESHOLD.
-    // That keeps the cost of collecting proportional to how much we allocate.
-    size_t want = 2 * live_bytes;
-    if(want > GC_MIN_THRESHOLD)
-    {
-        rice_heap_threshold = want;
-    }
-    else
-    {
-        rice_heap_threshold = GC_MIN_THRESHOLD;
-    }
+// Copy the nursery's survivors into the old generation.
+static union field collect_minor(union field root, Frame* sp)
+{
+    minor = true;
+    live_bytes = 0;
+    heap_begin_minor();
+    root = copy_reachable(root, sp);
+    heap_end_minor();
+    old_bytes += live_bytes;
+#ifdef GC_STATS
+    fprintf(stderr, "gc minor: %zu bytes promoted, old generation %zu bytes, %zu trail entries\n",
+            live_bytes, old_bytes, trail->size);
 #endif
+    return root;
+}
 
-    // print out GC stats for debugging.
+// Copy everything live into a new old generation.
+static union field collect_major(union field root, Frame* sp)
+{
+    minor = false;
+    live_bytes = 0;
+    void* from_space = heap_begin_major();
+    root = copy_reachable(root, sp);
+    heap_end_major(from_space);
+    old_bytes = live_bytes;
+    // Collect the old generation again once it has doubled.
+    // That keeps the cost of major collections proportional to how much we promote.
+    old_threshold = 2 * live_bytes;
+    if(old_threshold < GC_MIN_THRESHOLD)
+    {
+        old_threshold = GC_MIN_THRESHOLD;
+    }
     debug(LOW, "gc: %zu bytes live\n", live_bytes);
 #ifdef GC_STATS
-    fprintf(stderr, "gc: %zu bytes live, next at %zu allocated, %zu trail entries\n",
-            live_bytes, rice_heap_threshold, trail->size);
+    fprintf(stderr, "gc major: %zu bytes live, next at %zu, %zu trail entries\n",
+            live_bytes, old_threshold, trail->size);
 #endif
+    return root;
+}
 
+// actually run the collector: a minor collection, then a major one if the
+// old generation has grown past its threshold.
+// Under GC_STRESS, every 64th collection is also a major one.
+union field gc_collect(union field root, Frame* sp)
+{
+    // copies aren't program allocations
+    unsigned long saved_mem = mem;
+
+    root = collect_minor(root, sp);
+#ifdef GC_STRESS
+    static unsigned long count = 0;
+    bool major = ++count % 64 == 0;
+#else
+    bool major = old_bytes > old_threshold;
+#endif
+    if(major)
+    {
+        root = collect_major(root, sp);
+    }
+
+    mem = saved_mem;
+    rice_heap_since_gc = 0;
     return root;
 }

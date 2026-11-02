@@ -22,18 +22,89 @@
  */
 
 #include <stddef.h>
+#include <string.h>
 #include "node.h"
 #include "machine.h"
 #include "memory.h"
 
-// Collect when this many bytes have been allocated since the last collection.
-// When we run with GC_STRESS, this is set to 0, so we collect at every safe point.
+// Collect when this many bytes have been allocated since the last
+// collection: the nursery's size (GC_NURSERY_BYTES, below). Under GC_STRESS
+// it's 0, so we collect at every safe point.
 extern size_t rice_heap_threshold;
 
-// The threshold never drops below 64MB.
+// A major collection runs when the old generation has doubled since the
+// last one, but never before it reaches this size.
 #ifndef GC_MIN_THRESHOLD
 #define GC_MIN_THRESHOLD ((size_t)64 << 20)
 #endif
+
+/* Generations (gc-plan.md, stage 7).
+ * Everything is allocated in the nursery. A minor collection, when the
+ * nursery is full, copies the young nodes that are alive: a node's first
+ * survival moves it to the survivor space, still young, and its second
+ * promotes it to the old generation. A major collection copies everything.
+ */
+#ifndef GC_NURSERY_BYTES
+#define GC_NURSERY_BYTES ((size_t)8 << 20)
+#endif
+
+// Bits in Node.gc_bits. (2 and 4 are OPT_STATS's, in runtime.h.)
+#define GC_TRAILED    1   // on the trail; only set during a collection
+#define GC_REMEMBERED 8   // old, and in the remembered set
+#define GC_OLD        16  // in the old generation
+#define GC_AGED       32  // young, and has lived through a minor collection
+#define GC_AGE_BITS   (GC_TRAILED | GC_REMEMBERED | GC_OLD | GC_AGED)
+
+// A spill array's header word once the array is in the old generation.
+// It's NULL while the array is young, and during a collection it holds the
+// address of the array's copy.
+#define GC_OLD_ARRAY ((union field*)1)
+
+/* The write barrier.
+ * Rewriting a node in place can make an old node point at a young one,
+ * which a minor collection wouldn't otherwise see, since it doesn't scan
+ * the old generation. So everything that writes pointers into a node that
+ * already existed calls gc_remember on it first. An old node that isn't
+ * remembered yet goes in the remembered set, which a minor collection
+ * scans. A young node needs nothing, and that's the common case.
+ */
+void gc_remember_slow(Node* n);
+
+static inline void gc_remember(Node* n)
+{
+    if((n->gc_bits & (GC_OLD | GC_REMEMBERED)) == GC_OLD)
+    {
+        gc_remember_slow(n);
+    }
+}
+
+// How many children of n live in its spill array: children 3 and up.
+// An apply node has nargs + 1 children (the function, then the arguments);
+// an ordinary node has arity children.
+static inline int gc_spill_len(const Node* n)
+{
+    int count = n->missing < 0 ? -n->missing + 1 : (int)n->symbol->arity;
+    return count > 3 ? count - 3 : 0;
+}
+
+// Copy src's contents over dst, a node that already existed. dst keeps its
+// own place in the generations; its other contents, epoch and nondet
+// included, become src's.
+static inline void node_overwrite(Node* dst, const Node* src)
+{
+    unsigned char keep = dst->gc_bits & GC_AGE_BITS;
+    memcpy(dst, src, sizeof(Node));
+    dst->gc_bits = (unsigned char)((dst->gc_bits & ~GC_AGE_BITS) | keep);
+    gc_remember(dst);
+}
+
+// Copy src's contents into dst, a node just allocated, which is young
+// whatever src is.
+static inline void node_copy_fresh(Node* dst, const Node* src)
+{
+    memcpy(dst, src, sizeof(Node));
+    dst->gc_bits &= (unsigned char)~GC_AGE_BITS;
+}
 
 /* Copies everything reachable from 
  *  * root

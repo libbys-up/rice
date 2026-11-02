@@ -17,6 +17,7 @@ Trail* trail_new(void)
 {
     Trail* s = (Trail*)malloc(sizeof(Trail));
     s->size = 0;
+    s->clean = 0;
     s->capacity = TRAIL_INIT_CAPACITY;
     s->array = (TrailEntry*)malloc(sizeof(TrailEntry)*TRAIL_INIT_CAPACITY);
     return s;
@@ -57,6 +58,10 @@ void trail_push(Trail* s, union field from, union field rep, bool choice)
 TrailEntry* trail_pop(Trail* s)
 {
     s->size--;
+    if(s->clean > s->size)
+    {
+        s->clean = s->size;
+    }
     // We're undoing back to this entry, so the epoch goes back to what it was then.
     current_epoch = s->array[s->size].epoch;
     debug_trail_entry(HIGH, &s->array[s->size]);
@@ -73,6 +78,10 @@ TrailEntry* trail_pop_to(Trail* s, int n)
         return NULL;
     }
     s->size = n;
+    if(s->clean > s->size)
+    {
+        s->clean = s->size;
+    }
     current_epoch = s->array[s->size].epoch;
     debug_trail_entry(HIGH, &s->array[s->size]);
     debug(HIGH, "\n");

@@ -40,11 +40,16 @@ typedef struct TrailEntry
 } TrailEntry;
 
 // The trail itself is just a growable array of entries.
+//  * clean: the entries below this height point only at old nodes, and
+//    haven't been popped since a collection found that. A minor collection
+//    can't move old nodes, so it skips them (gc.c). Popping below it lowers
+//    it, since the entries pushed after that are new.
 typedef struct
 {
     TrailEntry* array;
     size_t size;
     size_t capacity;
+    size_t clean;
 } Trail;
 
 Trail* trail_new(void);

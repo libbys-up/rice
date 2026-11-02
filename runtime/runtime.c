@@ -128,7 +128,7 @@ union field set_copy(union field new_node, union field node)
     // and taking node's epoch would make root look young.
     unsigned int keep_epoch = new_node.n->epoch;
 #endif
-    memcpy(new_node.n, node.n, sizeof(Node));
+    node_overwrite(new_node.n, node.n);
 #if OPT_EPOCH_TRAIL
     new_node.n->epoch = keep_epoch;
 #endif
@@ -382,6 +382,7 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
         newf.n->missing = 0;
         // newf is a fully applied call. We don't evaluate it here:
         // the apply node we build next evaluates it as its function.
+        gc_remember(root.n);
         child_at(root,0) = newf;
         root.n->missing = -nargs;
         debug(HIGH, "new apply node\n");
@@ -400,12 +401,20 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
 
 // push (node -> copy(node)) on the trail, leaving node itself unchanged.
 // A whole-node memcpy, so the snapshot keeps node's own epoch and nondet
-// flag, and undo() puts both back.
+// flag, and undo() puts both back. The snapshot gets its own copy of the
+// spill array: an array has one owner (memory.h).
 void save_snapshot(union field node)
 {
     union field saved;
     saved.n = (Node*)alloc(sizeof(Node));
-    memcpy(saved.n, node.n, sizeof(Node));
+    node_copy_fresh(saved.n, node.n);
+    int len = gc_spill_len(node.n);
+    if(len > 0 && node.n->children[3].a != NULL)
+    {
+        saved.n->children[3].a = alloc_spill((size_t)len);
+        memcpy(saved.n->children[3].a, node.n->children[3].a,
+               (size_t)len * sizeof(union field));
+    }
     trail_push(trail, node, saved, false);
 }
 
@@ -483,7 +492,7 @@ void choose(union field root)
     //push root on the trail
     //we backtrack if we're pointing to the left
     //otherwise this functions like (id right)
-    memcpy(saved.n, root.n, sizeof(Node));
+    node_copy_fresh(saved.n, root.n);
     child_at_i(saved,2) = !side;
     trail_push(trail, root, saved, side == 0);
 #if OPT_EPOCH_TRAIL
@@ -536,7 +545,7 @@ bool undo(int cutoff)
         STAT(undo_restores);
         if(frame->lhs.n != NULL)
         {
-            memcpy(frame->lhs.n, frame->rhs.n, sizeof(Node));
+            node_overwrite(frame->lhs.n, frame->rhs.n);
         }
     } while(!frame->choice && trail_size(trail) > cutoff);
 

@@ -59,6 +59,7 @@ static inline union field child_at_v(union field r, int i)
 
 static inline void set_child_at(union field r, int i, union field v)
 {
+    gc_remember(r.n);
     if(i < 3)
     {
         r.n->children[i] = v;
@@ -621,6 +622,7 @@ static inline field follow_forward(field r)
     {
         STAT(compressions);
         trail_node(r, false);
+        gc_remember(r.n);
         child_at(r, 0) = b;
     }
     return b;
@@ -647,6 +649,7 @@ static inline void fail_nf(union field child, union field root)
 static inline __attribute__((always_inline))
 void set0(union field root, Symbol* sym)
 {
+    gc_remember(root.n);
     root.n->missing = 0;
     root.n->nondet = false;
     root.n->symbol = sym;
@@ -658,6 +661,7 @@ void set0(union field root, Symbol* sym)
 static inline __attribute__((always_inline))
 void set1(union field root, Symbol* sym, union field v0)
 {
+    gc_remember(root.n);
     root.n->missing = 0;
     root.n->nondet = false;
     root.n->symbol = sym;
@@ -670,6 +674,7 @@ void set1(union field root, Symbol* sym, union field v0)
 static inline __attribute__((always_inline))
 void set2(union field root, Symbol* sym, union field v0, union field v1)
 {
+    gc_remember(root.n);
     root.n->missing = 0;
     root.n->nondet = false;
     root.n->symbol = sym;
@@ -682,6 +687,7 @@ void set2(union field root, Symbol* sym, union field v0, union field v1)
 static inline __attribute__((always_inline))
 void set3(union field root, Symbol* sym, union field v0, union field v1, union field v2)
 {
+    gc_remember(root.n);
     root.n->missing = 0;
     root.n->nondet = false;
     root.n->symbol = sym;
@@ -780,6 +786,7 @@ static inline Node* make_restore(Node* backup)
 __attribute__((always_inline))
 static inline void fail(union field root)
 {
+    gc_remember(root.n);
     root.n->symbol = &fail_symbol;
     root.n->missing = 0;
     child_at_n(root, 0) = NULL;
@@ -793,6 +800,7 @@ static inline void fail(union field root)
 __attribute__((always_inline))
 static inline void set_choice(union field root, union field left, union field right)
 {
+    gc_remember(root.n);
     root.n->missing = 0;
     root.n->symbol = &choice_symbol;
     child_at(root,0) = left;
@@ -804,6 +812,7 @@ static inline void set_choice(union field root, union field left, union field ri
 __attribute__((always_inline))
 static inline void set_forward(union field root, union field child)
 {
+    gc_remember(root.n);
     root.n->missing = 0;
     root.n->symbol = &forward_symbol;
     child_at(root,0) = child;
@@ -929,6 +938,7 @@ static inline union field free_var(void)
 __attribute__((always_inline))
 static inline void set_apply1(union field root, union field f, union field v1)
 {
+    gc_remember(root.n);
     root.n->symbol = &apply_symbol;
     root.n->missing = -1;
     child_at(root,0) = f;
@@ -953,6 +963,7 @@ static inline union field make_apply1(union field f, union field v1)
 __attribute__((always_inline))
 static inline void set_apply2(union field root, union field f, union field v1, union field v2)
 {
+    gc_remember(root.n);
     root.n->symbol = &apply_symbol;
     root.n->missing = -2;
     child_at(root,0) = f;
@@ -979,6 +990,7 @@ static inline union field make_apply2(union field f, union field v1, union field
 __attribute__((always_inline))
 static inline void set_apply3(union field root, union field f, union field v1, union field v2, union field v3)
 {
+    gc_remember(root.n);
     root.n->symbol = &apply_symbol;
     root.n->missing = -3;
     root.n->children[3].a = alloc_spill(1);

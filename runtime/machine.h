@@ -104,6 +104,14 @@ extern Frame*       rice_sp;
 extern union field* rice_stack_lo;
 extern union field* rice_stack_hi;
 
+// The clean part of the stack: the frames within this many words of
+// rice_stack_hi. Their pointer slots point only at old nodes, and they
+// haven't been the top frame since a collection found that, so nothing has
+// written them. A minor collection skips them (gc.c). frame_pop lowers it
+// when it pops back into it. It's a distance from rice_stack_hi, not an
+// address, because growing the stack moves it.
+extern size_t rice_stack_clean;
+
 // Sets up the stack.
 void machine_init(void);
 
@@ -141,7 +149,14 @@ static inline Frame* frame_push(Frame* sp, const FrameInfo* info)
 // Read any SLOTs you need first, because the next push will overwrite them.
 static inline Frame* frame_pop(Frame* sp)
 {
-    return (Frame*)((union field*)sp + 1 + sp->info->size);
+    union field* top = (union field*)sp + 1 + sp->info->size;
+    // If the new top frame was clean, it can be written now, so the clean
+    // part ends above it.
+    if(top < rice_stack_hi && (size_t)(rice_stack_hi - top) <= rice_stack_clean)
+    {
+        rice_stack_clean = (size_t)(rice_stack_hi - top) - 1 - ((Frame*)top)->info->size;
+    }
+    return (Frame*)top;
 }
 
 // Slot i of the top frame (the local `sp`).

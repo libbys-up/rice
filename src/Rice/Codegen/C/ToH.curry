@@ -161,11 +161,14 @@ epochStamp = cifdef "OPT_EPOCH_TRAIL" [epoch root .= text "current_epoch"]
 -- set_X
 ------------------------------------------------------------------------------
 
+--- `set_X` rewrites a node that already exists, so it goes through the
+--- collector's write barrier first (`runtime/gc.h`, `gc_remember`).
 setEntry :: IQName -> IArity -> [CStmt]
 setEntry name arity =
   [ comment (uninstance name)
   , hfunDefn "void" ("set_" ++ mangle name) args
-      ( [ symbol root .= (text "&" <> text (symbolName name))
+      ( [ scall "gc_remember" [root <> text ".n"]
+        , symbol root .= (text "&" <> text (symbolName name))
         , missing root .= text "missing"
         , setChildArray arity
         ] ++

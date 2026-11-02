@@ -8,6 +8,7 @@ union field  rice_root;
 Frame*       rice_sp;
 union field* rice_stack_lo;
 union field* rice_stack_hi;
+size_t       rice_stack_clean = 0;
 
 // Initial stack size, in words (1 MiB). It doubles as needed.
 #define INITIAL_STACK_WORDS ((size_t)1 << 17)

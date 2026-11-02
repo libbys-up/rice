@@ -320,9 +320,15 @@ collect the young data often and the old data rarely.
   `GC_NURSERY_BYTES` (8 MB to start), plus overflow chunks if a stretch
   between safe points allocates more. A safe point collects when the
   nursery is full.
-- **A minor collection** copies the live young nodes into the old
-  generation (everything that survives is promoted at once; no aging yet),
-  then empties the nursery. Its roots are the usual ones (root, the
+- **A minor collection** copies the live young nodes, then empties the
+  nursery. A node's first survival moves it to the survivor space, still
+  young; its second promotes it to the old generation. Promoting at the
+  first survival didn't work: a lazily produced list (a lazy `readFile`,
+  say) promoted itself a block at a time. Whatever thunk happened to be
+  promoted was later evaluated into a young block, so the barrier
+  remembered it, the next minor collection kept that block alive and
+  promoted the next thunk in it, and so on: a streaming count of a file
+  promoted 3.5 MB of every 8 MB nursery. With aging it promotes nothing. Its roots are the usual ones (root, the
   machine stack, the trail, the C roots) plus the remembered set. It
   copies only young nodes: a pointer to an old node is left alone, and
   old nodes aren't scanned unless they're remembered.
@@ -335,8 +341,12 @@ collect the young data often and the old data rarely.
   `set_*`, `set_copy`, `set_free_constructor`, `set_child_at`, `apply`'s
   argument filling, and `undo`) first calls `gc_remember(node)`: if the
   node is old and not yet remembered, it's marked and added to the
-  remembered set. A minor collection scans each remembered node's children
-  and then forgets them all. Writes into a node allocated since the last
+  remembered set. A minor collection scans each remembered node's
+  children. Afterwards, any old node that still points at a young one (a
+  child that went to the survivor space) is remembered for the next minor
+  collection: remembered nodes, and nodes just promoted whose children
+  survived for the first time. Forgetting them was the first bug the
+  stress run found. Writes into a node allocated since the last
   safe point need no barrier, since that node is young.
 - **Age** is a bit in `Node.gc_bits` (`GC_OLD`), set on every copy into
   the old generation. Whole-node copies (`set_copy`, `undo`,
@@ -348,14 +358,33 @@ collect the young data often and the old data rarely.
 - **FORWARD elision** in a minor collection only skips young forwards;
   old nodes are never changed by it.
 
-**Checking.** A missing barrier leaves an old node pointing into a freed
-nursery, so: under `GC_STRESS` every safe point does a minor collection
-(and every 64th a major one), and the freed nursery is poisoned. Under
-`GC_VERIFY`, before each minor collection, everything reachable is walked
-and any old node pointing at a young one without being remembered is
-reported.
+- **One owner per spill array.** A trail snapshot used to share its
+  node's spill array. Once the node was rewritten (and got a fresh array),
+  the old array was reachable only from the snapshot, and could keep
+  pointers to survivors that no remembered node covered. Snapshots copy
+  the array now (`save_snapshot`). That was the second bug the stress run
+  found.
+- **Watermarks.** Rescanning the whole trail and the whole machine stack
+  at every minor collection made fib 16x slower (a trail of up to 18
+  million entries). Both now have a clean part a minor collection skips:
+  `Trail.clean`, the oldest entries whose nodes are all old, lowered by a
+  pop; and `rice_stack_clean`, the oldest frames whose pointers are all
+  old, lowered by `frame_pop` when it pops back into them. Only the top
+  frame is ever written, so a frame can't change while it's clean.
 
-**Costs left for later.** A minor collection still scans the whole
-machine stack and the whole trail. A deep recursion or a long trail makes
-every minor collection pay for it; GHC marks stack chunks dirty for this,
-and the trail could keep a watermark of entries already scanned.
+**Checking.** A missing barrier leaves an old node pointing into a freed
+nursery, so under `GC_STRESS` every safe point does a minor collection
+(and every 64th a major one), with a fresh nursery each time and the old
+one poisoned. The suite under `GC_STRESS` has no crashes or wrong output
+(2026-11-01); its long programs time out. A `GC_VERIFY` mode (walk
+everything reachable before a minor collection and report any old node
+pointing at a young one without being remembered) isn't written yet.
+
+**Results** (2026-11-01). A self-compiled rice compiling hello world: 43 s
+and 5.7 GB peak before, 30 s and 2.6 GB after (with lazy `readFile`).
+On the benchmarks, against the old collector: most within 10% either way;
+deep recursions faster (buildFold 0.92 to 0.70 s, fibPeano 0.32 to 0.30 s);
+programs that keep everything they allocate slower, because aging copies
+each survivor twice (reverse_builtin 0.51 to 0.90 s, ReverseBuiltin 0.14 to
+0.25 s), and so are fib (0.61 to 1.53 s) and SearchKanMis (0.65 to 1.08 s),
+whose trails keep everything alive (Leak 2).
