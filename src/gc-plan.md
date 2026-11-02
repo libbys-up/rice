@@ -376,9 +376,13 @@ collect the young data often and the old data rarely.
 nursery, so under `GC_STRESS` every safe point does a minor collection
 (and every 64th a major one), with a fresh nursery each time and the old
 one poisoned. The suite under `GC_STRESS` has no crashes or wrong output
-(2026-11-01); its long programs time out. A `GC_VERIFY` mode (walk
-everything reachable before a minor collection and report any old node
-pointing at a young one without being remembered) isn't written yet.
+(2026-11-01); its long programs time out. `GC_VERIFY` walks
+everything reachable before and after each minor collection, and stops at
+any old node pointing at a young one (or owning a young spill array)
+without being remembered, and at any clean trail entry or clean frame
+pointing at a young node. With the barrier disabled it stops on the first
+GC-heavy program; with it, the suite is clean (2026-11-01, with
+`-DGC_NURSERY_BYTES=262144` so it runs often; long programs time out).
 
 **Results** (2026-11-01). A self-compiled rice compiling hello world: 43 s
 and 5.7 GB peak before, 30 s and 2.6 GB after (with lazy `readFile`).

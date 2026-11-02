@@ -174,7 +174,8 @@ anyway. Reducing it needs a different sound rule, which means proof work.
   2.6 GB (was 43 s, 5.7 GB). Programs that keep everything they allocate
   are up to 1.8x slower than with the old collector, and fib and
   SearchKanMis about 1.7-2.5x (their trails keep everything alive).
-- Open: a `GC_VERIFY` mode; tuning the nursery size; Leak 2.
+- `-DGC_VERIFY` checks the barrier and the watermarks at every minor
+  collection. Open: tuning the nursery size; Leak 2.
 
 ## Rice vs KiCS2 (2026-10-30)
 

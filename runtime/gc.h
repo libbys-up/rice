@@ -53,6 +53,7 @@ extern size_t rice_heap_threshold;
 #define GC_REMEMBERED 8   // old, and in the remembered set
 #define GC_OLD        16  // in the old generation
 #define GC_AGED       32  // young, and has lived through a minor collection
+#define GC_VISITED    64  // GC_VERIFY's walk has reached it (gc.c)
 #define GC_AGE_BITS   (GC_TRAILED | GC_REMEMBERED | GC_OLD | GC_AGED)
 
 // A spill array's header word once the array is in the old generation.

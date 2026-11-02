@@ -182,6 +182,10 @@ These are C preprocessor flags, set with \code{--cflags}:
 \code{-DOPT_...=0/1} & turn a backtracking optimization on or off (\S\ref{sec:opts}) \\
 \code{-DOPT_STATS=1} & count trail entries, retries, forward hops, \dots; print at exit \\
 \code{-DGC_STRESS} & collect at every safe point, and poison freed memory \\
+\code{-DGC_VERIFY} & before and after every minor collection, check that \\
+  & every old node pointing at a young one is remembered (slow) \\
+\code{-DGC_NURSERY_BYTES=N} & the nursery's size (8 MB); small makes the \\
+  & checks above run often \\
 \code{-DGC_STATS} & print a line for each collection \\
 \code{-DCHECK_LAYOUT=1} & check every node built by \code{make_X}/\code{set_X} \\
 \bottomrule

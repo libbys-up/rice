@@ -626,14 +626,183 @@ static union field copy_reachable(union field root, Frame* sp)
     return root;
 }
 
+// --- GC_VERIFY ---------------------------------------------------------------
+
+#ifdef GC_VERIFY
+/* Checks what a minor collection relies on, over everything reachable:
+ *  * an old node that points at a young node, or has a young spill array,
+ *    is remembered (the write barrier did its job);
+ *  * the trail's clean entries and the stack's clean frames point only at
+ *    old nodes (the watermarks are right).
+ * It walks the whole heap, so it's only for debugging. A violation stops
+ * the program, naming the node.
+ */
+// A growable list of nodes.
+typedef struct
+{
+    Node** a;
+    size_t n;
+    size_t cap;
+} NodeList;
+
+static NodeList verify_work;  // visited, not yet checked
+static NodeList verify_seen;  // visited, so GC_VISITED can be cleared
+
+static void push(NodeList* l, Node* x)
+{
+    if(l->n == l->cap)
+    {
+        l->cap = l->cap == 0 ? 4096 : l->cap * 2;
+        l->a = (Node**)realloc(l->a, l->cap * sizeof(Node*));
+    }
+    l->a[l->n++] = x;
+}
+
+static void verify_visit(Node* n)
+{
+    if(n == NULL || (n->gc_bits & GC_VISITED))
+    {
+        return;
+    }
+    n->gc_bits |= GC_VISITED;
+    push(&verify_seen, n);
+    push(&verify_work, n);
+}
+
+static void verify_fail(const char* what, Node* n, const char* when)
+{
+    fprintf(stderr, "GC_VERIFY (%s a minor collection): %s: %s", when, what,
+            n->symbol != NULL ? n->symbol->name : "<no symbol>");
+    fprintf(stderr, " at %p\n", (void*)n);
+    abort();
+}
+
+// Is this pointer to a young node?
+static bool young_ptr(union field f)
+{
+    return f.n != NULL && !(f.n->gc_bits & GC_OLD);
+}
+
+// Visit n's pointer children, and check the barrier invariant for it.
+static void verify_node(Node* n, const char* when)
+{
+    bool old = n->gc_bits & GC_OLD;
+    bool covered = !old || (n->gc_bits & GC_REMEMBERED);
+    int ptrs = 0;              // children 0..ptrs-1 might be pointers
+    bool all_ptrs = false;     // every one of them is (apply, FORWARD, CHOICE)
+    if(n->missing < 0)
+    {
+        ptrs = -n->missing + 1;
+        all_ptrs = true;
+    }
+    else if(n->symbol->tag == FORWARD_TAG)
+    {
+        ptrs = 1;
+        all_ptrs = true;
+    }
+    else if(n->symbol->tag == CHOICE_TAG)
+    {
+        ptrs = 2;
+        all_ptrs = true;
+    }
+    else
+    {
+        ptrs = filled_arity((union field){ .n = n });
+    }
+    int len = gc_spill_len(n);
+    union field* a = n->children[3].a;
+    if(old && !covered && len > 0 && a != NULL && a[-1].a != GC_OLD_ARRAY)
+    {
+        verify_fail("old node not remembered, with a young spill array", n, when);
+    }
+    for(int i = 0; i < ptrs; i++)
+    {
+        if(!all_ptrs && child_rep(n->symbol, i) != R_PTR)
+        {
+            continue;
+        }
+        if(i >= 3 && (len == 0 || a == NULL))
+        {
+            break;
+        }
+        union field c = i < 3 ? n->children[i] : a[i - 3];
+        if(old && !covered && young_ptr(c))
+        {
+            verify_fail("old node not remembered, pointing at a young one", n, when);
+        }
+        verify_visit(c.n);
+    }
+}
+
+static void gc_verify(union field root, Frame* sp, const char* when)
+{
+    verify_work.n = 0;
+    verify_seen.n = 0;
+    verify_visit(root.n);
+    union field* stop = rice_stack_hi - rice_stack_clean;
+    for(Frame* f = sp; (union field*)f < rice_stack_hi;
+        f = (Frame*)((union field*)f + 1 + f->info->size))
+    {
+        for(unsigned short i = 0; i < f->info->size; i++)
+        {
+            if(field_rep(f->info->reps, i) != R_PTR)
+            {
+                continue;
+            }
+            if((union field*)f >= stop && young_ptr(f->slots[i]))
+            {
+                fprintf(stderr, "GC_VERIFY (%s a minor collection): clean frame %s points at a young node\n",
+                        when, f->info->name);
+                abort();
+            }
+            verify_visit(f->slots[i].n);
+        }
+    }
+    for(size_t i = 0; i < trail->size; i++)
+    {
+        TrailEntry* e = &trail->array[i];
+        if(i < trail->clean && (young_ptr(e->lhs) || young_ptr(e->rhs)))
+        {
+            fprintf(stderr, "GC_VERIFY (%s a minor collection): clean trail entry %zu points at a young node\n",
+                    when, i);
+            abort();
+        }
+        verify_visit(e->lhs.n);
+        verify_visit(e->rhs.n);
+    }
+    for(size_t i = 0; i < gc_nroots; i++)
+    {
+        verify_visit(gc_roots[i]->n);
+    }
+    for(size_t i = 0; i < remembered_n; i++)
+    {
+        verify_visit(remembered[i]);
+    }
+    while(verify_work.n > 0)
+    {
+        verify_node(verify_work.a[--verify_work.n], when);
+    }
+    for(size_t i = 0; i < verify_seen.n; i++)
+    {
+        verify_seen.a[i]->gc_bits &= (unsigned char)~GC_VISITED;
+    }
+}
+#endif
+
 // Copy the nursery's survivors into the old generation.
 static union field collect_minor(union field root, Frame* sp)
 {
+#ifdef GC_VERIFY
+    gc_verify(root, sp, "before");
+#endif
     minor = true;
     live_bytes = 0;
     heap_begin_minor();
     root = copy_reachable(root, sp);
     heap_end_minor();
+#ifdef GC_VERIFY
+    gc_verify(root, sp, "after");
+#endif
     old_bytes += live_bytes;
 #ifdef GC_STATS
     fprintf(stderr, "gc minor: %zu bytes promoted, old generation %zu bytes, %zu trail entries\n",
