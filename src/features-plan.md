@@ -37,6 +37,8 @@ Gaps in the language itself (all XFAIL in `tests/manifest.txt`):
 Version 2.0: the small ones
 ---------------------------
 
+Decided 2026-11-02: these three go in 2.0.
+
 1. **`Data.IORef`** (`runtime/ext/Data.IORef.c`). An `IORef` is an
    `external data` node with one pointer field, like `Handle`. `newIORef`
    allocates it, `prim_readIORef` returns the field, and `prim_writeIORef`
@@ -99,12 +101,18 @@ Version 3.0
 7. **Pipes in `System.IOExts`.** `execCmd` and `connectToCommand` with
    `fork`, `pipe` and `exec`, returning `Handle`s; the rest of
    `System.IO` then works on them unchanged.
-8. **`(=:=)` as real unification.** Unify lazily, binding free variables
-   to constructors only as far as the other side has been evaluated,
-   instead of normalizing both sides first. The largest item here: it
-   changes `constrEq`, `lu_k` and how bindings are trailed, and it's what
-   seven XFAIL tests are waiting for. Needs the same kind of design note
-   and model check as the backtracking optimizations.
+8. **`(=:=)` as incremental unification.** `=:=` is strict: it succeeds
+   only when both sides evaluate to unifiable data terms. (`=:<=`, for
+   functional patterns, is the non-strict one.) But KiCS2 doesn't
+   normalize first: `unifyTry` (`~/opt/kics2/runtime/Types.hs`) takes
+   both sides to head normal form, compares the root constructors, and
+   recurses on the arguments; binding a free variable forces the whole
+   term it's bound to. So a mismatch fails at the first constructor that
+   differs. Rice normalizes both sides first, so `xs ++ [x] =:= l`
+   enumerates every `xs` before comparing anything. Doing it KiCS2's way
+   changes `constrEq` and how bindings are trailed, and it's what seven
+   XFAIL tests are waiting for. Check the Curry report's definition too,
+   and write a design note before the code.
 9. **Narrowing raw `Int` fields.** A free variable that has to become an
    `Int` stored unboxed. Either box the field when it holds a free
    variable, or keep a separate binding for it.
@@ -121,6 +129,8 @@ Then the rest as programs need them.
 Also
 ----
 
+- (2026-11-02) `=:=` is strict, not lazy; item 8 was first written as
+  "unify lazily", which was wrong. The difference is the evaluation order.
 - `-p/--noprelude` and `-e/--external` are listed under `--help-dev` but
   aren't implemented. Remove them, or implement them.
 - Three `old_rice/benchmarks` tests are XFAIL because the programs are
