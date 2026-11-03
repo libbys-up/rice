@@ -224,9 +224,7 @@ Done:
   `.tfcy` is byte-identical to KiCS2's. Suite: 120 pass, 0 fail.
 
 To do:
-- `LICENSE` still says `<AUTHOR NAME>`.
 - A Linux run, and CI.
-- `rice --help`: separate the developer options.
 - Untested: rice built with PAKCS.
 - Bootstrapping: rice still needs a Curry system to build itself.
 

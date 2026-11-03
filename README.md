@@ -40,8 +40,8 @@ rice Prog.curry                # builds ./Prog; main :: IO t runs once
 rice --interactive Prog.curry  # main can have any type; prints every solution
 ```
 
-`rice -v` says what's being compiled. `rice --help` lists every option; most
-of them are for working on the compiler.
+`rice -v` says what's being compiled. `rice --help` lists the options;
+`rice --help-dev` lists the ones for working on the compiler.
 
 Modules are looked up in the current directory, then `CURRYPATH`, then
 rice's `lib/`.

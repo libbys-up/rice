@@ -64,7 +64,9 @@ main = do
                      else []
       errors = fileErrors ++ optErrors
   if SHelp `elem` opts
-    then putStrLn (usageInfo usageHeader optDescrs)
+    then putStr (usageInfo usageHeader userOptDescrs)
+    else if SHelpDev `elem` opts
+    then putStr (usageInfo devHeader devOptDescrs)
     else if not (null errors)
       then do mapM_ putStrLn errors
               exitWith 1
@@ -76,6 +78,9 @@ say opts msg = when (SVerbose `elem` opts) (putStrLn msg)
 
 usageHeader :: String
 usageHeader = "Usage: rice [OPTIONS] FILE.curry"
+
+devHeader :: String
+devHeader = "Developer options (for working on rice itself):"
 
 --- Compiles `file` and every module it imports, then links the executable.
 compileProgram :: [CompilerOptions] -> String -> IO ()
@@ -401,7 +406,7 @@ data CompilerOptions
   -- caching
   | SForceRecompile | SForceRecompileModule String
   -- other
-  | SVerbose | SCompilerTime | SHelp
+  | SVerbose | SCompilerTime | SHelp | SHelpDev
  deriving (Show, Eq)
 
 --- Parses `--debug`'s argument: one of `runtime/debug.h`'s named levels
@@ -421,8 +426,37 @@ parseDebugLevel s = SDebug $ case map toLower s of
 mainModeOpt :: [CompilerOptions] -> MainMode
 mainModeOpt opts = if SInteractive `elem` opts then Interactive else Standalone
 
+--- Every option rice accepts. `--help` lists only `userOptDescrs`;
+--- `--help-dev` lists `devOptDescrs`.
 optDescrs :: [OptDescr CompilerOptions]
-optDescrs =
+optDescrs = userOptDescrs ++ devOptDescrs
+
+--- The options for compiling and running Curry programs.
+userOptDescrs :: [OptDescr CompilerOptions]
+userOptDescrs =
+  [ Option []  ["interactive"]     (NoArg SInteractive)       interactiveHelp
+  , Option "x" ["gcc"]             (NoArg SUseGCC)            "use GCC instead of clang"
+  , Option []  ["cflags"]          (ReqArg SCFlags "FLAGS")   cflagsHelp
+  , Option []  ["force-recompile"]        (NoArg SForceRecompile)               forceHelp
+  , Option []  ["force-recompile-module"] (ReqArg SForceRecompileModule "MODULE") forceModuleHelp
+  , Option "v" ["verbose"]         (NoArg SVerbose)           "say which modules are compiled, and print each C compiler and linker command"
+  , Option "h" ["help"]            (NoArg SHelp)              "print this help message and exit"
+  , Option []  ["help-dev"]        (NoArg SHelpDev)           "print the developer options and exit"
+  ]
+ where
+  interactiveHelp = "print every value of main, instead of running main as an "
+                    ++ "IO action; for REPL front ends"
+  cflagsHelp      = "extra space-separated C compiler flags, e.g. "
+                    ++ "\"-DOPT_EPOCH_TRAIL=1\"; repeatable"
+  forceHelp       = "recompile the module on the command line, ignoring its cache "
+                    ++ "(its imports are only rebuilt if stale)"
+  forceModuleHelp = "also recompile MODULE (e.g. Prelude), ignoring its cache; "
+                    ++ "repeatable"
+
+--- The options for working on rice itself: printing and stopping after
+--- the compiler's stages, and debugging the runtime.
+devOptDescrs :: [OptDescr CompilerOptions]
+devOptDescrs =
   -- printing intermediate stages, in pipeline order
   [ Option "f" ["flatcurry"]       (NoArg SPrintFlatCurry)    "print FlatCurry"
   , Option []  ["fcy"]             (NoArg SPrintFlatCurryRaw) "print FlatCurry raw format"
@@ -446,35 +480,16 @@ optDescrs =
   -- compiling
   , Option []  ["no-optimize"]     (NoArg SNoOptimize)        "skip Rice.Optimize.Inline"
   , Option []  ["lint-fieldreps"]  (NoArg SLintFieldReps)     lintHelp
-  , Option []  ["interactive"]     (NoArg SInteractive)       interactiveHelp
   , Option "p" ["noprelude"]       (NoArg SNoPrelude)         "don't include Prelude (not implemented)"
   , Option "e" ["external"]        (NoArg SMakeExt)           "make/overwrite external file (not implemented)"
 
-  -- building the executable
-  , Option "x" ["gcc"]             (NoArg SUseGCC)                  "use GCC instead of clang"
+  -- debugging
   , Option []  ["debug"]           (ReqArg parseDebugLevel "LEVEL") debugHelp
-  , Option []  ["cflags"]          (ReqArg SCFlags "FLAGS")         cflagsHelp
-
-  -- caching
-  , Option []  ["force-recompile"]        (NoArg SForceRecompile)               forceHelp
-  , Option []  ["force-recompile-module"] (ReqArg SForceRecompileModule "MODULE") forceModuleHelp
-
-  -- other
-  , Option "v" ["verbose"]         (NoArg SVerbose)           "say which modules are compiled, and print each C compiler and linker command"
   , Option []  ["compiler-time"]   (NoArg SCompilerTime)      "print how long each compiler stage takes, in ms"
-  , Option "h" ["help"]            (NoArg SHelp)              "print this help message and exit"
   ]
  where
   fieldRepsHelp   = "print which fields and variables hold raw Int#/Char#/Float# values"
   lintHelp        = "fail the compile if a raw value could reach a pointer slot, "
                     ++ "in every regenerated module (also on with --debug)"
-  interactiveHelp = "print every solution of main (nf_all), instead of running "
-                    ++ "an IO main once (run_io); for REPL front ends"
   debugHelp       = "build with runtime debug output: low, med, high, or a number "
                     ++ "(see runtime/debug.h)"
-  cflagsHelp      = "extra space-separated C compiler flags, e.g. "
-                    ++ "\"-DOPT_EPOCH_TRAIL=1\"; repeatable"
-  forceHelp       = "recompile the module on the command line, ignoring its cache "
-                    ++ "(its imports are only rebuilt if stale)"
-  forceModuleHelp = "also recompile MODULE (e.g. Prelude), ignoring its cache; "
-                    ++ "repeatable"

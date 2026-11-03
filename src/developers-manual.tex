@@ -144,8 +144,8 @@ Rice also needs a Curry front end (\S\ref{sec:frontend}).
 rice Prog.curry                # builds ./Prog; main :: IO t runs once
 rice --interactive Prog.curry  # main can have any type; prints every solution
 \end{lstlisting}
-\code{rice --help} lists the options.  The ones you'll use most while working
-on the compiler print an intermediate stage: \code{-f} (FlatCurry),
+\code{rice --help-dev} lists the options for working on the compiler.  The
+ones you'll use most print an intermediate stage: \code{-f} (FlatCurry),
 \code{-u} (after unboxing), \code{-r} (after replacing), \code{-o} (after the
 optimizer), \code{--printANF}, \code{-i} (ICurry), and
 \code{--print-fieldreps}.  \code{--stop-...} prints a stage and stops.

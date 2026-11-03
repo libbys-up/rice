@@ -323,8 +323,8 @@ These aren't style rules so much as loose ends worth tidying when convenient
   `src/Rice/Transform/Untype.curry` (wrong return type, doesn't recurse into
   `TLet`'s bound expression, missing imports) left behind by the rewrite
   commit.
-- `LICENSE:1` still has the CPM template placeholder `Copyright (c) 2023,
-  <AUTHOR NAME>` — fill in the real name.
+- ~~`LICENSE:1` still has the CPM template placeholder~~ — resolved
+  (2026-11-02): `Copyright (c) 2023, Steven Libby`.
 - `test/a.out` (a compiled binary) is checked into the repo and isn't covered
   by `.gitignore` (`*~`, `.cpm`, `.curry` — see `.gitignore:1-3`). Either
   delete it or add a build-artifact ignore rule.
