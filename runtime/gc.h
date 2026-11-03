@@ -38,6 +38,12 @@ extern size_t rice_heap_threshold;
 #define GC_MIN_THRESHOLD ((size_t)64 << 20)
 #endif
 
+// A major collection also runs when the trail has doubled since the last
+// one (gc.c), but never before it has this many entries.
+#ifndef GC_MIN_TRAIL
+#define GC_MIN_TRAIL ((size_t)1 << 16)
+#endif
+
 /* Generations (gc-plan.md, stage 7).
  * Everything is allocated in the nursery. A minor collection, when the
  * nursery is full, copies the young nodes that are alive: a node's first
@@ -53,7 +59,7 @@ extern size_t rice_heap_threshold;
 #define GC_REMEMBERED 8   // old, and in the remembered set
 #define GC_OLD        16  // in the old generation
 #define GC_AGED       32  // young, and has lived through a minor collection
-#define GC_VISITED    64  // GC_VERIFY's walk has reached it (gc.c)
+#define GC_VISITED    64  // GC_VERIFY's walk, or trail_liveness's, has reached it (gc.c)
 #define GC_SEEN       128 // compact_trail: has an entry lower in this segment
 #define GC_AGE_BITS   (GC_TRAILED | GC_REMEMBERED | GC_OLD | GC_AGED)
 

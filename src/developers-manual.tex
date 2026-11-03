@@ -1344,6 +1344,24 @@ node, and redirecting the root would make it rewrite the target instead.  After
 walking a chain, we also point every node on it at the end (path compression),
 so another pointer into the middle doesn't walk it again.
 
+\paragraph{Trimming the trail.}
+Under a pending choice, a loop whose state depends on the choice rewrites its
+root every iteration, and each rewrite is trailed.  If the trail were an
+ordinary root, every snapshot would keep that iteration's data alive, and the
+loop would leak (\code{gc/nondet_pending}).  So a major collection trims the
+trail first (\file{src/gc-plan.md}, stage 8).  The heights where \code{undo}
+or \code{trail_pop_to} can stop are every choice entry plus every frame slot
+whose rep is \code{R_TRAIL} (a height) or \code{R_CUTOFF} (height + 1, or 0
+for none), so code that keeps a trail height across an evaluation has to keep
+it in a slot of one of those reps.  Between two stops, only a node's deepest
+entry can ever be restored, so the others go (\code{compact_trail}).  Then
+\code{trail_liveness} traces the heap once for each \emph{view}, the heap as
+it would be after undoing down to a stop.  It drops entries no reachable view
+can restore, and it replaces a node's current contents with
+\code{gc_dead_symbol} when no reachable view can read them.  The collector
+then remaps every height held in a frame to the shorter trail.
+\code{-DGC_NO_TRAIL_COMPACT} turns this off.
+
 %----------------------------------------------------------------------
 \subsection{External functions}
 \label{sec:externals}

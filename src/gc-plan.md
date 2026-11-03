@@ -241,7 +241,7 @@ Status:
     may be about to rewrite it. `io_loop` now peaks at 78 MB (from 927 MB)
     and runs 34% faster (4.36 s -> 2.88 s, interleaved, best of 5). The
     five benchmarks are unchanged (within 1%).
-  * **Trail retention (open; `gc/nondet_pending` is XFAIL).** Under a
+  * **Trail retention (closed in stage 8).** Under a
     pending choice, a tail-recursive loop whose accumulator depends on
     the choice rewrites its root in place every iteration, and each
     rewrite is trailed. Every snapshot keeps that iteration's list cell
@@ -391,4 +391,91 @@ deep recursions faster (buildFold 0.92 to 0.70 s, fibPeano 0.32 to 0.30 s);
 programs that keep everything they allocate slower, because aging copies
 each survivor twice (reverse_builtin 0.51 to 0.90 s, ReverseBuiltin 0.14 to
 0.25 s), and so are fib (0.61 to 1.53 s) and SearchKanMis (0.65 to 1.08 s),
-whose trails keep everything alive (Leak 2).
+whose trails kept everything alive (Leak 2, fixed in stage 8).
+
+------------------------------------------------------------------------------
+
+Stage 8: trail liveness, Leak 2 (2026-11-02)
+--------------------------------------------
+
+**Why.** Under a pending choice every rewrite of a loop's root is trailed,
+and each snapshot keeps that iteration's data alive (stage 6, "Trail
+retention"). `gc/nondet_pending` peaked at 645 MB, fib at 2.7 GB. The
+design is `~/curry/papers/unif/proofs/LEAKS.md`; this is how the runtime
+does it, and where it goes past that design.
+
+**Stop heights** (`579b537`). Frame slots that hold a trail height are
+typed `R_TRAIL` (a height) or `R_CUTOFF` (height + 1, 0 for none), so the
+collector finds every height `undo` or `pop_to` can stop at: those, every
+choice entry, 0 and the trail's size. They cut the trail into segments.
+
+**A major collection** now runs three passes over the trail before the
+copy:
+
+1. `compact_trail` (D1): within a segment only the deepest entry per node
+   can ever be restored, so the others go. Frame heights, the stop list
+   and the clean watermark are remapped to the compacted trail.
+2. `trail_liveness` (D2-D4) traces the from-space once, per *view*: the
+   heap as it is after undoing down to some stop height. A node's current
+   contents are visible in the views above its top entry's segment; entry
+   i's snapshot in the views from the segment of the entry below it up to
+   its own. Tracing carries the range of views a pointer was reached in,
+   and follows only the versions visible in that range.
+   - D2: an entry whose snapshot is visible in no reached view is dropped.
+   - D3: a node whose current contents are visible in no reached view is
+     overwritten with `gc_dead_symbol` (evaluating it is a runtime error,
+     exit 3), so its children aren't kept.
+   - D4: a dropped entry at the bottom of its segment stays, emptied (lhs
+     and rhs NULL), because `undo` and `pop_to` read its epoch and choice
+     flag. No test exercises this yet.
+3. The copy, whose trail roots are now only the entries that are left.
+
+A major collection also runs when the trail has doubled since the last
+one (at least `GC_MIN_TRAIL` entries), not only when the old generation
+has. Without it the trail grew for 64 MB of old data before anything was
+dropped (`nondet_pending` peaked at 182 MB).
+
+**Beyond LEAKS.md.**
+- **Frame views.** The root and the frames were first treated as reached
+  in every view, and that kept the leak: the current accumulator's
+  snapshot pointed at the previous accumulator, and so on. But every undo
+  is run by some frame (a scoped retry's `R_CUTOFF`, `lu_k`'s `R_TRAIL`),
+  and the frames above it are popped first. So a frame is reached only in
+  the views at or above the lowest stop held by it or the frames above
+  it. The C roots (`gc_roots`, including `nf_all`'s expression) are
+  reached in every view.
+- **Commit widening.** `pop_to` (bindIO's commit) discards entries without
+  restoring them, so after a commit at height h, a version visible at h is
+  visible below it too, down to the node's highest entry below h. The
+  lowest `R_TRAIL` slot is taken as h, conservatively.
+- **Untrailed nodes** carry the range of views they were reached in
+  (`GC_VISITED`, and a hash table of ranges); `GC_VISITED | GC_SEEN` means
+  all views. A node is rescanned when its range widens, and after four
+  widenings it's taken as reached in all views, which bounds the work.
+- **Private snapshots.** Every rhs is a fresh node no one else points at
+  (`save_snapshot`, `choose`, `push_node`, `free_var`, `make_X_free`). If
+  an rhs is itself on the trail, liveness skips the collection rather
+  than reason about it.
+
+**Open question.** A pointer reached only in the current view can be made
+permanent by a *later* commit at a height at or above today's size; if
+`nf_all` then backtracks below it, it could read a version this
+collection judged dead. That needs interactive mode, an IO `main`, and a
+choice made before the IO runs (`gc/trail_commit` is that shape and
+passes, but doesn't hit the window). Covering it conservatively brings
+the leak back. It should be settled in the proofs.
+
+**Checking.** `-DGC_NO_TRAIL_LIVENESS` turns off D2-D4 and
+`-DGC_NO_TRAIL_COMPACT` all three passes; `gc/trail_epochs`,
+`gc/trail_scoped_retry` and `gc/trail_commit` (epochs, scoped retry and
+bindIO commits, each under `GC_STRESS`) match the output with both off.
+Suites (2026-11-02): default 134 pass, 0 fail; `GC_STRESS`, with
+`OPT_NONDET_TRAIL=0`, with all flags on, and with
+`OPT_SCOPED_BACKTRACK=1`: no crashes or wrong output, only the usual
+timeouts (34-37); `GC_VERIFY` with a 256 KB nursery: no failures but
+timeouts.
+
+**Results** (peak RSS, time, before and after this stage):
+`gc/nondet_pending` 645 MB, 59 s to 47 MB, 1.34 s (no longer XFAIL); fib
+2.7 GB, 2.1 s to 49 MB, 0.94 s; SearchKanMis 201 MB, 1.33 s to 57 MB,
+1.10 s. Output identical.

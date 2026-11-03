@@ -69,6 +69,11 @@ void gc_remember_slow(Node* n)
 // The old generation's size, and when to collect it.
 static size_t old_bytes = 0;
 static size_t old_threshold = GC_MIN_THRESHOLD;
+// A major collection also runs when the trail has doubled since the last
+// one, since only a major collection drops dead trail entries
+// (compact_trail, trail_liveness), and until then they keep what they point
+// at alive through every minor collection.
+static size_t trail_threshold = GC_MIN_TRAIL;
 
 // This is our marker for when a node has been moved from space -> to space
 // There's exactly 1 child which is a pointer to the new node.
@@ -237,7 +242,10 @@ static Node* copy_node(Node* n)
     memcpy(c, n, sizeof(Node));
     if(to_old)
     {
-        c->gc_bits = (unsigned char)((c->gc_bits | GC_OLD) & ~(GC_REMEMBERED | GC_AGED));
+        // GC_VISITED, GC_SEEN: trail_liveness marks from-space nodes, and
+        // copying them is how they're cleared.
+        c->gc_bits = (unsigned char)((c->gc_bits | GC_OLD) &
+                                     ~(GC_REMEMBERED | GC_AGED | GC_VISITED | GC_SEEN));
         live_bytes += sizeof(Node);
     }
     else
@@ -977,10 +985,605 @@ static void compact_trail(Frame* sp)
     {
         trail->clean = kept;
     }
+
+    // Leave the stop heights in the new coordinates, for trail_liveness.
+    // Heights above the top aren't segment boundaries; drop them.
+    size_t n = 0;
+    for(size_t k = 0; k < stop_n; k++)
+    {
+        if(stop[k] <= size)
+        {
+            size_t h = kept_below[stop[k]];
+            if(n == 0 || stop[n - 1] != h)
+            {
+                stop[n++] = h;
+            }
+        }
+    }
+    stop_n = n;
 #ifdef GC_STATS
     fprintf(stderr, "gc trail: %zu entries, %zu kept, %zu stop heights\n", size, kept, stop_n);
 #endif
 }
+
+#ifndef GC_NO_TRAIL_LIVENESS
+/* D2-D4: which versions of a trailed node can still be read (LEAKS.md,
+ * "Proposed fix"). This runs after compact_trail, before the copy, and
+ * looks only at from-space.
+ *
+ * A view is a stop height h: the heap after undo has brought the trail
+ * down to h. View size is the heap now. After D1 a node L has at most one
+ * entry per segment, so its versions split the views between them:
+ *  * its current contents, in views [b, size], where b is the top of the
+ *    segment holding L's highest entry;
+ *  * the snapshot (rhs) of entry i, in segment [a, b), in views [b', a],
+ *    where b' is the top of the segment holding L's next entry below i
+ *    (0 if there isn't one).
+ *
+ * We trace versions, each with its views. The roots reach every version of
+ * the nodes they point at, except that a frame is only read in some views
+ * (frame_views). A version reaches, for each child, every version
+ * of that child whose views meet its own. An untrailed node has one version
+ * in every view, but which views it's reached from still matters: the
+ * versions its children reach depend on them. So it's scanned from the
+ * smallest range of views that holds every one it's been reached from,
+ * and scanned again when that range grows. Reached from every view, it's
+ * GC_VISITED and GC_SEEN, which is ordinary data's case, and just a mark
+ * phase. Reached from fewer, it's GC_VISITED alone, and its range is in
+ * the partial table. After MAX_WIDENINGS rescans we stop being precise and
+ * scan it from every view.
+ *
+ * pop_to(n) discards segments instead of undoing them, so after a commit
+ * the views below n can see versions that, by the views above, are only
+ * visible at n or higher. So a version visible at the lowest commit height
+ * (an R_TRAIL slot, counted conservatively) also counts as visible down to
+ * the top of L's highest entry below that height.
+ *
+ * Then
+ *  * D2: an entry whose version wasn't reached is dropped.
+ *  * D3: a node whose current version wasn't reached, but which has a live
+ *    entry, has to survive, since undo writes into it. Its current
+ *    contents don't, so they become gc_dead_symbol, which stops the
+ *    program if anything ever does read it.
+ *  * D4: a dead entry at the bottom of its segment (every choice entry is
+ *    one) stays as an empty entry (lhs NULL), since undo and pop_to read
+ *    the epoch there, and undo stops at a choice entry.
+ * and the trail is compacted again, as in compact_trail.
+ *
+ * Every rhs is a fresh node that only its entry points at (save_snapshot,
+ * choose, push_node's copy, the free variables of push_frame and
+ * push_choice), so a version's contents are its rhs's children. If an rhs
+ * were ever trailed itself, its contents would depend on the view, so we
+ * give up and keep the whole trail.
+ */
+static RICE_CC void gc_dead_hnf(union field root, Frame* sp)
+{
+    (void)root;
+    (void)sp;
+    fprintf(stderr, "Error: the program read a node that the garbage collector "
+                    "found unreachable (gc.c, trail_liveness)\n");
+    exit(3);
+}
+
+static Symbol gc_dead_symbol =
+    { .tag = FUNCTION_TAG, .arity = 0, .name = "<gc-dead>", .hnf = &gc_dead_hnf };
+
+#define NO_ENTRY ((size_t)-1)
+
+// The versions of one trailed node.
+typedef struct
+{
+    Node*  node;
+    size_t top;        // its highest entry
+    size_t b_below;    // the top of the segment of its highest entry below commit_min, or 0
+    size_t versions;   // entries + 1 (current)
+    size_t unreached;  // versions not reached yet
+    bool   current;    // its current version is reached
+} Versions;
+
+typedef struct
+{
+    Node*  n;          // scan this node's children
+    size_t lo, hi;     // as seen from these views
+} LiveItem;
+
+static size_t*   seg_a = NULL;     // seg_a[i], seg_b[i]: entry i's segment [a, b)
+static size_t*   seg_b = NULL;
+static size_t*   lower = NULL;     // lower[i]: the same node's next entry below i
+static bool*     reached = NULL;   // reached[i]: entry i's version is reached
+static size_t    entries_cap = 0;
+static Versions* recs = NULL;
+static size_t    recs_n = 0;
+static size_t*   table = NULL;     // open addressing, node -> 1 + index into recs, 0 = empty
+static size_t    table_cap = 0;
+static LiveItem* live_work = NULL;
+static size_t    live_n = 0, live_cap = 0;
+static size_t    view_top;         // the trail's size: the current view
+
+// The range of views an untrailed node has been reached from, when that
+// isn't all of them.
+typedef struct
+{
+    Node*    n;
+    size_t   lo, hi;
+    unsigned widenings;
+} Partial;
+
+#define MAX_WIDENINGS 4
+
+static Partial*  partial = NULL;   // open addressing, n == NULL is empty
+static size_t    partial_n = 0, partial_cap = 0;
+static size_t    commit_min;       // the lowest commit height, or NO_ENTRY
+
+static void* grow(void* p, size_t n, size_t each)
+{
+    p = realloc(p, n * each);
+    if(p == NULL)
+    {
+        fprintf(stderr, "Error: out of memory in the trail liveness pass\n");
+        exit(1);
+    }
+    return p;
+}
+
+static size_t hash_ptr(Node* n, size_t cap)
+{
+    return (size_t)(((uintptr_t)n >> 4) * 0x9E3779B97F4A7C15ull) & (cap - 1);
+}
+
+static size_t hash_node(Node* n)
+{
+    return hash_ptr(n, table_cap);
+}
+
+static Partial* find_partial(Node* n)
+{
+    size_t h = hash_ptr(n, partial_cap);
+    while(partial[h].n != NULL && partial[h].n != n)
+    {
+        h = (h + 1) & (partial_cap - 1);
+    }
+    return &partial[h];
+}
+
+// Room for one more node in the partial table, keeping it at most half full.
+static void partial_reserve(void)
+{
+    if(2 * (partial_n + 1) <= partial_cap)
+    {
+        return;
+    }
+    Partial* old = partial;
+    size_t old_cap = partial_cap;
+    partial_cap = partial_cap == 0 ? 1024 : partial_cap * 2;
+    partial = (Partial*)calloc(partial_cap, sizeof(Partial));
+    if(partial == NULL)
+    {
+        fprintf(stderr, "Error: out of memory in the trail liveness pass\n");
+        exit(1);
+    }
+    for(size_t i = 0; i < old_cap; i++)
+    {
+        if(old[i].n != NULL)
+        {
+            *find_partial(old[i].n) = old[i];
+        }
+    }
+    free(old);
+}
+
+static Versions* find_versions(Node* n, bool add)
+{
+    size_t h = hash_node(n);
+    while(table[h] != 0)
+    {
+        if(recs[table[h] - 1].node == n)
+        {
+            return &recs[table[h] - 1];
+        }
+        h = (h + 1) & (table_cap - 1);
+    }
+    if(!add)
+    {
+        return NULL;
+    }
+    recs[recs_n] = (Versions){ n, NO_ENTRY, 0, 1, 1, false };
+    table[h] = ++recs_n;
+    return &recs[recs_n - 1];
+}
+
+// The commit widening (above): a version visible at the lowest commit
+// height is visible down to b_below.
+static void widen(const Versions* v, size_t* lo, size_t hi)
+{
+    if(hi >= commit_min && v->b_below < *lo)
+    {
+        *lo = v->b_below;
+    }
+}
+
+static void current_views(const Versions* v, size_t* lo, size_t* hi)
+{
+    *lo = seg_b[v->top];
+    *hi = view_top;
+    widen(v, lo, *hi);
+}
+
+static void entry_views(const Versions* v, size_t i, size_t* lo, size_t* hi)
+{
+    *lo = lower[i] == NO_ENTRY ? 0 : seg_b[lower[i]];
+    *hi = seg_a[i];
+    widen(v, lo, *hi);
+}
+
+static void push_live(Node* n, size_t lo, size_t hi)
+{
+    if(n == NULL)
+    {
+        return;
+    }
+    if(live_n == live_cap)
+    {
+        live_cap = live_cap == 0 ? 1024 : live_cap * 2;
+        live_work = (LiveItem*)grow(live_work, live_cap, sizeof(LiveItem));
+    }
+    live_work[live_n++] = (LiveItem){ n, lo, hi };
+}
+
+// n is reached from views [lo, hi].
+static void live_reach(Node* n, size_t lo, size_t hi)
+{
+    if(n == NULL)
+    {
+        return;
+    }
+    if(!(n->gc_bits & GC_TRAILED))
+    {
+        if(n->gc_bits & GC_SEEN)
+        {
+            return;  // already scanned from every view
+        }
+        bool all = lo == 0 && hi == view_top;
+        if(!(n->gc_bits & GC_VISITED))
+        {
+            n->gc_bits |= GC_VISITED;
+            if(all)
+            {
+                n->gc_bits |= GC_SEEN;
+            }
+            else
+            {
+                partial_reserve();
+                *find_partial(n) = (Partial){ n, lo, hi, 0 };
+                partial_n++;
+            }
+            push_live(n, lo, hi);
+            return;
+        }
+        Partial* p = find_partial(n);
+        if(lo >= p->lo && hi <= p->hi)
+        {
+            return;
+        }
+        p->lo = lo < p->lo ? lo : p->lo;
+        p->hi = hi > p->hi ? hi : p->hi;
+        if(++p->widenings > MAX_WIDENINGS || (p->lo == 0 && p->hi == view_top))
+        {
+            n->gc_bits |= GC_SEEN;
+            push_live(n, 0, view_top);
+        }
+        else
+        {
+            push_live(n, p->lo, p->hi);
+        }
+        return;
+    }
+    Versions* v = find_versions(n, false);
+    if(v->unreached == 0)
+    {
+        return;
+    }
+    size_t vlo, vhi;
+    if(!v->current)
+    {
+        current_views(v, &vlo, &vhi);
+        if(vlo <= hi && lo <= vhi)
+        {
+            v->current = true;
+            v->unreached--;
+            push_live(n, vlo, vhi);
+        }
+    }
+    // Going down, the versions' highest views only go down.
+    for(size_t i = v->top; i != NO_ENTRY; i = lower[i])
+    {
+        entry_views(v, i, &vlo, &vhi);
+        if(vhi < lo)
+        {
+            break;
+        }
+        if(!reached[i] && vlo <= hi)
+        {
+            reached[i] = true;
+            v->unreached--;
+            push_live(trail->array[i].rhs.n, vlo, vhi);
+        }
+    }
+}
+
+// Reach each of n's children from views [lo, hi]. This follows the same
+// children as scan_node and scan_spill.
+static void live_scan(Node* n, size_t lo, size_t hi)
+{
+    union field* a = n->children[3].a;
+    int len = gc_spill_len(n);
+    if(n->missing < 0)
+    {
+        int nargs = -n->missing;
+        live_reach(n->children[0].n, lo, hi);
+        for(int i = 1; i <= nargs && i < 3; i++)
+        {
+            live_reach(n->children[i].n, lo, hi);
+        }
+        for(int j = 0; j < len && a != NULL; j++)
+        {
+            live_reach(a[j].n, lo, hi);
+        }
+        return;
+    }
+    Symbol* s = n->symbol;
+    switch(s->tag)
+    {
+        case FORWARD_TAG:
+            live_reach(n->children[0].n, lo, hi);
+            return;
+        case CHOICE_TAG:
+            live_reach(n->children[0].n, lo, hi);
+            live_reach(n->children[1].n, lo, hi);
+            return;
+        default:
+            break;
+    }
+    int filled = filled_arity((union field){ .n = n });
+    for(int i = 0; i < filled && i < 3; i++)
+    {
+        if(child_rep(s, i) == R_PTR)
+        {
+            live_reach(n->children[i].n, lo, hi);
+        }
+    }
+    for(int j = 0; j < len && a != NULL; j++)
+    {
+        if(j + 3 < filled && child_rep(s, j + 3) == R_PTR)
+        {
+            live_reach(a[j].n, lo, hi);
+        }
+    }
+}
+
+/* The lowest view frame f's slots can be read in, given lo, the lowest
+ * for the frame above it.
+ * Every undo is run by a frame, to a cutoff it holds: a scoped retry's
+ * R_CUTOFF slot, lazy unification's R_TRAIL slot. (nf_all's undo(0) is
+ * outside the machine; what it reads is a C root, which we reach from every
+ * view.) By the time a frame runs its undo, every frame above it has been
+ * popped. So f is only read in the views that it, or a frame above it,
+ * can undo to. A cutoff not marked yet (0) will be the trail's size when
+ * it's marked, which is never lower than what the frames above can undo
+ * to. A bindIO commit height is counted too, conservatively.
+ */
+static size_t frame_views(Frame* f, size_t lo)
+{
+    for(unsigned short i = 0; i < f->info->size; i++)
+    {
+        FieldRep r = field_rep(f->info->reps, i);
+        size_t h = (size_t)f->slots[i].i;
+        if(r == R_TRAIL && h < lo)
+        {
+            lo = h;
+        }
+        else if(r == R_CUTOFF && h > 0 && h - 1 < lo)
+        {
+            lo = h - 1;
+        }
+    }
+    return lo;
+}
+
+static void clear_trailed_all(size_t size)
+{
+    for(size_t i = 0; i < size; i++)
+    {
+        if(trail->array[i].lhs.n != NULL)
+        {
+            trail->array[i].lhs.n->gc_bits &= (unsigned char)~GC_TRAILED;
+        }
+    }
+}
+
+static void trail_liveness(union field root, Frame* sp)
+{
+    size_t size = trail->size;
+    if(size == 0)
+    {
+        return;
+    }
+    view_top = size;
+    if(entries_cap < size)
+    {
+        entries_cap = size;
+        seg_a = (size_t*)grow(seg_a, size, sizeof(size_t));
+        seg_b = (size_t*)grow(seg_b, size, sizeof(size_t));
+        lower = (size_t*)grow(lower, size, sizeof(size_t));
+        reached = (bool*)grow(reached, size, sizeof(bool));
+        recs = (Versions*)grow(recs, size, sizeof(Versions));
+    }
+    size_t want = 16;
+    while(want < 2 * size)
+    {
+        want *= 2;
+    }
+    if(table_cap < want)
+    {
+        table_cap = want;
+        table = (size_t*)grow(table, table_cap, sizeof(size_t));
+    }
+    memset(table, 0, table_cap * sizeof(size_t));
+    recs_n = 0;
+
+    // Each entry's segment. stop holds 0 and size, sorted (compact_trail).
+    size_t s = 0;
+    for(size_t i = 0; i < size; i++)
+    {
+        while(s + 1 < stop_n && stop[s + 1] <= i)
+        {
+            s++;
+        }
+        seg_a[i] = stop[s];
+        seg_b[i] = stop[s + 1];
+    }
+
+    // The lowest commit height.
+    commit_min = NO_ENTRY;
+    for(Frame* f = sp; (union field*)f < rice_stack_hi;
+        f = (Frame*)((union field*)f + 1 + f->info->size))
+    {
+        for(unsigned short i = 0; i < f->info->size; i++)
+        {
+            if(field_rep(f->info->reps, i) == R_TRAIL && (size_t)f->slots[i].i < commit_min)
+            {
+                commit_min = (size_t)f->slots[i].i;
+            }
+        }
+    }
+
+    // Every node's versions.
+    for(size_t i = 0; i < size; i++)
+    {
+        if(trail->array[i].lhs.n != NULL)
+        {
+            trail->array[i].lhs.n->gc_bits |= GC_TRAILED;
+        }
+    }
+    for(size_t i = 0; i < size; i++)
+    {
+        reached[i] = false;
+        lower[i] = NO_ENTRY;
+        Node* l = trail->array[i].lhs.n;
+        if(l == NULL)
+        {
+            continue;
+        }
+        Node* r = trail->array[i].rhs.n;
+        if(r != NULL && (r->gc_bits & GC_TRAILED))
+        {
+            clear_trailed_all(size);
+            return;
+        }
+        Versions* v = find_versions(l, true);
+        lower[i] = v->top;
+        v->top = i;
+        v->versions++;
+        v->unreached++;
+    }
+    for(size_t k = 0; k < recs_n; k++)
+    {
+        size_t j = recs[k].top;
+        while(j != NO_ENTRY && j >= commit_min)
+        {
+            j = lower[j];
+        }
+        recs[k].b_below = j == NO_ENTRY ? 0 : seg_b[j];
+    }
+
+    // Trace from the roots, which see every view.
+    live_n = 0;
+    if(partial_n > 0)
+    {
+        memset(partial, 0, partial_cap * sizeof(Partial));
+        partial_n = 0;
+    }
+    live_reach(root.n, 0, size);
+    size_t lo = size;
+    for(Frame* f = sp; (union field*)f < rice_stack_hi;
+        f = (Frame*)((union field*)f + 1 + f->info->size))
+    {
+        lo = frame_views(f, lo);
+        for(unsigned short i = 0; i < f->info->size; i++)
+        {
+            if(field_rep(f->info->reps, i) == R_PTR)
+            {
+                live_reach(f->slots[i].n, lo, size);
+            }
+        }
+    }
+    for(size_t i = 0; i < gc_nroots; i++)
+    {
+        live_reach(gc_roots[i]->n, 0, size);
+    }
+    while(live_n > 0)
+    {
+        LiveItem it = live_work[--live_n];
+        live_scan(it.n, it.lo, it.hi);
+    }
+    clear_trailed_all(size);
+
+    // D3
+    size_t placeholders = 0;
+    for(size_t k = 0; k < recs_n; k++)
+    {
+        Versions* v = &recs[k];
+        if(!v->current && v->unreached < v->versions)
+        {
+            Node* l = v->node;
+            l->symbol = &gc_dead_symbol;
+            l->missing = 0;
+            for(int c = 0; c < 4; c++)
+            {
+                l->children[c].n = NULL;
+            }
+            placeholders++;
+        }
+    }
+
+    // D2 and D4, then compact.
+    size_t kept = 0, emptied = 0;
+    for(size_t i = 0; i < size; i++)
+    {
+        kept_below[i] = kept;
+        TrailEntry e = trail->array[i];
+        if(e.lhs.n == NULL || !reached[i])
+        {
+            if(seg_a[i] != i)
+            {
+                continue;
+            }
+            if(e.lhs.n != NULL)
+            {
+                emptied++;
+            }
+            e.lhs.n = NULL;
+            e.rhs.n = NULL;
+        }
+        trail->array[kept++] = e;
+    }
+    kept_below[size] = kept;
+    remap_frame_heights(sp, size);
+    trail->size = kept;
+    if(trail->clean > kept)
+    {
+        trail->clean = kept;
+    }
+#ifdef GC_STATS
+    fprintf(stderr, "gc liveness: %zu entries, %zu kept (%zu emptied), %zu nodes, "
+                    "%zu placeholders, %zu partly reached\n",
+            size, kept, emptied, recs_n, placeholders, partial_n);
+#else
+    (void)emptied;
+    (void)placeholders;
+#endif
+}
+#endif
 #endif
 
 // Copy everything live into a new old generation.
@@ -988,6 +1591,9 @@ static union field collect_major(union field root, Frame* sp)
 {
 #ifndef GC_NO_TRAIL_COMPACT
     compact_trail(sp);
+#ifndef GC_NO_TRAIL_LIVENESS
+    trail_liveness(root, sp);
+#endif
 #endif
     minor = false;
     live_bytes = 0;
@@ -1002,6 +1608,11 @@ static union field collect_major(union field root, Frame* sp)
     {
         old_threshold = GC_MIN_THRESHOLD;
     }
+    trail_threshold = 2 * trail->size;
+    if(trail_threshold < GC_MIN_TRAIL)
+    {
+        trail_threshold = GC_MIN_TRAIL;
+    }
     debug(LOW, "gc: %zu bytes live\n", live_bytes);
 #ifdef GC_STATS
     fprintf(stderr, "gc major: %zu bytes live, next at %zu, %zu trail entries\n",
@@ -1011,7 +1622,7 @@ static union field collect_major(union field root, Frame* sp)
 }
 
 // actually run the collector: a minor collection, then a major one if the
-// old generation has grown past its threshold.
+// old generation or the trail has grown past its threshold.
 // Under GC_STRESS, every 64th collection is also a major one.
 union field gc_collect(union field root, Frame* sp)
 {
@@ -1023,7 +1634,7 @@ union field gc_collect(union field root, Frame* sp)
     static unsigned long count = 0;
     bool major = ++count % 64 == 0;
 #else
-    bool major = old_bytes > old_threshold;
+    bool major = old_bytes > old_threshold || trail->size > trail_threshold;
 #endif
     if(major)
     {

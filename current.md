@@ -9,12 +9,8 @@ Branch `phase1-codegen-and-runtime`, nothing pushed. Newest first:
 - `73fd88a`: the optimizations fixed per the proofs; path compression.
 
 The previous contents of this file (the garbage collector, stage 6) are in
-git history at `eddacd5`. Leak 2 there (the trail keeping snapshots alive,
-`gc/nondet_pending` XFAIL) is still open. One thing in its plan changed:
-step 1 lists `SCOPED_SAVE_CUTOFF` as where a case frame holds a trail
-height. That macro is gone. The cutoff slot (`cutS` in `enterCase`) now
-holds height + 1, or 0 while unmarked, so a height remap must leave 0
-alone and remap `slot - 1`.
+git history at `eddacd5`. Leak 2 there (the trail keeping snapshots alive)
+is closed: gc-plan.md, stage 8.
 
 Suite on 2026-10-28, default flags, before the two commits that follow
 `3916ca7`: 120 pass, 13 xfail, 0 fail (not rerun with all flags on).
@@ -175,7 +171,12 @@ anyway. Reducing it needs a different sound rule, which means proof work.
   are up to 1.8x slower than with the old collector, and fib and
   SearchKanMis about 1.7-2.5x (their trails keep everything alive).
 - `-DGC_VERIFY` checks the barrier and the watermarks at every minor
-  collection. Open: tuning the nursery size; Leak 2.
+  collection. Open: tuning the nursery size.
+- Leak 2 is closed (gc-plan.md stage 8): each major collection compacts
+  the trail, drops entries no view can restore, and overwrites nodes no
+  view can read. `gc/nondet_pending` 645 MB to 47 MB, fib 2.7 GB to
+  49 MB, SearchKanMis 201 MB to 57 MB. Open: whether a later bindIO
+  commit can expose a version it dropped (stage 8, "Open question").
 
 ## Rice vs KiCS2 (2026-10-30)
 
@@ -249,7 +250,7 @@ To do:
   so heap growth between safe points is bounded by a constant times the
   live heap. A test couldn't fail.
 - Still open: `reverse_builtin`'s copying cost (needs a larger growth
-  factor or generations), threshold and chunk-size tuning, and Leak 2.
+  factor or generations), and threshold and chunk-size tuning.
 
 ## Diagnosed 2026-10-28: `gc/strict_fold` is dictionary construction
 
