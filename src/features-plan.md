@@ -16,8 +16,7 @@ compiles but stops the program when it runs.
 
 | feature | modules | today |
 |---|---|---|
-| Mutable references | `Data.IORef` | compile error |
-| `unsafePerformIO` and term inspection | `System.IO.Unsafe` | compile error |
+| Term inspection (`isVar`, `showAnyTerm`, ...) | `System.IO.Unsafe` | runtime error |
 | Exceptions | `Prelude.catch` | runtime error |
 | Encapsulated search | `Control.Search.Unsafe`, `.AllValues`, `.SearchTree`, `.SetFunctions` | compile error |
 | Reading and showing any term | `ReadShowTerm` | runtime error (stub) |
@@ -29,7 +28,6 @@ Gaps in the language itself (all XFAIL in `tests/manifest.txt`):
 |---|---|
 | `(=:=)` normalizes both sides before unifying, so a goal like `xs ++ [x] =:= l` prints its answer and then searches forever | Last, RegExp, SearchQueens, SearchEmbed, SearchHorseman, First, horseman |
 | A free variable can't be narrowed to an `Int` stored as a raw field | SearchGraph |
-| A constructor can have at most 49 children (`child_at_k` stops there) | SatSolver |
 | Only depth-first search, so infinite search spaces never return | BFSvsPar, NDNums (SKIP) |
 
 ------------------------------------------------------------------------------
@@ -37,26 +35,29 @@ Gaps in the language itself (all XFAIL in `tests/manifest.txt`):
 Version 2.0: the small ones
 ---------------------------
 
-Decided 2026-11-02: these three go in 2.0.
+Decided 2026-11-02: these three go in 2.0. Done 2026-11-03.
 
-1. **`Data.IORef`** (`runtime/ext/Data.IORef.c`). An `IORef` is an
-   `external data` node with one pointer field, like `Handle`. `newIORef`
-   allocates it, `prim_readIORef` returns the field, and `prim_writeIORef`
-   overwrites it. The write goes through `gc_remember`, since an old ref
-   can be pointed at a young value. It isn't trailed: an IO action's
-   effects are committed (`bindIO`'s `pop_to`). (Check that KiCS2 and
-   PAKCS agree under `--interactive`-style search.)
-2. **`unsafePerformIO`** (`runtime/ext/System.IO.Unsafe.c`). Evaluate the
-   action the way `run_io` does, then rewrite the call with its result.
-   The term-inspection functions (`isVar`, `identicalVar`, `isGround`,
-   `compareAnyTerm`, `showAnyTerm`, `readsAnyUnqualifiedTerm`,
-   `showAnyExpression`) read the node graph without evaluating it, so
-   they're short C functions too. `spawnConstraint` needs residuation
-   (suspending on a free variable), which rice doesn't have; it stays
-   unsupported, with an error that says so.
-3. **More than 49 children.** Generate the accessors (or index the spill
-   array directly) instead of stopping at `child_at_49`. A codegen and
-   `runtime.h` change; SatSolver is the test.
+1. **`Data.IORef`** (`runtime/ext/Data.IORef.c`). A ref is a box node
+   pointing at a cell node, and a write changes the cell, never the box:
+   the box is an ordinary constructor node, which copy collapsing may
+   duplicate, and every copy has to see the same writes. Writes go through
+   `gc_remember` and aren't trailed, since bindIO commits to an action's
+   effects. Test: `externals/ioref` (matches KiCS2, run under GC_STRESS).
+2. **`unsafePerformIO`** (`runtime/ext/System.IO.Unsafe.c`). The call
+   becomes `act >>= return`, so it runs the way any action does. The
+   term-inspection functions still stop with "not yet implemented"
+   (`lib/System/IO/Unsafe.curry`); `spawnConstraint` needs residuation,
+   which rice doesn't have. Test: `externals/unsafe_io`.
+3. **Any number of children.** `CHILD_AT(r, k)` (`runtime/macros.h`)
+   indexes the spill array for k >= 3, replacing `child_at_0` to
+   `child_at_49`. SatSolver compiles and runs.
+
+Doing these turned up a bug in IO: running an action rewrites its node
+with the result, so a shared action (`let p = putStrLn "hi" in p >> p`)
+ran only once. bindIO now runs a fresh copy of the action each time, and
+points the bind node at the copy so the original call (and its
+arguments, like `writeFile`'s string) can be collected. Test:
+`externals/shared_io`, which matches KiCS2.
 
 ------------------------------------------------------------------------------
 
@@ -131,6 +132,24 @@ Also
 
 - (2026-11-02) `=:=` is strict, not lazy; item 8 was first written as
   "unify lazily", which was wrong. The difference is the evaluation order.
+- (2026-11-03) `--interactive` and IO after a choice: when nf_all
+  backtracks to a choice made before an action ran, the action's effects
+  don't run again correctly. bindIO's commit drops every trail entry made
+  inside the action, including snapshots of nodes older than the choice,
+  so those nodes keep their state from the first run.
+  `gc/trail_commit`'s golden records this, and so does
+  `let c = 0 ? 1; m = if c == 0 then putStrLn "zero" else putStrLn "one"
+  in c `seq` (m >> m)`, whose second solution prints "one" once. It's the
+  open question in `~/curry/papers/unif/proofs/LEAKS.md` about a later
+  commit; KiCS2 rejects nondeterministic IO instead.
+- (2026-11-03) The optimizer (`Rice.Optimize.Inline`) is off by default;
+  `-O` turns it on. Bring it back as the default in 3.0, with strictness
+  analysis, which it needs to pay off (developer's manual, "The
+  optimizer").
+- (2026-11-03) The caches are in rw-data's compact format. Once rice
+  compiles itself, replace that with a reader that builds the terms
+  straight from the file's bytes, with no `String` in between, and maybe a
+  binary format.
 - `-p/--noprelude` and `-e/--external` are listed under `--help-dev` but
   aren't implemented. Remove them, or implement them.
 - Three `old_rice/benchmarks` tests are XFAIL because the programs are

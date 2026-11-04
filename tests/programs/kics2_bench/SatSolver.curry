@@ -1,5 +1,8 @@
 -- From KiCS2's benchmark suite (kics2/benchmarks/suite/SatSolver.curry), with
 -- one change for the modern frontend: deriving Eq on Literal.
+-- testFormula50 is unsatisfiable (checked with an independent DPLL solver,
+-- 2026-11-03), so the golden is "No solutions found". KiCS2 gives no answer
+-- within 15 minutes, capped at 8 GB.
 module SatSolver where
 
 

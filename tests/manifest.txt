@@ -113,7 +113,6 @@ kics2_bench/SearchQueens.curry    XFAIL  times out: permute's `u++v =:= permute 
 kics2_bench/SearchEmbed.curry     XFAIL  times out: `t =:= x++(c:ts)` with rice's normalize-first (=:=) (see above); KiCS2's own harness leaves this one out too
 kics2_bench/SearchHorseman.curry  XFAIL  times out: `int2nat heads =:= m `plus` h` over free Peano naturals with rice's normalize-first (=:=) (see above)
 kics2_bench/SearchGraph.curry     XFAIL  runtime error: "can't narrow a free variable to Int: it has a raw (unboxed) field" (inv's `a =:= g b` with b a free Int)
-kics2_bench/SatSolver.curry       XFAIL  C compile error: a generated node has 51 children, and runtime.h's child_at_k accessors stop at 49
 kics2_bench/PrimesBuiltin.curry   SLOW   about 3.5 s
 kics2_bench/Queens.curry          SLOW   about 4 s
 kics2_bench/QueensUser.curry      SLOW   about 4.5 s

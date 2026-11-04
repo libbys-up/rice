@@ -229,7 +229,7 @@ RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
 
 /* bindIO m f: m is child 0, and f is child 1.
  *
- * Three surprising things here.
+ * Five surprising things here.
  *
  * First, we fully settle m, chasing forwards, not just one HNF call.
  * A do block evaluates one step at a time, so m often lands on a FORWARD
@@ -246,6 +246,26 @@ RICE_CC void Prelude___DL_HT_HT_hnf(union field root, Frame* sp)
  * we drop everything above it with trail_pop_to (which doesn't restore anything).
  *
  * Third, if m fails, the bind fails, whatever f is.
+ *
+ * Fourth, we run a copy of m, not m itself. Running an action rewrites its
+ * node with the result, so if m were shared (`let p = putStrLn "hi" in
+ * p >> p`, or `sequence_ (replicate 3 p)`), only its first run would do
+ * anything, and every later one would just find the first result. So each
+ * time bind_k reaches an unevaluated call, through any number of forwards,
+ * it evaluates a fresh copy of it (io_fresh, with clone_node). The copy
+ * shares its children, so the pure work in building the action, like
+ * evaluating putStrLn's string, is still done once.
+ *
+ * Fifth, once bind_k has made that copy, root's child 0 points at the
+ * copy, not the original. Otherwise root would keep the original call
+ * alive while the copy runs, and with it the call's arguments: for
+ * `writeFile f s`, the head of s, so every cell of s that the copy has
+ * already written stays live (tests/programs/externals/lazy_readfile).
+ * Changing root's child is a rewrite of root with something equal to it,
+ * like any other step of root's evaluation, so it's trailed the same way
+ * (trail_node), in case a choice made since root was built is undone and
+ * root runs again. If the action is shared, the other references keep the
+ * original, which is right: they run it again.
  *
  * On the machine: bind_k settles m with frame [root, m, nondet, cutoff].
  * Then that frame is replaced by a commit frame [cutoff] while `apply f m` runs,
@@ -271,12 +291,40 @@ RICE_CC void Prelude__bindIO_hnf(union field root, Frame* sp)
     MUSTTAIL return bind_k(NO_ROOT, sp);
 }
 
+// Chase m's forwards; if that ends at an unevaluated call, return a fresh
+// copy of the call to run instead (bindIO's fourth point, above).
+static inline field io_fresh(field m, bool* nondet)
+{
+    while(true)
+    {
+        *nondet |= m.n->nondet;
+        unsigned char t = TAG(m);
+        if(t == FORWARD_TAG)
+        {
+            m = follow_forward(m);
+        }
+        else
+        {
+            return t == FUNCTION_TAG ? clone_node(m) : m;
+        }
+    }
+}
+
 static RICE_CC void bind_k(union field _root, Frame* sp)
 {
     (void)_root;
     field root = SLOT(0);
-    field m = SLOT(1);
     bool nondet = SLOT(2).i;
+    field m = io_fresh(SLOT(1), &nondet);
+    if(TAG(m) == FUNCTION_TAG)
+    {
+        // m is a fresh copy (io_fresh). Point root at it instead of at the
+        // call it was copied from, so root no longer keeps that call, and
+        // its arguments, alive (bindIO's fifth point, above).
+        trail_node(root, nondet);
+        gc_remember(root.n);
+        child_at(root, 0) = m;
+    }
     EVAL_OR_CONTINUE(m, 1, nondet, 2);
     long cutoff = SLOT(3).i;
     sp = frame_pop(sp);

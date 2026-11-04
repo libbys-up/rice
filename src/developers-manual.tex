@@ -150,7 +150,8 @@ ones you'll use most print an intermediate stage: \code{-f} (FlatCurry),
 optimizer), \code{--printANF}, \code{-i} (ICurry), and
 \code{--print-fieldreps}.  \code{--stop-...} prints a stage and stops.
 \code{--trace-optimize} prints every rewrite the optimizer makes.
-\code{--compiler-time} times each stage.
+\code{--compiler-time} times each stage.  \code{-O} (\code{--run-optimizer})
+turns on the optimizer, which is off by default (\S\ref{sec:optimizer}).
 
 Options for the generated program:
 \begin{itemize}
@@ -349,15 +350,16 @@ shortcutting) come from it.
   \node[pass, below=of fe] (str) {\code{condenseStrings}};
   \node[pass, below=of str] (unbox) {\code{unbox}};
   \node[pass, below=of unbox] (rep) {\code{replace}};
-  \node[pass, below=of rep] (opt) {\code{optimizeProg}};
+  \node[pass, below=of rep] (opt) {\code{optimizeProg} (with \code{-O})};
   \node[pass, below=of opt] (anf) {\code{normalize} (ANF)};
   \node[pass, below=of anf] (fr) {\code{fieldRepTable}};
   \node[pass, below=of fr] (unt) {\code{removeTypes}};
-  \node[pass, below=of unt] (ic) {\code{flatCurry2ICurry}};
+  \node[pass, below=of unt] (ml) {\code{mergeLets}};
+  \node[pass, below=of ml] (ic) {\code{flatCurry2ICurry}};
   \node[pass, below=of ic] (cg) {\code{toHeader}, \code{toSource}};
   \node[pass, below=of cg] (cc) {C compiler, linker};
   \foreach \a/\b in {fe/str, str/unbox, unbox/rep, rep/opt, opt/anf, anf/fr,
-                     fr/unt, unt/ic, ic/cg, cg/cc}
+                     fr/unt, unt/ml, ml/ic, ic/cg, cg/cc}
     \draw[-{Stealth}] (\a) -- (\b);
   \node[data, right=0.5cm of fe] {\file{.tfcy}: typed FlatCurry};
   \node[data, right=0.5cm of opt] {cached as \file{.rtfcy}};
@@ -426,7 +428,8 @@ gets a directory \file{.curry/rice-1.0.0/} next to its source (Prelude's is
 \begin{center}
 \begin{tabular}{@{}ll@{}}
 \toprule
-\file{.rtfcy} & the optimized typed FlatCurry \\
+\file{.rtfcy} & the typed FlatCurry after the optimizer (if it ran) \\
+\file{.rmode} & whether the optimizer ran: \code{optimized} or \code{plain} \\
 \file{.rfcy} & the untyped FlatCurry after ANF \\
 \file{.rimports} & just the module's imports \\
 \file{.h}, \file{.c} & the generated C \\
@@ -437,12 +440,29 @@ gets a directory \file{.curry/rice-1.0.0/} next to its source (Prelude's is
 \end{center}
 
 A module is \emph{stale} if its \file{.rtfcy} is missing, or older than its
-\file{.tfcy} or than any import's \file{.rtfcy} (\code{needsRecompile}).  A
+\file{.tfcy} or than any import's \file{.rtfcy}, or if its \file{.rmode}
+is missing or says it was compiled with the optimizer set the other way
+(\code{needsRecompile}).  So switching \code{-O} on or off recompiles
+everything once, Prelude included.  A
 stale module is compiled from scratch.  Otherwise we read its \file{.rtfcy}
 instead of optimizing it, and its \file{.rfcy} instead of running the rest of
 the pipeline, and keep its \file{.h} and \file{.c}.  Cache files are only
 rewritten when their contents change (\code{writeFileIfChanged}), so an
 unchanged result doesn't make the modules importing it stale.
+
+The \file{.rtfcy} and \file{.rfcy} files are in the compact format of the
+\code{rw-data} package (\code{RW.Base}), not written with \code{show}.  The
+\code{ReadWrite} instances for untyped FlatCurry come with the flatcurry
+package (\code{FlatCurry.TypesRW}); the typed ones are in
+\file{Rice/Build/TypedRW.curry}, and have to change if
+\code{FlatCurry.Typed.Types} does.  Rice is compiled with KiCS2, where reading
+Prelude's \file{.rtfcy} with derived \code{read} took 6 seconds and 3.3~GB:
+a \code{String} costs about 80 bytes a character there, and \code{read}'s
+backtracking parser keeps all of it live.  Every compile reads Prelude's
+caches, so that was most of the time and memory of compiling a small program.
+In the compact format a warm compile takes well under a second.  Once Rice
+compiles itself, a reader written for Rice that builds the terms straight
+from the file's bytes, never making a \code{String}, would do better still.
 
 The \file{.rimports} file exists because reading any field of a \code{TProg}
 parses the whole \file{.tfcy}, which takes seconds for Prelude.
@@ -540,6 +560,16 @@ original.  A different constraint changes the number of (dictionary)
 arguments.
 
 \subsection{The optimizer}
+\label{sec:optimizer}
+
+The optimizer is off by default, and \code{-O} turns it on.  Measured on
+twenty of KiCS2's benchmarks (November 2026), it made \code{Tak} 26\% faster,
+three others 5--7\% faster, five 2--5\% slower, and the rest no different,
+while tripling compile time and making Prelude's C 2.3 times bigger
+(9.8~MB against 4.2~MB).  Without strictness analysis, inlining mostly moves
+the same thunks and cases into the caller.  It stays in the compiler, tested
+with \code{-O}, until there's strictness analysis to make it pay.
+
 
 The optimizer is a set of rewrite rules on typed FlatCurry expressions
 (\code{Rice.Optimize.Inline}), applied bottom-up until none applies, by the
@@ -661,6 +691,18 @@ function's parameters are variables of the original, with the same numbers.
 So in the generated code, a function has at most one constructor case, at the
 end of its block, and a \code{let} in the middle of a body becomes a call to a
 lifted function.
+
+ICurry generation lifts a \code{let} whose body is another \code{let}, too,
+into a function taking every variable live in the body.  ANF turns a nested
+term into a chain of single-binding \code{let}s, and a term's subterms are
+bound early and used only when the term is built, so a chain of $n$ became
+$n$ functions with about $n^2/2$ parameters in all (SatSolver: 2,289 functions
+and 42~MB of C).  So just before ICurry, \code{Rice.Transform.MergeLets}
+merges each chain into one \code{let} with all the bindings, in order.  That's
+safe because variable numbers are unique within a function and the outer
+bindings never refer to the inner ones.  Only a \code{case} after a
+\code{let}, or in a binding, is lifted now.  ANF itself keeps the \code{let}s
+apart, for later optimizations.
 
 \subsection{Generated code}
 \label{sec:generated}
@@ -878,7 +920,9 @@ typedef union field
 Every node has room for four children.  Nearly every node has three or fewer.
 When a node has more than three, \code{children[3]} instead points to a
 \emph{spill array} holding children 3 and up.  The \code{child_at} macros hide
-this: \code{child_at(n, 5)} expands to \code{n.n->children[3].a[2]}.
+this: \code{child_at(n, 5)} is \code{n.n->children[3].a[2]}.  It's one macro,
+\code{CHILD_AT(r, k)} in \file{macros.h}, so a constructor can have any number
+of children.
 
 \paragraph{Field reps.}  The union means we lose track of which children are
 pointers.  Evaluation doesn't care, because generated code knows the types, but
@@ -1204,6 +1248,24 @@ reach that choice anymore, but the entry would still be on the trail, and
 above it (\code{trail_pop_to}, which restores nothing) once it's done.  This
 commits to every choice made along the way.
 
+\paragraph{Shared actions.}  Running an action rewrites its node with the
+result, so if \code{bind_k} ran the action's own node, a shared action
+(\code{let p = putStrLn "hi" in p >> p}) would run only once, and every later
+use would find the first result.  So whenever \code{bind_k} reaches an
+unevaluated call, it runs a fresh copy of it (\code{io_fresh},
+\code{clone_node}), which shares the call's arguments.  Then it points the
+bind node's child at the copy.  Otherwise the bind node would keep the
+original call alive while the copy runs, and with it the call's arguments:
+for \code{writeFile f s}, the head of \code{s}, so every character already
+written would stay live.  That change to the bind node is a rewrite like any
+other, and \code{trail_node} trails it when a choice could undo it.
+
+This doesn't make IO after a choice right in \code{--interactive}.  When
+\code{nf_all} backtracks to a choice made before an action ran, the commit has
+already dropped the trail entries made inside the action, including snapshots
+of nodes older than the choice, so those nodes keep their state from the first
+run.  See \file{src/features-plan.md}.
+
 %----------------------------------------------------------------------
 \subsection{Making backtracking cheaper}
 \label{sec:opts}
@@ -1400,8 +1462,16 @@ operation ends the program with the C library's reason
 (\code{ext_io_error}).  Stubs that stop with an error (\code{ext_unsupported}):
 \code{catch}, \code{System.IOExts}'s commands with pipes, and
 \code{ReadShowTerm}, which would need a table of every constructor.  Modules
-with externals and no file yet: \code{Data.IORef}, \code{System.IO.Unsafe},
-and \code{Control.Search.*}.
+with externals and no file yet: \code{Control.Search.*}.
+
+An \code{IORef} (\file{ext/Data.IORef.c}) is a box node pointing at a cell
+node.  A write changes the cell, never the box: the box is an ordinary
+constructor node, which copy collapsing may duplicate, and every copy has to
+see the same writes.  Writes go through \code{gc_remember}, since an old cell
+can be pointed at a young value, and aren't trailed, since \code{bindIO}
+commits to an action's effects.  \code{unsafePerformIO act}
+(\file{ext/System.IO.Unsafe.c}) rewrites itself to \code{act >>= return} and
+runs that like any other action.
 
 Most are written as machine code with a continuation (\code{bind_k},
 \code{strict_k}, \code{lu_k}); those are the examples to copy when you write a

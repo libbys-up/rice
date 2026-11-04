@@ -160,6 +160,28 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 - In the proofs repo, `vm_compute` over 400 seeds segfaults. Run chunks
   of about 25 seeds with `ulimit -s 65520`.
 
+## Toward 2.0 (2026-11-03)
+
+- `Data.IORef`, `unsafePerformIO`, and constructors with any number of
+  children (`CHILD_AT`) are in (src/features-plan.md, "Version 2.0").
+- A shared IO action runs every time it's used: bindIO runs a fresh copy
+  and points the bind node at the copy (developer's manual, "Shared
+  actions"). Tests: `externals/{shared_io,ioref,unsafe_io}`, matching
+  KiCS2. `lazy_readfile` peaks at 28 MB (was 100 MB).
+- `Rice.Transform.MergeLets`, just before ICurry, merges `let` chains;
+  ANF keeps them apart. SatSolver compiles in seconds (42 MB of C before).
+  Generated C byte-identical to merging in ANF, for 30 files.
+- The optimizer is off by default (`-O`/`--run-optimizer` turns it on):
+  it helped only Tak (26%) on twenty KiCS2 benchmarks and tripled compile
+  time. The Rice vs KiCS2 numbers below were taken with it on.
+- The caches (`.rtfcy`, `.rfcy`) are in rw-data's compact format, and a
+  `.rmode` file records whether the optimizer ran. Derived `read` of
+  Prelude's `.rtfcy` under KiCS2 took 6 s and 3.3 GB, which was nearly
+  all of a small program's compile. A warm compile now takes about 0.2 s
+  and 126 MB; a cold one (compiling Prelude) 15 s and 2 GB.
+- Open: `--interactive` with IO after a choice doesn't rerun the action's
+  effects correctly on backtracking (features-plan.md, "Also").
+
 ## Collector and IO (2026-11-01)
 
 - `readFile` is lazy (4 KB blocks, re-readable by offset), and

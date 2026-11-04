@@ -42,6 +42,7 @@ import Rice.Transform.Unbox   (unbox)
 import Rice.Transform.Untype  (removeTypes)
 import Rice.Transform.StrLit  (condenseStrings)
 import Rice.Transform.Order   (orderFuns)
+import Rice.Transform.MergeLets (mergeLets)
 import Rice.Optimize.FunTable (FunTable, makeFunTable)
 import Rice.Optimize.Inline   (optimizeProg, optimizeRules)
 import Rice.Build.Deps        (ModuleGraph, buildModuleGraph, topoSort)
@@ -119,7 +120,7 @@ run graph rootModule opts (importedFT, impFcys, impReps) mname = do
       forced  = (has SForceRecompile && mname == rootModule)
                 || mname `elem` [n | SForceRecompileModule n <- opts]
   when (has SPrintLoops) (readModule mname >>= showLoops)
-  stale <- if forced then return True else needsRecompile mname imports
+  stale <- if forced then return True else needsRecompile (has SOptimize) mname imports
   optimized <- if stale
     then optimizeModule opts importedFT mname
     else do say opts ("Skipping " ++ mname)
@@ -168,12 +169,12 @@ optimizeModule opts importedFT mname = do
   let (_, loopBreakers) = orderFuns replaced
       ownFT             = makeFunTable loopBreakers (tProgTFuncs replaced)
       fullFT            = Map.union ownFT importedFT
-  result <- if has SNoOptimize
-              then return replaced
-              else timePure timing (stage "optimize") (optimizeProg fullFT replaced)
+  result <- if has SOptimize
+              then timePure timing (stage "optimize") (optimizeProg fullFT replaced)
+              else return replaced
   stopIf SStopOptimize "after optimize" result
   when (has STraceOptimize) (mapM_ (traceOptimize fullFT) (tProgTFuncs replaced))
-  timeIO timing (stage "writeOptIfChanged") (writeOptIfChanged mname result)
+  timeIO timing (stage "writeOptIfChanged") (writeOptIfChanged (has SOptimize) mname result)
   return result
  where
   has opt     = opt `elem` opts
@@ -213,7 +214,7 @@ generateModule opts impFcys impReps mname optimized = do
   when (has SPrintFlatCurryRaw) (print fcy)
   timeIO timing (stage "writeFcyIfChanged") (writeFcyIfChanged mname fcy)
   icy <- timeIO timing (stage "flatCurry2ICurryWithProgs")
-                (flatCurry2ICurryWithProgs defaultICOptions impFcys fcy)
+                (flatCurry2ICurryWithProgs defaultICOptions impFcys (mergeLets fcy))
   when (has SPrintICurry) (showICurry icy)
   createDirectoryIfMissing True (takeDirectory hPath)
   timeIO timing (stage "write .h/.c") $ do
@@ -400,7 +401,7 @@ data CompilerOptions
   -- stopping after a stage
   | SStopRaw | SStopCondense | SStopUnbox | SStopReplace | SStopOptimize
   -- compiling
-  | SNoOptimize | SLintFieldReps | SInteractive | SNoPrelude | SMakeExt
+  | SOptimize | SLintFieldReps | SInteractive | SNoPrelude | SMakeExt
   -- building the executable
   | SUseGCC | SDebug Int | SCFlags String
   -- caching
@@ -478,7 +479,7 @@ devOptDescrs =
   , Option []  ["stop-optimize"]   (NoArg SStopOptimize)      "print optimize's output, then stop"
 
   -- compiling
-  , Option []  ["no-optimize"]     (NoArg SNoOptimize)        "skip Rice.Optimize.Inline"
+  , Option "O" ["run-optimizer"]   (NoArg SOptimize)          optimizeHelp
   , Option []  ["lint-fieldreps"]  (NoArg SLintFieldReps)     lintHelp
   , Option "p" ["noprelude"]       (NoArg SNoPrelude)         "don't include Prelude (not implemented)"
   , Option "e" ["external"]        (NoArg SMakeExt)           "make/overwrite external file (not implemented)"
@@ -488,6 +489,8 @@ devOptDescrs =
   , Option []  ["compiler-time"]   (NoArg SCompilerTime)      "print how long each compiler stage takes, in ms"
   ]
  where
+  optimizeHelp    = "run Rice.Optimize.Inline (off by default: it barely "
+                    ++ "helps yet, and triples compile time)"
   fieldRepsHelp   = "print which fields and variables hold raw Int#/Char#/Float# values"
   lintHelp        = "fail the compile if a raw value could reach a pointer slot, "
                     ++ "in every regenerated module (also on with --debug)"

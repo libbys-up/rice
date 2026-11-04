@@ -28,8 +28,7 @@
 #define FORWARD_TAG  3
 #define FREE_TAG     4
 
-/* These need to be #defines because I do tricky name concatenation.
- * child_at(r,k) get the kth child of a node where k is a constant
+/* child_at(r,k) get the kth child of a node where k is a constant
  * child_at_n same a child_at, but returns Node*
  * child_at_i same a child_at, but returns long (Int)
  * child_at_f same a child_at, but returns double (Float)
@@ -37,12 +36,12 @@
  * child_at_a same a child_at, but returns field*
  */
 
-#define child_at(r, k) child_at_##k(r.n)
-#define child_at_n(r, k) child_at_##k(r.n).n
-#define child_at_i(r, k) child_at_##k(r.n).i
-#define child_at_c(r, k) child_at_##k(r.n).c
-#define child_at_f(r, k) child_at_##k(r.n).f
-#define child_at_a(r, k) child_at_##k(r.n).a
+#define child_at(r, k) CHILD_AT((r).n, k)
+#define child_at_n(r, k) CHILD_AT((r).n, k).n
+#define child_at_i(r, k) CHILD_AT((r).n, k).i
+#define child_at_c(r, k) CHILD_AT((r).n, k).c
+#define child_at_f(r, k) CHILD_AT((r).n, k).f
+#define child_at_a(r, k) CHILD_AT((r).n, k).a
 
 /* child_at_v is child_at for a variable index i.
  * This does computation at runtime, so use it only when you need to.
@@ -434,6 +433,7 @@ extern unsigned int current_epoch;
 static inline void fail(union field root);
 union field copy(union field node);
 void save_copy(union field n);
+union field clone_node(union field n);
 void save_snapshot(union field n);
 
 /* Does rewriting `root` in place need a trail entry first?

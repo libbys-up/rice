@@ -399,23 +399,31 @@ static RICE_CC void apply_k(union field _root, Frame* sp)
 // code for backtracking
 //////////////////////////////////////////////////////////////////////////////
 
-// push (node -> copy(node)) on the trail, leaving node itself unchanged.
-// A whole-node memcpy, so the snapshot keeps node's own epoch and nondet
-// flag, and undo() puts both back. The snapshot gets its own copy of the
-// spill array: an array has one owner (memory.h).
-void save_snapshot(union field node)
+// A fresh node with node's contents, epoch and nondet flag included. The
+// copy gets its own spill array: an array has one owner (memory.h).
+// Unlike copy() above, it keeps node's epoch, and it handles apply nodes,
+// whose spill length isn't their symbol's arity.
+union field clone_node(union field node)
 {
-    union field saved;
-    saved.n = (Node*)alloc(sizeof(Node));
-    node_copy_fresh(saved.n, node.n);
+    union field c;
+    c.n = (Node*)alloc(sizeof(Node));
+    node_copy_fresh(c.n, node.n);
     int len = gc_spill_len(node.n);
     if(len > 0 && node.n->children[3].a != NULL)
     {
-        saved.n->children[3].a = alloc_spill((size_t)len);
-        memcpy(saved.n->children[3].a, node.n->children[3].a,
+        c.n->children[3].a = alloc_spill((size_t)len);
+        memcpy(c.n->children[3].a, node.n->children[3].a,
                (size_t)len * sizeof(union field));
     }
-    trail_push(trail, node, saved, false);
+    return c;
+}
+
+// push (node -> copy(node)) on the trail, leaving node itself unchanged.
+// The snapshot keeps node's own epoch and nondet flag, and undo() puts
+// both back.
+void save_snapshot(union field node)
+{
+    trail_push(trail, node, clone_node(node), false);
 }
 
 // save_snapshot, then mark node nondet. Always trails: used where the
