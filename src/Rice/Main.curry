@@ -10,13 +10,13 @@
 
 module Rice.Main where
 
-import System.Environment (getArgs)
+import System.Environment (getArgs, getEnv)
 import System.Console.GetOpt
 import System.Directory   (createDirectoryIfMissing, doesFileExist,
                            doesDirectoryExist, getDirectoryContents,
                            getModificationTime)
 import System.FilePath    (takeDirectory, takeExtension, replaceExtension,
-                           takeFileName,
+                           takeFileName, splitSearchPath,
                            (</>), (<.>))
 import System.Process     (system, exitWith)
 import Data.Time          (ClockTime)
@@ -248,6 +248,7 @@ generateModule opts impFcys impReps mname optimized = do
 buildExecutable :: [CompilerOptions] -> [String] -> Map.Map String [QName]
                 -> IO ()
 buildExecutable opts modNames externals = do
+  cc <- findCCompiler opts
   home <- riceHome
   let runtimeDir = home </> "runtime"
       rootModule = last modNames
@@ -267,9 +268,14 @@ buildExecutable opts modNames externals = do
       incFlags     = map ("-I" ++) (runtimeDir : incDirs)
       runtimeFiles = map (runtimeDir </>) [ "runtime.c", "trail.c", "machine.c"
                                           , "heap.c", "gc.c", "ext.c" ]
-      allCFiles    = runtimeFiles ++ extFiles ++ map fst cHs ++ [mainPath]
-  writeFileIfChanged mainPath
-    (pPrint (writeMain rootModule home (mainModeOpt opts)))
+      noLink       = SNoLink `elem` opts
+      -- With --no-link there's no executable, so no driver either: the
+      -- root module needn't have a main.
+      allCFiles    = runtimeFiles ++ extFiles ++ map fst cHs
+                     ++ (if noLink then [] else [mainPath])
+  when (not noLink) $
+    writeFileIfChanged mainPath
+      (pPrint (writeMain rootModule home (mainModeOpt opts)))
   -- Only the hand-written runtime headers count here. A module's generated
   -- .h is always rewritten together with its .c, so the ordinary .c-vs-.o
   -- check already covers it; counting it here would make any module's
@@ -277,21 +283,23 @@ buildExecutable opts modNames externals = do
   hdrTime <- newestHeaderTime [runtimeDir]
   objs <- mapM (compileObj (SVerbose `elem` opts) cc codeFlags incFlags hdrTime)
                allCFiles
-  let cmd = unwords ([cc] ++ objs ++ ["-lm", "-o", rootModule])
-  say opts ("Linking: " ++ cmd)
-  code <- system cmd
-  if code == 0
-    then say opts ("Built ./" ++ rootModule)
-    else do putStrLn ("Link failed (exit code " ++ show code ++ ")")
-            exitWith 1
+  if noLink then say opts ("Compiled " ++ rootModule ++ " (not linked)")
+            else link cc objs rootModule
  where
-  cc = if SUseGCC `elem` opts then "gcc" else "clang"
   -- The last --debug wins.
   debugFlag = case [n | SDebug n <- opts] of
     [] -> []
     ns -> ["-DDEBUG=" ++ show (last ns)]
   -- Every --cflags is used, and each can hold several flags.
   cflags = concatMap words [s | SCFlags s <- opts]
+  link cc objs rootModule = do
+   let cmd = unwords ([cc] ++ objs ++ ["-lm", "-o", rootModule])
+   say opts ("Linking: " ++ cmd)
+   code <- system cmd
+   if code == 0
+     then say opts ("Built ./" ++ rootModule)
+     else do putStrLn ("Link failed (exit code " ++ show code ++ ")")
+             exitWith 1
 
 --- Each module's external functions, from its untyped FlatCurry. Only the
 --- ones the optimizer kept are there, which are the ones the program uses.
@@ -367,6 +375,37 @@ compileObj verbose cc codeFlags incFlags hdrTime cFile = do
       s <- readFile path
       length s `seq` return (Just s)
 
+--- The C compiler to build with:
+---  1. `gcc`, with `--gcc`;
+---  2. `$RICE_CC`, if it's set, as is;
+---  3. the first of `clang`, `clang-22`, ..., `clang-13` on `$PATH`;
+---  4. `$CC`, if it's set;
+---  5. `gcc`, if it's on `$PATH`.
+--- Rice's generated code needs `musttail`: clang 13 or later, or gcc 15 or
+--- later. Clang comes before `$CC` because `CC` is often an older gcc,
+--- which would fail with confusing errors.
+findCCompiler :: [CompilerOptions] -> IO String
+findCCompiler opts
+  | SUseGCC `elem` opts = return "gcc"
+  | otherwise = do
+  riceCC <- getEnv "RICE_CC"
+  if not (null riceCC) then return riceCC else do
+    dirs <- fmap splitSearchPath (getEnv "PATH")
+    cc   <- getEnv "CC"
+    let clangs = "clang" : [ "clang-" ++ show n | n <- [22, 21 .. 13 :: Int] ]
+    found <- filterM (onPath dirs) clangs
+    case found of
+      (c : _) -> return c
+      []      -> if not (null cc) then return cc else do
+        gcc <- onPath dirs "gcc"
+        if gcc then return "gcc" else do
+          putStrLn ("rice: no C compiler found. Rice needs clang 13 or later "
+                    ++ "(or gcc 15 or later). Install one, or set RICE_CC "
+                    ++ "to the compiler to use.")
+          exitWith 1
+ where
+  onPath dirs exe = fmap or (mapM (\d -> doesFileExist (d </> exe)) dirs)
+
 --- The name of the directory for objects built by `invocation` (the
 --- compiler and its flags): `obj-` and a hash of it.
 objDirName :: String -> String
@@ -405,7 +444,7 @@ data CompilerOptions
   -- building the executable
   | SUseGCC | SDebug Int | SCFlags String
   -- caching
-  | SForceRecompile | SForceRecompileModule String
+  | SForceRecompile | SForceRecompileModule String | SNoLink
   -- other
   | SVerbose | SCompilerTime | SHelp | SHelpDev
  deriving (Show, Eq)
@@ -436,8 +475,9 @@ optDescrs = userOptDescrs ++ devOptDescrs
 userOptDescrs :: [OptDescr CompilerOptions]
 userOptDescrs =
   [ Option []  ["interactive"]     (NoArg SInteractive)       interactiveHelp
-  , Option "x" ["gcc"]             (NoArg SUseGCC)            "use GCC instead of clang"
+  , Option "x" ["gcc"]             (NoArg SUseGCC)            "use gcc as the C compiler (otherwise $RICE_CC, clang, $CC, then gcc)"
   , Option []  ["cflags"]          (ReqArg SCFlags "FLAGS")   cflagsHelp
+  , Option []  ["no-link"]         (NoArg SNoLink)            "compile the module (a file, or a module name like Data.List) and its imports, but don't link; it needn't have main"
   , Option []  ["force-recompile"]        (NoArg SForceRecompile)               forceHelp
   , Option []  ["force-recompile-module"] (ReqArg SForceRecompileModule "MODULE") forceModuleHelp
   , Option "v" ["verbose"]         (NoArg SVerbose)           "say which modules are compiled, and print each C compiler and linker command"

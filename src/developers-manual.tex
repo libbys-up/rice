@@ -116,27 +116,43 @@ We write three kinds of documentation, and each has its own home
 
 \subsection{Building Rice}
 
-You need KiCS2 (Rice is a KiCS2 program), the Curry package manager
-\code{cypm}, Haskell Stack (or cabal) for the front end, and clang (or gcc,
-with \code{--gcc}).  From the project root,
+To work on Rice you need KiCS2 3.5 (Rice is a KiCS2 program) with its
+\code{cypm}, and clang 13 or later (or gcc 15 or later).  From the project root,
 \begin{lstlisting}[language=bash]
 git submodule update --init
 make CYPM=~/opt/kics2/bin/cypm
 \end{lstlisting}
-builds the front end into \file{bin/} (\code{make frontend}, about 12 minutes
-the first time), installs \code{rice} into \file{~/.cpm/bin}
-(\code{make rice}), and compiles Prelude (\code{make prelude}).  While working
-on the compiler, rebuild just \code{rice} with
+puts a front end in \file{bin/} (\code{make frontend}), installs \code{rice}
+into \file{~/.cpm/bin} (\code{make rice}), and compiles the standard library
+(\code{make stdlib}).  \code{make frontend} (\file{tools/get-frontend.sh})
+reuses a front end of the right version if you have one (KiCS2's or PAKCS's,
+or \code{RICE_FRONTEND}), and otherwise downloads a prebuilt one, or builds
+it from the \file{frontend/} submodule with Stack or cabal (about 12 minutes
+the first time).  \code{make rice} stops if \code{CYPM} isn't KiCS2's:
+\code{cypm} builds with whichever Curry system it belongs to, and a
+PAKCS-built Rice fails on every program.  While working on the compiler,
+rebuild just \code{rice} with
 \begin{lstlisting}[language=bash]
 PATH=~/opt/kics2/bin:$PATH cypm install
 \end{lstlisting}
-Put KiCS2 first on your \code{PATH}: \code{cypm} builds with whichever Curry
-system it finds, and Rice is only tested built with KiCS2.
+
+Users install from a release tarball instead, which needs only \code{make}
+and a C compiler: \code{make -j from-seed} builds \file{bin/rice} from the C
+Rice generated for itself (\file{seed/}, made by \code{make seed},
+\file{tools/make-seed.sh}), and \code{make install PREFIX=...} installs it
+(the README has the steps).  \file{src/bootstrap-plan.md} has the design.
 
 At run time Rice finds its standard library (\file{lib/}), its runtime
-(\file{runtime/}) and its Prelude replacements (\file{replace/}) in the
-directory it was installed from.  Set \code{RICEHOME} to use another copy.
-Rice also needs a Curry front end (\S\ref{sec:frontend}).
+(\file{runtime/}) and its Prelude replacements (\file{replace/}) in its home
+directory: \code{RICEHOME} if it's set; otherwise, for a Rice built by Rice,
+the directory it was built or installed in (\code{rice_install_dir}); and
+for a Rice built by \code{cypm}, the clone it was built from.  An installed
+\file{bin/rice} is a script that sets \code{RICEHOME}.  Rice also needs a
+Curry front end (\S\ref{sec:frontend}) and a C compiler: \code{$RICE_CC},
+then \code{clang} or \code{clang-NN}, then \code{$CC}, then \code{gcc}
+(\code{findCCompiler}).  \code{rice --no-link M} compiles module \code{M} and
+its imports without linking, which is how \code{make stdlib} precompiles the
+library.
 
 \subsection{Running it}
 

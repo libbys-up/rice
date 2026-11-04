@@ -1,0 +1,5 @@
+# SHA-256 checksums of the prebuilt front ends on rice's GitHub releases
+# (tag frontend-<version>), one line per platform, in sha256sum's format:
+#   <sha256>  curry-frontend-<version>-<os>-<arch>.gz
+# tools/get-frontend.sh only downloads a file listed here. The release
+# workflow (.github/workflows/release.yml) prints the lines to add.
