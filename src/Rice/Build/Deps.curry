@@ -12,10 +12,8 @@ module Rice.Build.Deps
 import qualified Data.Map as Map
 import Data.SCC (scc)
 
-import FlatCurry.Typed.Goodies (tProgName, tProgImports)
-
 import Rice.Build.Cache (readCachedImports, writeCachedImports)
-import Rice.Frontend    (readModule)
+import Rice.Frontend    (readModuleHeader)
 import Rice.Diagnostics (timeIO)
 
 --- Every module reachable from the root, mapped to its direct imports.
@@ -24,17 +22,15 @@ type ModuleGraph = Map.Map String [String]
 
 --- Finds every module reachable from `root` and each one's imports.
 ---
---- We parse `root` itself, because that's the only way to learn its module
---- name. For every other module we try the `.rimports` cache first
---- (`Rice.Build.Cache.readCachedImports`), because reading any part of a
---- `TProg` parses the whole `.tfcy`, which takes seconds for Prelude. We
---- only parse a module when its `.tfcy` has changed, and then it's almost
---- always stale and has to be recompiled anyway.
+--- We read `root`'s header itself, because that's the only way to learn its
+--- module name. For every other module we try the `.rimports` cache first
+--- (`Rice.Build.Cache.readCachedImports`), and otherwise read the header of
+--- its `.tfcy` (`Rice.Frontend.readModuleHeader`), which skips parsing the
+--- rest.
 buildModuleGraph :: Bool -> String -> IO ModuleGraph
 buildModuleGraph timing root = do
-  rootProg <- timeIO timing (root ++ ": readModule (root)") (readModule root)
-  let rootName = tProgName rootProg
-      rootImps = tProgImports rootProg
+  (rootName, rootImps) <- timeIO timing (root ++ ": readModuleHeader (root)")
+                                  (readModuleHeader root)
   writeCachedImports rootName rootImps
   go (Map.singleton rootName rootImps) rootImps
  where
@@ -50,9 +46,8 @@ buildModuleGraph timing root = do
     cached <- readCachedImports m
     case cached of
       Just imps -> return imps
-      Nothing   -> timeIO timing (m ++ ": full parse for imports (no .rimports cache)") $ do
-        prog <- readModule m
-        let imps = tProgImports prog
+      Nothing   -> timeIO timing (m ++ ": readModuleHeader (no .rimports cache)") $ do
+        (_, imps) <- readModuleHeader m
         writeCachedImports m imps
         return imps
 
