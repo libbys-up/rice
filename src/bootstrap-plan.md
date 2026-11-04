@@ -20,6 +20,48 @@ does not get dropped once self-hosting works.
 
 ------------------------------------------------------------------------------
 
+Status, 2026-11-03
+------------------
+
+Both goals are met.
+
+- **B.4, reading caches.** The `.rtfcy`/`.rfcy` caches are in rw-data's
+  compact format, the module graph reads only each `.tfcy`'s header, and
+  under KiCS2 the `.tfcy` is parsed with `ReadShowTerm`. rice1 compiles
+  hello world in 0.6 s and 194 MB (was 43 s and 5.7 GB); cold, compiling
+  Prelude too, 45 s and 2.8 GB. rice0 cold: 13.7 s and 713 MB.
+- **The fixpoint.** `tests/bootstrap.sh --fixpoint` passes: rice0, rice1
+  and rice2 generate identical C for rice (165 files). rice1 builds rice2
+  in under 5 minutes (was 31).
+- **B.3, `Int` width.** Audited: the only arithmetic on big values in
+  rice is the object-directory hash, `(h * 33 + ord c) mod 2^32`, which
+  stays under 2^38. (A user program with an integer literal wider than 64
+  bits is wrong under either: rice0 writes it into C as is, rice1
+  overflows reading it.)
+- **Phase D, the seed.** Decided 2026-11-03: the seed goes in release
+  tarballs, not the repo. `make seed` (`tools/make-seed.sh`) stages HEAD,
+  the front end's source and the packages' sources, has rice compile
+  Rice.Main there, and writes `rice-<version>.tar.xz` (3 MB) with the
+  generated C in `seed/`. `make -j from-seed` builds the front end,
+  `bin/rice` from `seed/` with only `cc` (53 s on 8 cores), and Prelude.
+  Checked: with no Curry system on `PATH`, the seed builds a rice that
+  runs the tests, and that rice compiles Rice.Main from the tarball's
+  source into C identical to the seed (164 files; `rice-main.c` records
+  the install directory). A rice-built rice finds its home from
+  `rice_install_dir`, which the seed build sets with `-DRICE_INSTALL_DIR`.
+
+Left:
+- The front end still needs Haskell (Stack or cabal) to build, as
+  planned. A release could also ship front end binaries.
+- A Linux run of `make from-seed`, and CI that runs both build paths.
+- rice1 parses `.tfcy` with derived `read` (9 s for Prelude). A reader
+  written for rice, building terms from the file's bytes with no
+  `String`, would fix that and replace rw-data (features-plan.md).
+- An uncaught `error` in a rice-built program prints its message, then the
+  raw `prim_error(...)` term.
+
+------------------------------------------------------------------------------
+
 Status, 2026-10-29
 ------------------
 

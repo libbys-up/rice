@@ -224,6 +224,12 @@ with up to 1.5 GB live while reading the cached Prelude (96 bytes per
 character of a string, readFile is eager, and the collector isn't
 generational).
 
+## Bootstrapping (2026-11-03)
+
+Both goals of src/bootstrap-plan.md are met: the fixpoint test passes,
+and `make seed` / `make from-seed` build rice from a release tarball with
+only a C compiler and the front end. See the plan's 2026-11-03 status.
+
 ## Bootstrapping (2026-10-29)
 
 Rice is self-hosting: `tests/bootstrap.sh` (the triple test) passes, with
