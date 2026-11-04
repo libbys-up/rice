@@ -41,3 +41,6 @@ obj-*/
 
 # make frontend's output
 /bin/
+
+# tests/compare-kics2.sh results and builds
+tests/.compare/
