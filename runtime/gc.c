@@ -118,67 +118,69 @@ typedef struct
     int len;           // length of the array
 } SpillItem;
 
-// These store the work stack that we're using for the dfs collector.
-// We're keeping these global so that they keep their same capacity.
-// The assumption here is that later collections
-// are probably going to do similar amounts of work.
+// The state of one collection: the work stacks for the depth-first copy,
+// and how much we copied. It's only meaningful during gc_collect.
+// It's one global so the arrays keep their capacity from one collection to
+// the next; later collections probably do similar amounts of work.
 //
-// This is dependant on the fact that we're not doing parallel work,
-// and we can only collect at safe points, so we're never going to have calls to gc_collect
-// clobber these variables.
-static Node**     node_work = NULL;            // stack of nodes we've copied but not scanned
-static size_t     node_n = 0;                  // size of node_work
-static size_t     node_cap = 0;                // capacity of node_work
-static SpillItem* spill_work = NULL;           // stack of spill arrays we've copied but not scanned
-static size_t     spill_n = 0;                 // size of spill_work
-static size_t     spill_cap = 0;               // capacity of spill_work
-static size_t     live_bytes;                  // bytes copied into the old generation (all of them, in a major collection)
+// That's safe because collection is single-threaded, and only happens at
+// safe points, never inside itself (alloc never collects).
+static struct
+{
+    Node**     nodes;       // nodes we've copied but not scanned
+    size_t     node_n;      // how many are in nodes
+    size_t     node_cap;    // capacity of nodes
+    SpillItem* spills;      // spill arrays we've copied but not scanned
+    size_t     spill_n;     // how many are in spills
+    size_t     spill_cap;   // capacity of spills
+    size_t     live_bytes;  // bytes copied into the old generation (all of them, in a major collection)
+} work = { NULL, 0, 0, NULL, 0, 0, 0 };
 
 static void push_node_work(Node* n)
 {
-    if(node_n == node_cap)
+    if(work.node_n == work.node_cap)
     {
         // start with array of 1024.
         // vector grow it as needed.
-        if(node_cap == 0)
+        if(work.node_cap == 0)
         {
-            node_cap = 1024;
+            work.node_cap = 1024;
         }
         else
         {
-            node_cap = node_cap * 2;
+            work.node_cap = work.node_cap * 2;
         }
-        node_work = (Node**)realloc(node_work, node_cap * sizeof(Node*));
-        if(node_work == NULL)
+        work.nodes = (Node**)realloc(work.nodes, work.node_cap * sizeof(Node*));
+        if(work.nodes == NULL)
         {
             fprintf(stderr, "Error: out of memory growing the node work stack during GC\n");
             exit(1);
         }
     }
-    node_work[node_n++] = n;
+    work.nodes[work.node_n++] = n;
 }
 
 static void push_spill_work(SpillItem it)
 {
-    if(spill_n == spill_cap)
+    if(work.spill_n == work.spill_cap)
     {
         // We don't have nearly as many spill arrays, so 256 is probably a good starting place.
-        if(spill_cap == 0)
+        if(work.spill_cap == 0)
         {
-            spill_cap = 256;
+            work.spill_cap = 256;
         }
         else
         {
-            spill_cap = spill_cap * 2;
+            work.spill_cap = work.spill_cap * 2;
         }
-        spill_work = (SpillItem*)realloc(spill_work, spill_cap * sizeof(SpillItem));
-        if(spill_work == NULL)
+        work.spills = (SpillItem*)realloc(work.spills, work.spill_cap * sizeof(SpillItem));
+        if(work.spills == NULL)
         {
             fprintf(stderr, "Error: out of memory growing the spill work stack during GC\n");
             exit(1);
         }
     }
-    spill_work[spill_n++] = it;
+    work.spills[work.spill_n++] = it;
 }
 
 // --- copying -------------------------------------------------------------
@@ -211,7 +213,7 @@ static union field* copy_spill(union field* a, int len, Node* owner, Symbol* sym
     // We copied len fields + 1 header
     if(to_old)
     {
-        live_bytes += ((size_t)len + 1) * sizeof(union field);
+        work.live_bytes += ((size_t)len + 1) * sizeof(union field);
     }
 
     header->a = b;
@@ -246,7 +248,7 @@ static Node* copy_node(Node* n)
         // copying them is how they're cleared.
         c->gc_bits = (unsigned char)((c->gc_bits | GC_OLD) &
                                      ~(GC_REMEMBERED | GC_AGED | GC_VISITED | GC_SEEN));
-        live_bytes += sizeof(Node);
+        work.live_bytes += sizeof(Node);
     }
     else
     {
@@ -499,15 +501,15 @@ static void scan_spill(SpillItem it)
 // This is what actually does the dfs on the nodes.
 static void drain(void)
 {
-    while(node_n > 0 || spill_n > 0)
+    while(work.node_n > 0 || work.spill_n > 0)
     {
-        if(node_n > 0)
+        if(work.node_n > 0)
         {
-            scan_node(node_work[--node_n]);
+            scan_node(work.nodes[--work.node_n]);
         }
         else
         {
-            scan_spill(spill_work[--spill_n]);
+            scan_spill(work.spills[--work.spill_n]);
         }
     }
 }
@@ -804,17 +806,17 @@ static union field collect_minor(union field root, Frame* sp)
     gc_verify(root, sp, "before");
 #endif
     minor = true;
-    live_bytes = 0;
+    work.live_bytes = 0;
     heap_begin_minor();
     root = copy_reachable(root, sp);
     heap_end_minor();
 #ifdef GC_VERIFY
     gc_verify(root, sp, "after");
 #endif
-    old_bytes += live_bytes;
+    old_bytes += work.live_bytes;
 #ifdef GC_STATS
     fprintf(stderr, "gc minor: %zu bytes promoted, old generation %zu bytes, %zu trail entries\n",
-            live_bytes, old_bytes, trail->size);
+            work.live_bytes, old_bytes, trail->size);
 #endif
     return root;
 }
@@ -1056,9 +1058,9 @@ static void compact_trail(Frame* sp)
  * were ever trailed itself, its contents would depend on the view, so we
  * give up and keep the whole trail.
  */
-static RICE_CC void gc_dead_hnf(union field root, Frame* sp)
+static RICE_CC void gc_dead_hnf(union field _root, Frame* sp)
 {
-    (void)root;
+    (void)_root;
     (void)sp;
     fprintf(stderr, "Error: the program read a node that the garbage collector "
                     "found unreachable (gc.c, trail_liveness)\n");
@@ -1596,14 +1598,14 @@ static union field collect_major(union field root, Frame* sp)
 #endif
 #endif
     minor = false;
-    live_bytes = 0;
+    work.live_bytes = 0;
     void* from_space = heap_begin_major();
     root = copy_reachable(root, sp);
     heap_end_major(from_space);
-    old_bytes = live_bytes;
+    old_bytes = work.live_bytes;
     // Collect the old generation again once it has doubled.
     // That keeps the cost of major collections proportional to how much we promote.
-    old_threshold = 2 * live_bytes;
+    old_threshold = 2 * work.live_bytes;
     if(old_threshold < GC_MIN_THRESHOLD)
     {
         old_threshold = GC_MIN_THRESHOLD;
@@ -1613,10 +1615,10 @@ static union field collect_major(union field root, Frame* sp)
     {
         trail_threshold = GC_MIN_TRAIL;
     }
-    debug(LOW, "gc: %zu bytes live\n", live_bytes);
+    debug(LOW, "gc: %zu bytes live\n", work.live_bytes);
 #ifdef GC_STATS
     fprintf(stderr, "gc major: %zu bytes live, next at %zu, %zu trail entries\n",
-            live_bytes, old_threshold, trail->size);
+            work.live_bytes, old_threshold, trail->size);
 #endif
     return root;
 }
@@ -1642,6 +1644,6 @@ union field gc_collect(union field root, Frame* sp)
     }
 
     mem = saved_mem;
-    rice_heap_since_gc = 0;
+    rice_bytes_since_gc = 0;
     return root;
 }

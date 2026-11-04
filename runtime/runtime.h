@@ -413,8 +413,13 @@ static inline bool settle_step(union field* x, bool* nondet)
 // The trail can be used pretty much anywhere, so it almost has
 // to be a global variable.  The only alternative is to pass it to every
 // single function.
-// It's defined in each program's generated main.c.
+// It's defined in trail.c, and runtime_init makes it.
 extern Trail* trail;
+
+// Sets up the runtime before a program runs: the trail, the heap
+// (memory_init) and the machine stack (machine_init). The generated
+// rice-main.c calls it first thing.
+void runtime_init(void);
 
 // Used to print out the total number of memory allocations
 // (see alloc() in memory.h).

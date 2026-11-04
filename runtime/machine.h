@@ -77,7 +77,9 @@ typedef struct Frame
 } Frame;
 
 _Static_assert(sizeof(const FrameInfo*) == sizeof(union field),
-               "a frame header must be exactly one stack word");
+               "a frame header must be exactly one stack word: frame_push, "
+               "frame_pop and the collector count a frame as 1 + size words "
+               "(see the LP64 note in node.h)");
 
 // * root: the root of the current node we're reducing
 // * sp: the current top of stack

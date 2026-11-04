@@ -1249,6 +1249,14 @@ void ground_nf(union field expr)
     machine_run(ground_nf_code, expr);
 }
 
+// Set up the runtime (runtime.h).
+void runtime_init(void)
+{
+    trail = trail_new();
+    memory_init();
+    machine_init();
+}
+
 /* Run a compiled program's `main` (an IO action) to normal form once.
  * There's no "try another solution" loop, and we don't print the result:
  * an IO action's output is the side effects it already performed.
@@ -1345,7 +1353,6 @@ RICE_CC void choice_hnf(union field root, Frame* sp)
 RICE_CC void forward_hnf(union field root, Frame* sp)
 {
     GC_SAFE_POINT(root, sp);
-    (void)root;
     RETURN();
 }
 

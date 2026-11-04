@@ -19,7 +19,7 @@ module Rice.Codegen.C.ToC (toSource, writeMain, MainMode (..)) where
 
 import Data.Maybe (isJust)
 import Data.Char (ord)
-import Data.List (nub, (\\))
+import Data.List (nub, (\\), intercalate)
 import qualified Data.Map as Map
 import Control.Monad.Trans.State (State, get, put, runState)
 import Text.Pretty
@@ -60,10 +60,10 @@ mainDriverCall :: MainMode -> CStmt
 mainDriverCall Standalone  = scall "run_io" [root]
 mainDriverCall Interactive = scall "nf_all" [root]
 
---- The generated `rice-main.c`: defines the runtime's globals, initializes the
---- runtime, builds a node for the root module's `main`, and runs it with
---- the driver for `mode`. It also keeps the command line and rice's home,
---- `home`, for library externals (`runtime/ext.h`). The C compiler can
+--- The generated `rice-main.c`: initializes the runtime, builds a node for
+--- the root module's `main`, and runs it with the driver for `mode`. It also
+--- keeps the command line and rice's home, `home`, for library externals
+--- (`runtime/ext.h`). The C compiler can
 --- override `home` with `-DRICE_INSTALL_DIR=...`: a rice built from the
 --- seed C (`tools/make-seed.sh`) is told where it was built, not where the
 --- seed was generated.
@@ -74,12 +74,9 @@ writeMain rootModule home mode = vcat
   , cinclude "trail"
   , cinclude "runtime"
   , cinclude "memory"
+  , cinclude "ext"
   , cinclude rootModule
   , text ""
-  , text "Trail* trail;"
-  , text "unsigned long mem;"
-  , text "int rice_argc;"
-  , text "char** rice_argv;"
   , text "#ifndef RICE_INSTALL_DIR"
   , text "#define RICE_INSTALL_DIR" <+> cstring home
   , text "#endif"
@@ -88,9 +85,7 @@ writeMain rootModule home mode = vcat
   , cfunDefn "int" "main" [("int","argc"), ("char**","argv")] $
       [ text "rice_argc = argc;"
       , text "rice_argv = argv;"
-      , text "trail" <+> equals <+> call "trail_new" [] <> semi
-      , scall "memory_init" []
-      , scall "machine_init" []
+      , scall "runtime_init" []
       , text "field root" <+> equals <+>
           call ("make_" ++ mangle (rootModule,"main",0)) [int 0] <> semi
       , mainDriverCall mode
@@ -297,7 +292,9 @@ enterCase gen v bs = do
       inner = gen { gRetry = Just v }
   body <- caseBody inner v frees ndS cutS bs
   (k', done') <- get
-  put (k', CaseBlock (caseDecls gen k fname slotReps)
+  let layout = ["root", varName v, "scrutinee"] ++ map varName frees
+               ++ ["nondet", "cutoff"]
+  put (k', CaseBlock (caseDecls gen k fname slotReps layout)
                      [cfunDefn ("static " ++ hnfRet) fname contParams
                                (text "(void)_root" <> semi : body)] : done')
   return $ leave gen $
@@ -310,10 +307,12 @@ enterCase gen v bs = do
     , text "MUSTTAIL return" <+> text fname <> text "(root, sp)" <> semi ]
 
 --- The prototype, reps array and `FrameInfo` of case block `k`.
---- `slotReps` are the reps' C names.
-caseDecls :: Gen -> Int -> CName -> [String] -> [CStmt]
-caseDecls gen k fname slotReps =
-  [ text ("static " ++ hnfRet) <+> text fname <> cparams contParams <> semi
+--- `slotReps` are the reps' C names, and `layout` names each slot, for a
+--- comment above them (STYLE_GUIDE.md, "Frame layouts").
+caseDecls :: Gen -> Int -> CName -> [String] -> [String] -> [CStmt]
+caseDecls gen k fname slotReps layout =
+  [ comment ("frame: [" ++ intercalate ", " layout ++ "]")
+  , text ("static " ++ hnfRet) <+> text fname <> cparams contParams <> semi
   , (text "static const unsigned char" <+> text (fname ++ "_reps[]"))
       .= carray (map text slotReps)
   , (text "static const FrameInfo" <+> text (fname ++ "_info"))

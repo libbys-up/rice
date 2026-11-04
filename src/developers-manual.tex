@@ -860,7 +860,8 @@ root module, along with \file{runtime/ext/M.c} for every module \code{M} that
 has externals (\code{externalFiles}).  If one of those files is missing, rice
 stops and names the module and its externals, before running the C compiler.
 \file{rice-main.c} also keeps the command line and Rice's home directory for the
-externals.  It initializes the trail, the heap and the machine,
+externals.  It calls \code{runtime_init}, which makes the trail, the heap and the
+machine stack (the runtime's globals are defined in the runtime, not here),
 builds a node for \code{main}, and hands it to a driver: \code{run_io}, which
 runs an \code{IO} action once, or, with \code{--interactive}, \code{nf_all},
 which prints every value \code{main} has (\S\ref{sec:drivers}).
@@ -933,10 +934,14 @@ the compiler (\S\ref{sec:fieldreps}).  Almost every child is a pointer, so a
 \code{NULL} reps array means ``all pointers'', and only symbols with a raw child
 have an array.  We store reps as bytes, because a C11 enum takes four.
 
-\paragraph{The word size.}  The runtime assumes a pointer, a \code{long}, and a
-\code{double} all fit in one 8-byte \code{union field}.  That's true on 64-bit
-macOS and Linux.  On a 32-bit target it isn't, and a \code{_Static_assert} in
-\file{machine.h} stops the build.
+\paragraph{The word size.}  Rice targets 64-bit (LP64) platforms only: a
+pointer, a \code{long} and a \code{double} each fill one 8-byte
+\code{union field}.  That's true on 64-bit macOS and Linux.  The
+\code{_Static_assert}s next to \code{union field} in \file{node.h} stop the
+build anywhere else.  A frame's header being one word, a node being six, and
+\code{Int} being 64 bits all depend on it, so supporting a 32-bit target
+would mean deciding those together; for the frame header, the plan would be
+to pad it to a full word rather than shrink \code{Float}.
 
 \subsection{Tags}
 \label{sec:tags}

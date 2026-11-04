@@ -979,7 +979,7 @@ finish:
 }
 
 // x =:<= y: unify the pair on the machine (lu_k), then nseq_k sets root
-// from the result.
+// from the result. Frame: [root].
 static const unsigned char nseq_reps[] = { R_PTR };
 static RICE_CC void nseq_k(union field _root, Frame* sp);
 static const FrameInfo nseq_info =

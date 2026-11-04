@@ -27,18 +27,21 @@
  * calloc, and the nursery is zeroed again after each minor collection.
  */
 
+// How many allocations so far (memory.h).
+unsigned long mem = 0;
+
 // The nursery's next free byte and end.
-char*  rice_heap_next  = NULL;
-char*  rice_heap_limit = NULL;
+char*  rice_alloc_next  = NULL;
+char*  rice_alloc_end = NULL;
 
 // Bytes allocated since the last collection. GC_SAFE_POINT compares this
-// against rice_heap_threshold: the nursery's size, or 0 under GC_STRESS, so
+// against rice_gc_threshold: the nursery's size, or 0 under GC_STRESS, so
 // we collect at every safe point.
-size_t rice_heap_since_gc = 0;
+size_t rice_bytes_since_gc = 0;
 #ifdef GC_STRESS
-size_t rice_heap_threshold = 0;
+size_t rice_gc_threshold = 0;
 #else
-size_t rice_heap_threshold = GC_NURSERY_BYTES;
+size_t rice_gc_threshold = GC_NURSERY_BYTES;
 #endif
 
 // The size of an ordinary chunk of the survivor space or the old
@@ -146,8 +149,8 @@ static Chunk* overflow = NULL;
 
 static void nursery_reset(void)
 {
-    rice_heap_next  = chunk_start(nursery);
-    rice_heap_limit = rice_heap_next + NURSERY_BYTES;
+    rice_alloc_next  = chunk_start(nursery);
+    rice_alloc_end = rice_alloc_next + NURSERY_BYTES;
 }
 
 void memory_init(void)
@@ -161,15 +164,15 @@ void memory_init(void)
 // `size`, so take an overflow chunk.
 void* rice_alloc_slow(size_t size)
 {
-    rice_heap_since_gc += size;
+    rice_bytes_since_gc += size;
     bool own = size > NURSERY_BYTES / 4;
     Chunk* c = new_chunk(own ? size : NURSERY_BYTES);
     c->next = overflow;
     overflow = c;
     if(!own)
     {
-        rice_heap_next  = chunk_start(c) + size;
-        rice_heap_limit = chunk_start(c) + NURSERY_BYTES;
+        rice_alloc_next  = chunk_start(c) + size;
+        rice_alloc_end = chunk_start(c) + NURSERY_BYTES;
     }
     return chunk_start(c);
 }
@@ -180,8 +183,8 @@ static size_t nursery_used;
 void heap_begin_minor(void)
 {
     char* start = chunk_start(nursery);
-    bool in_nursery = rice_heap_next >= start && rice_heap_next <= start + NURSERY_BYTES;
-    nursery_used = in_nursery ? (size_t)(rice_heap_next - start) : NURSERY_BYTES;
+    bool in_nursery = rice_alloc_next >= start && rice_alloc_next <= start + NURSERY_BYTES;
+    nursery_used = in_nursery ? (size_t)(rice_alloc_next - start) : NURSERY_BYTES;
     from_survivors = survivors;
     survivors = (Space){ NULL, NULL, NULL };
 }

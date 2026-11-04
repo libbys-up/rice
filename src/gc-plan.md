@@ -54,7 +54,7 @@ The check itself is one load, compare and branch at each entry:
 
 ```c
 #define GC_SAFE_POINT(root, sp) \
-    if (rice_heap_since_gc > rice_heap_threshold) root = gc_collect(root, sp)
+    if (rice_bytes_since_gc > rice_gc_threshold) root = gc_collect(root, sp)
 ```
 
 `gc_collect` returns the moved `root`, and updates frames, the trail and
@@ -70,11 +70,11 @@ Allocator
   `calloc`, so they arrive zeroed. Code relies on fresh nodes having NULL
   children (`set_X` for partial applications, recursive `let`s,
   `CHECK_LAYOUT`).
-- `alloc(size)` is an inline bump: `p = rice_heap_next; rice_heap_next += size;`.
-  When that passes `rice_heap_limit`, a slow path takes a new chunk.
+- `alloc(size)` is an inline bump: `p = rice_alloc_next; rice_alloc_next += size;`.
+  When that passes `rice_alloc_end`, a slow path takes a new chunk.
   Sizes are rounded to 8 bytes. Requests larger than a chunk get a
   dedicated chunk of their own.
-- `rice_heap_since_gc` counts bytes, for the trigger. The existing `mem`
+- `rice_bytes_since_gc` counts bytes, for the trigger. The existing `mem`
   allocation counter (printed by `nf_all`) keeps counting allocations, so
   the goldens' "total memory allocations" lines stay meaningful.
 - Only nodes and nodes' spill arrays are heap objects. `bt_stack`'s
@@ -90,6 +90,11 @@ allocation.
 
 Collector: Cheney copying, over chunks
 --------------------------------------
+
+(Note 2026-11-04: this is the original plan. The collector as built traces
+depth-first with an explicit work stack, not a Cheney scan of to-space,
+because spill arrays carry no type information (see below, and `gc.c`'s
+header). It's also generational now (stage 7).)
 
 1. Start a fresh to-space (a new chunk list).
 2. Copy each root's target, then scan the copied objects breadth-first,

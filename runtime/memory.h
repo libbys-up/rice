@@ -4,26 +4,37 @@
 #include<stdlib.h>
 #include "node.h"
 
-/* The heap is a linked list of chunks of zeroed memory (see heap.c)
- * that contains nodes and their spill arrays.
+/* The heap holds nodes and their spill arrays, in chunks of zeroed memory
+ * (heap.c): the nursery, where everything new goes, then the survivor
+ * space and the old generation, which only the collector copies into.
  * Everything else (the trail, the machine stack, C strings) uses malloc.
  *
- * We never collect on allocations, only when we're at a safe point (gc.h).
+ * Two different limits, which are easy to confuse:
+ *  * rice_alloc_next / rice_alloc_end are where alloc bumps: the nursery,
+ *    or the overflow chunk it moved on to. Reaching the end takes another
+ *    chunk (rice_alloc_slow). That never collects.
+ *  * rice_bytes_since_gc / rice_gc_threshold (gc.h) decide when to
+ *    collect. GC_SAFE_POINT collects once the bytes allocated since the
+ *    last collection pass the threshold.
+ * The split is because we can allocate anywhere, including C code holding
+ * raw Node pointers, but we can only collect at a safe point, where every
+ * live pointer is known (gc.h). So the threshold is soft: we can go past
+ * it between safe points.
  */
 
 // How many allocations so far (nf_all prints this).
 extern unsigned long mem;
 
-extern char*  rice_heap_next;     // next free byte in the current chunk
-extern char*  rice_heap_limit;    // end of the current chunk
-extern size_t rice_heap_since_gc; // bytes allocated since the last collection
+extern char*  rice_alloc_next;     // next free byte where alloc bumps
+extern char*  rice_alloc_end;      // the end of that space
+extern size_t rice_bytes_since_gc; // bytes allocated since the last collection
 
 // Set up the heap with its first chunk.
 void  memory_init(void);
 
-// alloc's slow path: only called when the current chunk can't fit `size`.
-// Don't call it directly.  It always takes a new chunk,
-// so the rest of the current chunk would be wasted.
+// alloc's slow path: only called when the space alloc bumps through can't
+// fit `size`. Don't call it directly.  It always takes a new chunk,
+// so the rest of the current one would be wasted.
 void* rice_alloc_slow(size_t size);
 
 // For the collector (gc.c). It copies with gc_alloc, into the survivor
@@ -39,19 +50,19 @@ void  heap_end_major(void* from_space);
 
 // Allocates `size` bytes of zeroed memory, 8-byte aligned.
 // Callers rely on the memory being zeroed (NULL children, spill headers start at 0).
-// If we hit the end of a chunk, then we need to take the slow path.
+// If we hit the end of the space, then we need to take the slow path.
 static inline void* alloc(size_t size)
 {
     // round size up to the next multiple of 8
     size = (size + 7) & ~(size_t)7;
     mem++;
-    char* p = rice_heap_next;
-    if((size_t)(rice_heap_limit - p) < size)
+    char* p = rice_alloc_next;
+    if((size_t)(rice_alloc_end - p) < size)
     {
         return rice_alloc_slow(size);
     }
-    rice_heap_next = p + size;
-    rice_heap_since_gc += size;
+    rice_alloc_next = p + size;
+    rice_bytes_since_gc += size;
     return p;
 }
 

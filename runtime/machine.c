@@ -29,6 +29,7 @@ static RICE_CC void sentinel_code(union field _root, Frame* sp)
 }
 
 // Stack frame to get back to C code.  We don't need any slots, just the sentinel code.
+// Frame: [] (no slots).
 static const FrameInfo sentinel_info =
     { .code = sentinel_code, .size = 0, .reps = NULL, .name = "sentinel" };
 

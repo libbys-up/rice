@@ -10,6 +10,9 @@
 #include "runtime.h"
 #include "memory.h"
 
+// The one trail (runtime.h). runtime_init makes it.
+Trail* trail;
+
 // The trail lives in malloc'd memory, not the garbage collected heap.
 // Its entries point into the heap, so the collector treats them as roots,
 // but the collector never moves the array itself.

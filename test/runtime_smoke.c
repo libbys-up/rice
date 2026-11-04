@@ -32,10 +32,6 @@
 #include "node.h"
 #include "runtime.h"
 
-// trail/mem are `extern` in runtime.h -- defined once here, the way an
-// eventual generated main() will define them.
-Trail* trail;
-unsigned long mem;
 
 static int failures = 0;
 
@@ -97,9 +93,7 @@ static Symbol boxed_int_symbol = { .tag = 5, .arity = 1, .name = "Int",
 
 int main(void)
 {
-    trail = trail_new();
-    memory_init();
-    machine_init();
+    runtime_init();
 
     // Capture everything printed to stdout by the runtime calls below, so
     // the checks can be automated (grep the captured text) instead of

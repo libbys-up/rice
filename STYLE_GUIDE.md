@@ -173,6 +173,17 @@ runtime uses it this way consistently for unimplemented externals (`catch`,
 `ensureNotFree`, `read*Literal`, file I/O, etc. in `runtime/ext/Prelude.c`).
 Keep using it that way rather than for ordinary recoverable failure.
 
+### No nondeterminism in rice's own code
+
+Don't use `?`, free variables for search, or `Control.Search`/`findall` in
+the compiler's implementation. Write deterministic code: `Maybe`, `Either`,
+ordinary `case`. Rice is built with KiCS2, where any nondeterminism costs
+choice-point machinery even on paths that turn out to be deterministic. The
+optimizer's rewrite rules are the model: each rule returns a `Maybe`, and
+`combine` tries them in order (`Rice.Optimize.Inline`, on
+`FlatCurry.Transform.Typed.ExecDet`). Programs rice *compiles* can be as
+nondeterministic as they like, of course; this is about rice itself.
+
 ### State-monad usage
 
 Fresh-variable generation threads a `VarIndex` counter via
@@ -186,9 +197,10 @@ single source of truth for "how Rice generates fresh variables."
 
 ### Pragmas and fixity
 
-No `{-#`-style pragmas appear anywhere in `src/` — Curry's pragma surface is
-smaller than GHC's, so there's nothing to enforce here beyond "don't add
-pragmas without a reason." Custom `infixl`/`infixr` fixity declarations are
+The only `{-#` pragma in `src/` is `OPTIONS_FRONTEND -Wno-incomplete-patterns`
+in `Rice.Build.TypedRW`, which follows the code `curry-rw-data` generates.
+Curry's pragma surface is smaller than GHC's, so there's nothing to enforce
+here beyond "don't add pragmas without a reason." Custom `infixl`/`infixr` fixity declarations are
 reserved for genuine DSLs, e.g. `src/Rice/Codegen/C/C.curry:35-42` for the
 C-emission combinators. Don't declare fixity for ordinary project functions.
 
@@ -296,12 +308,44 @@ reader knows the history of the file.
   returns zeroed memory from the garbage collected heap. Everything else (the
   trail, the machine stack, C strings) uses `malloc`/`free`. Never `free` a
   node.
+- **Changing a node that already exists.** Nearly every bug in the runtime
+  so far has been one of these three steps left out. When you rewrite a
+  node in place, or change one of its children:
+  1. **Trail it** if a choice could undo the change: call `trail_node(root,
+     nondet)` before you write, with `nondet` covering everything you read
+     to get the new value. It decides whether an entry is needed (#1 and
+     #5). Choice points and free-variable bindings always trail
+     (`push_choice`, `save_copy`).
+  2. **Tell the collector** with `gc_remember(node)` (`gc.h`), the write
+     barrier: the node may be old and the new child young. The `set_X`
+     functions do this for you; a direct `child_at(...) = ...` doesn't.
+  3. **Keep pointers rooted** across anything that runs the machine
+     (`ext_hnf`, `settle`, `nf`, `toCStr`): those can collect and move
+     nodes. Put local `field`s in a `GC_ROOT` first, and `GC_UNROOT` them
+     after. Machine code keeps its state in frame slots instead, which the
+     collector updates.
+  The IORef cell write (`runtime/ext/Data.IORef.c`) and bindIO's repoint
+  (`bind_k`, `runtime/ext/Prelude.c`) are short examples of all three.
+- **Frame layouts:** put a comment with the slot layout,
+  `[root, m, nondet, cutoff]`, next to every `FrameInfo`, hand-written or
+  generated, so a reader can match `SLOT(i)` to its meaning.
+- **Named constants:** give every magic number a name and a comment
+  saying where it comes from, and whether it's measured or a first guess
+  (`CHUNK_BYTES`, `GC_MIN_THRESHOLD`, `MAX_FORWARD_CHAIN`).
+- **Word size:** rice targets 64-bit (LP64) platforms only. A pointer, a
+  `long` and a `double` are each one 8-byte `union field` (`node.h`
+  asserts it). Put any new assumption about sizes in a `_Static_assert`
+  with a message that says what depends on it.
+- **Vocabulary:** say "the trail" and "trail entry" (an entry is a saved
+  node, or a choice-point marker), never "backtracking stack". A "frame"
+  is only a machine-stack `Frame` (`machine.h`). "FORWARD node" for an
+  indirection; "collapse" for turning a node into its result or a forward.
 - **Error handling:** one central `error(msg, expr)` helper (`runtime.c`) that
   prints and exits. `runtime/ext/Prelude.c` routes every fatal path, real and
   stubbed, through it. Check the result of `malloc`/`realloc` in runtime data
   structures.
-- **Macros:** used deliberately for the `child_at_N` dispatch table
-  (`runtime/macros.h`), for the backtracking optimization flags
+- **Macros:** used deliberately for `CHILD_AT`, which hides the spill
+  array (`runtime/macros.h`), for the backtracking optimization flags
   (`OPT_*`, `runtime/runtime.h`), and for debug logging that compiles to
   nothing when `DEBUG` is unset (`runtime/debug.h`). Wrap multi-statement
   macros in `do { ... } while(0)`, with the `if` inside the loop and no
@@ -314,20 +358,31 @@ reader knows the history of the file.
   — this is a deliberate performance choice (zero-cost wrappers at every
   call site) and should be kept for any new primitive constructor.
 
+## Tests
+
+- A runtime feature gets a test in `tests/programs/`, in the directory for
+  its area (`gc/`, `externals/`, `regressions/`, ...), with a header
+  comment saying what it checks and why. If it touches the heap, run it
+  under `-- rice-flags: --cflags=-DGC_STRESS` too.
+- Check a golden (`.expected`) before recording it: against KiCS2 (or
+  PAKCS), or, if neither can run it, against an independent check, and say
+  which in the test's header (`kics2_bench/SatSolver.curry`). Never record
+  rice's own output just because it's what rice prints.
+- A test that guards memory use says so with `-- rice-maxrss: <MB>`.
+- Run `tests/run.sh` before every commit, and `tests/bootstrap.sh` before
+  any commit that changes code generation or the runtime. Don't run two
+  memory-heavy jobs at once (a suite, a bootstrap, a KiCS2 benchmark).
+
 ## Housekeeping suggestions (repo-wide)
 
 These aren't style rules so much as loose ends worth tidying when convenient
 — none of them are applied by this document, they're flagged for later:
 
-- Delete the stray root-level `Untype.curry` — it's an older, buggier draft of
-  `src/Rice/Transform/Untype.curry` (wrong return type, doesn't recurse into
-  `TLet`'s bound expression, missing imports) left behind by the rewrite
-  commit.
+- ~~Delete the stray root-level `Untype.curry`~~ — resolved: it's gone.
 - ~~`LICENSE:1` still has the CPM template placeholder~~ — resolved
   (2026-11-02): `Copyright (c) 2023, Steven Libby`.
-- `test/a.out` (a compiled binary) is checked into the repo and isn't covered
-  by `.gitignore` (`*~`, `.cpm`, `.curry` — see `.gitignore:1-3`). Either
-  delete it or add a build-artifact ignore rule.
+- ~~`test/a.out` is checked into the repo~~ — resolved: it's ignored
+  (`.gitignore`) and no longer tracked.
 - ~~`src/archetecture.md` has a typo'd filename~~ — resolved (2026-10-27): it
   and `src/architecture.tex` are replaced by `src/developers-manual.tex`, with
   the case shortcutting design moved to `src/case-shortcutting-plan.md`.

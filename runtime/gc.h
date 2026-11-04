@@ -30,7 +30,7 @@
 // Collect when this many bytes have been allocated since the last
 // collection: the nursery's size (GC_NURSERY_BYTES, below). Under GC_STRESS
 // it's 0, so we collect at every safe point.
-extern size_t rice_heap_threshold;
+extern size_t rice_gc_threshold;
 
 // A major collection runs when the old generation has doubled since the
 // last one, but never before it reaches this size.
@@ -134,7 +134,7 @@ union field gc_collect(union field root, Frame* sp);
 // trick to make this act like a statement.
 #define GC_SAFE_POINT(root, sp)                                  \
     do {                                                         \
-        if(rice_heap_since_gc > rice_heap_threshold)             \
+        if(rice_bytes_since_gc > rice_gc_threshold)             \
         {                                                        \
             (root) = gc_collect((root), (sp));                   \
         }                                                        \

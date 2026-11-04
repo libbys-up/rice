@@ -57,6 +57,11 @@ The machine
 
 ### Code, frames, and the stack
 
+(Note 2026-11-04: this sketch is the original plan. Since `7f81eae`, every
+code pointer takes `(union field root, Frame* sp)` in registers, so `Code`
+is `RICE_CC void (*)(union field, Frame*)`, and nothing reads `rice_root`.
+See `runtime/node.h` and `machine.h`.)
+
 ```c
 typedef struct Frame Frame;
 #define RICE_CC __attribute__((preserve_none))
@@ -340,6 +345,7 @@ Status:
 - **Stage 2 done 2026-10-07.** `RICE_CC` and `Code` live in `node.h`, and
   `Symbol.hnf` is a `Code`. Every `_hnf`, generated or hand-written, is
   `RICE_CC void f_hnf(void)` and starts with `field root = rice_root;`.
+  (Superseded by `7f81eae`: root and sp are now parameters.)
   Calls set `rice_root` first (`hnfCall`, `TAIL_DISPATCH*`, `eval_hnf`).
   `C.cparams []` prints `(void)`.
 - **Stage 3 done 2026-10-07.** `ToC` lifts each `ICaseCons` into a case

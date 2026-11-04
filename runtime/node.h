@@ -47,6 +47,20 @@ typedef union field
     double        f; //primitive float
 } field;
 
+/* Rice targets 64-bit platforms only (LP64: macOS and Linux on x86-64 and
+ * arm64). There, a pointer, a long and a double are each 8 bytes, so each
+ * fits in one union field with nothing wasted, and a field is one word.
+ * Several things depend on that: a machine-stack frame's header is one
+ * word (machine.h), a node is six words (below), and Int is 64 bits. On a
+ * 32-bit target the build stops here. Supporting one would mean deciding
+ * all of these together; for the frame header, the plan would be to pad it
+ * to a full word rather than shrink Float.
+ */
+_Static_assert(sizeof(void*) == 8, "rice targets 64-bit (LP64) platforms");
+_Static_assert(sizeof(long) == 8, "rice's Int is a 64-bit long (LP64)");
+_Static_assert(sizeof(double) == 8, "rice's Float is a 64-bit double");
+_Static_assert(sizeof(union field) == 8, "a field is one 8-byte word");
+
 /* Field is convenient for representation, but we lose type information.
  * This is ok for evaluate, but its a real problem for the garbage collector.
  * We don't want it trying to follow an Int like a pointer.
@@ -88,10 +102,16 @@ typedef enum
 /*
  * Clang 19 supports preserve_none which allows us to do tail calls without
  * having to preserve callee saved registers.
- * This works out for us because we've engineered the hnf functions
- * to be entirely tail calls.
  *
- * If the compiler doesn't support preserve_none,
+ * Under the normal C convention, some registers are callee-saved: a
+ * function that wants to use one has to save it on entry and restore it
+ * before it returns, or before it tail-jumps somewhere else. Machine code
+ * is a long chain of musttail jumps (machine.h), so every link in the
+ * chain would pay for those saves and restores, for a caller that's never
+ * coming back. preserve_none makes every general-purpose register
+ * caller-saved, so machine code can jump without saving anything.
+ *
+ * It's only an optimization. If the compiler doesn't support preserve_none,
  * then we just have the normal C calling conventions.
  * It's at most about 6% slower, so it's still very usable.
  */
