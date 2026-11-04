@@ -63,7 +63,10 @@ mainDriverCall Interactive = scall "nf_all" [root]
 --- The generated `rice-main.c`: defines the runtime's globals, initializes the
 --- runtime, builds a node for the root module's `main`, and runs it with
 --- the driver for `mode`. It also keeps the command line and rice's home,
---- `home`, for library externals (`runtime/ext.h`).
+--- `home`, for library externals (`runtime/ext.h`). The C compiler can
+--- override `home` with `-DRICE_INSTALL_DIR=...`: a rice built from the
+--- seed C (`tools/make-seed.sh`) is told where it was built, not where the
+--- seed was generated.
 writeMain :: String -> String -> MainMode -> Doc
 writeMain rootModule home mode = vcat
   [ text "#include <stdio.h>"
@@ -77,7 +80,10 @@ writeMain rootModule home mode = vcat
   , text "unsigned long mem;"
   , text "int rice_argc;"
   , text "char** rice_argv;"
-  , text "const char* rice_install_dir" <+> equals <+> cstring home <> semi
+  , text "#ifndef RICE_INSTALL_DIR"
+  , text "#define RICE_INSTALL_DIR" <+> cstring home
+  , text "#endif"
+  , text "const char* rice_install_dir = RICE_INSTALL_DIR;"
   , text ""
   , cfunDefn "int" "main" [("int","argc"), ("char**","argv")] $
       [ text "rice_argc = argc;"

@@ -30,11 +30,17 @@ import ReadShowTerm          (readUnqualifiedTerm)
 import Rice.PackageConfig (getPackagePath, packageVersion)
 
 --- Where rice's `lib/`, `replace/` and `runtime/` are: `$RICEHOME` if it's
---- set, otherwise the package directory rice was installed from.
+--- set. Otherwise, for a rice built by rice, its install directory (the
+--- home of the rice that compiled it, or where it was built from the seed
+--- C); for a rice built by cypm, the package directory it was installed
+--- from. (Under rice, `getPackagePath` is wherever cypm generated
+--- `Rice.PackageConfig`, which for the seed is another machine.)
 riceHome :: IO FilePath
 riceHome = do
   home <- getEnv "RICEHOME"
-  if null home then getPackagePath else return home
+  if not (null home) then return home
+    else if curryCompiler == "rice" then return installDir
+    else getPackagePath
 
 --- The directory, under each module's source directory, that holds the
 --- front end's output and rice's cache files for that module.

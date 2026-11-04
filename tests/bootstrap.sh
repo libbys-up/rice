@@ -10,7 +10,7 @@
 #   3. Every .c and .h rice1 generated must be byte-identical to rice0's.
 #      A difference is a place where rice's own semantics differ from
 #      KiCS2's on rice's source. (rice-main.c differs only in the home
-#      directory it records, which is left out.)
+#      directory it records, RICE_INSTALL_DIR, which is left out.)
 #
 # With --fixpoint, rice2 then compiles Rice.Main in a third copy, and its
 # C must match rice1's.
@@ -66,8 +66,8 @@ compare() {
   local a="$1" b="$2" same=0 differ=0
   while read -r f; do
     if [ "$(basename "$f")" = rice-main.c ]; then
-      if diff -q <(grep -v rice_install_dir "$a/$f") \
-                 <(grep -v rice_install_dir "$b/$f") > /dev/null; then
+      if diff -q <(grep -v RICE_INSTALL_DIR "$a/$f") \
+                 <(grep -v RICE_INSTALL_DIR "$b/$f") > /dev/null; then
         same=$((same + 1))
       else
         differ=$((differ + 1)); echo "   DIFF $f"
