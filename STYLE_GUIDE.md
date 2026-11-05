@@ -301,7 +301,9 @@ reader knows the history of the file.
   `trail.h`/`.c` (the trail), `machine.h`/`.c` (the evaluation machine),
   `memory.h`/`heap.c` (allocation), `gc.h`/`.c` (the collector),
   `runtime.h`/`.c` (the reduction engine), `ext/Prelude.c` (Prelude externals),
-  `macros.h`/`debug.h`/`prim.h` (small cross-cutting utilities). Keep new
+  `opts.h` (the compile-time flags and their defaults; `node.h` includes it
+  first, since the node layout depends on them), `macros.h`/`debug.h`/`prim.h`
+  (small cross-cutting utilities). Keep new
   runtime code similarly separated rather than growing one of the big files
   further.
 - **Memory:** nodes and spill arrays come from `alloc` (`memory.h`), which

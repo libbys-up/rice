@@ -115,7 +115,7 @@ CONFIGS=(
   "+compress|$(flags_of 0 0 0 0 1 0)"
   "+epoch+barrier|$(flags_of 0 0 0 1 0 0 -DOPT_WRITE_BARRIER=1)"
   "+nondet+epoch|$(flags_of 1 0 0 1 0 0)"
-  "default|$(flags_of 1 1 0 0 0 1)"
+  "default|$(flags_of 1 1 0 1 0 1)"
   "all|$(flags_of 1 1 1 1 1 1)"
   "-nondet|$(flags_of 0 1 1 1 1 1)"
   "-tail|$(flags_of 1 1 1 1 1 0)"

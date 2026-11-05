@@ -174,7 +174,7 @@ Options for the generated program:
   \item \code{--debug=low|med|high} builds with tracing (\file{runtime/debug.h}).
     It also turns on the field rep lint (\S\ref{sec:fieldreps}).
   \item \code{--cflags="..."} passes flags to the C compiler, usually to change
-    a runtime flag: \code{--cflags=-DOPT_EPOCH_TRAIL=1}.
+    a runtime flag: \code{--cflags=-DOPT_EPOCH_TRAIL=0}.
   \item \code{--force-recompile} and \code{--force-recompile-module=M} ignore
     the caches (\S\ref{sec:caching}).
 \end{itemize}
@@ -301,6 +301,8 @@ FlatCurry expressions, which the \code{flatcurry-typed} package lacks.
 \toprule
 \file{node.h} & the representation: \code{Node}, \code{field}, \code{Symbol},
   field reps \\
+\file{opts.h} & the backtracking optimizations' flags and defaults
+  (\file{node.h} includes it first: the node layout depends on them) \\
 \file{macros.h} & the \code{child_at} macros \\
 \file{machine.h}, \file{.c} & the evaluation machine: frames, the stack,
   \code{RETURN}, \code{machine_run} \\
@@ -1314,16 +1316,16 @@ the flags only change what the runtime's macros (\code{trail_node},
     from unwinding the whole search.  The cutoff (the trail's height when the
     case started) is recorded lazily, the first time the case might push a
     choice, so a deterministic case pays nothing.
-  \item[\#4 \code{OPT_COPY_COLLAPSE} (off)]
+  \item[\#4 \code{OPT_COPY_COLLAPSE} (off; measured, no effect)]
     When a collapsing rule's target is a finished value that can't change
     anymore, make \code{root} a copy instead of a FORWARD, which saves every
     reader a hop.
-  \item[\#5 \code{OPT_EPOCH_TRAIL} (off)]
+  \item[\#5 \code{OPT_EPOCH_TRAIL} (on)]
     The WAM's trail condition, with time stamps.  Each choice point starts a
     new epoch, and each node remembers the epoch it was created in.  A node
     created after the last choice point becomes unreachable when we backtrack
     past it, so we don't need to trail its rewrites.
-  \item[\code{OPT_PATH_COMPRESS} (off)]
+  \item[\code{OPT_PATH_COMPRESS} (off; measured, no effect)]
     When a case follows a forward, retarget it past the deterministic forwards
     behind it.
   \item[\code{OPT_WRITE_BARRIER} (on exactly when \#1 and \#5 are)]
@@ -1334,8 +1336,10 @@ the flags only change what the runtime's macros (\code{trail_node},
 \#1 and \#5 are each sound alone, but not together: \#1 can leave an old node's
 deterministic rewrite untrailed, pointing at a young node whose rewrite \#5
 didn't trail.  The write barrier fixes that (\file{opt_conflict.md}), and the
-build refuses \#1 and \#5 without it.  \file{current.md} has the latest
-measurements.
+build refuses \#1 and \#5 without it.  The measurements behind the defaults
+are in \file{src/results/optbench-2026-11-05.md}: \#1 and \#3 are essential,
+\#5 is a further 9\% on average with \#1 on (up to $5\times$), \#2 a small win,
+and \#4 and path compression make no measurable difference.
 
 %----------------------------------------------------------------------
 \subsection{Memory and garbage collection}

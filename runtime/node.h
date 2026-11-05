@@ -3,6 +3,7 @@
 
 #include<stdbool.h>
 #include<stdint.h>
+#include "opts.h"
 
 /* A Node represents a single expression node.
  * Our heap is really a graph defined by these nodes.
