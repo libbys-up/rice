@@ -235,7 +235,7 @@ These are C preprocessor flags, set with \code{--cflags}:
 \file{src/*.md}, \file{src/*.tex} & this manual, the history files, and
   plan documents (\S\ref{sec:docs}) \\
 \midrule
-\file{.curry/rice-1.0.0/} & next to each compiled module: Rice's caches and the
+\file{.curry/rice-<version>/} & next to each compiled module: Rice's caches and the
   generated C (\S\ref{sec:caching}); never edit or commit these \\
 \bottomrule
 \end{longtable}
@@ -412,7 +412,7 @@ check whether Prelude's externals still match \file{runtime/ext/Prelude.c} and
 \code{Rice.Frontend} runs the front end itself, with \code{-D__RICE__}, and
 the load path: the current directory, then \code{CURRYPATH}, then
 \file{lib/}.  The front end writes each module's \file{.tfcy} into
-\file{.curry/rice-1.0.0/} beside its source, with Rice's own cache files.
+\file{.curry/rice-<version>/} beside its source, with Rice's own cache files.
 The front end executable is \code{RICE_FRONTEND} if that's set, otherwise
 \file{bin/curry-frontend}, otherwise the one of the Curry system Rice was
 built with, otherwise the first of \code{curry-frontend},
@@ -441,8 +441,8 @@ ones:
 \end{itemize}
 
 Compiling Prelude takes a long time, so we cache aggressively.  Every module
-gets a directory \file{.curry/rice-1.0.0/} next to its source (Prelude's is
-\file{lib/.curry/rice-1.0.0/}), holding:
+gets a directory \file{.curry/rice-<version>/} next to its source (Prelude's is
+\file{lib/.curry/rice-<version>/}), holding:
 \begin{center}
 \begin{tabular}{@{}ll@{}}
 \toprule

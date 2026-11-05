@@ -1,34 +1,70 @@
-# Current state (2026-10-28)
+# Current state: rice 2.0 (2026-11-05)
 
-Work in progress: measuring and tuning the backtracking optimizations.
-Branch `phase1-codegen-and-runtime`, nothing pushed. Newest first:
+Rice 2.0 is tagged `v2.0.0` on branch `phase1-codegen-and-runtime`. Nothing
+is pushed yet; the GitHub release and CI are the next steps (see below).
+
+What 2.0 is:
+- Self-hosting, with a fixpoint (`tests/bootstrap.sh --fixpoint`), and
+  buildable from a release tarball with only `make` and a C compiler
+  (`make seed`, `make -j from-seed`, `make install`; README).
+- `Data.IORef`, `unsafePerformIO`, any number of constructor fields, and
+  shared IO actions that run every time (src/features-plan.md).
+- Backtracking optimizations #1, #2, #3, #5 on by default; #4 and path
+  compression kept as flags, measured to make no difference
+  (`src/results/optbench-2026-11-05.md`).
+- Against KiCS2: 1.53x faster by geometric mean over 51 programs, up to
+  477x on nondeterministic ones, 2.4x slower on deterministic ones
+  (`src/results/kics2-comparison-2026-11-05.md`). The paper's numbers are
+  these two files, and the commits they name.
+- Suite: 138 pass, 0 fail, 11 xfail. Bootstrap: 165 files identical.
+
+Next, before 3.0:
+- Push the branch; run the "Front end binaries" workflow and add its
+  checksums to `tools/frontend-checksums.txt`; `make seed` and publish
+  `rice-2.0.0.tar.xz` as a GitHub release, which runs the Linux release
+  check (`.github/workflows/`).
+
+3.0 (src/features-plan.md has the details):
+- Optimizations: strictness analysis, then the optimizer back on by
+  default; dictionary specialization for the deterministic gap.
+- Remove #4 and path compression from the runtime.
+- Features: `catch`, encapsulated search and set functions, incremental
+  `=:=`, narrowing raw `Int` fields, `ReadShowTerm`, pipes.
+- `--interactive` with IO after a choice (the later-commit question in
+  `~/curry/papers/unif/proofs/LEAKS.md`).
+- A rice-native reader for the caches, with no `String` (and maybe a
+  binary format); per-push CI (needs KiCS2 on the runner); a Windows port
+  (LLP64, POSIX calls); an uncaught `error` prints the raw `prim_error`
+  term after its message.
+
+Everything below is from before 2.0.
+
+# Before 2.0 (2026-10-28 and later)
+
+Work then: measuring and tuning the backtracking optimizations.
+Newest first:
 
 - `3916ca7`: #3 records its cutoff lazily; scaled-up bench programs.
 - `62ecb1c`: the #2 tail-dispatch flag; old_rice, KiCS2 and PAKCS sets.
 - `42c0fcd`: optbench with real forward chains and interleaved timing.
 - `73fd88a`: the optimizations fixed per the proofs; path compression.
 
-The previous contents of this file (the garbage collector, stage 6) are in
-git history at `eddacd5`. Leak 2 there (the trail keeping snapshots alive)
-is closed: gc-plan.md, stage 8.
-
-Suite on 2026-10-28, default flags, before the two commits that follow
-`3916ca7`: 120 pass, 13 xfail, 0 fail (not rerun with all flags on).
-Suites at `3916ca7`: `tests/run.sh` 119 pass, 13 xfail, 0 fail, both with
-the default flags and with all flags on. `regressions/fieldrep_debug_print`
-failed to compile once with an empty build log and passed on three reruns,
-the same kind of transient failure copy_chain had once.
+The contents of this file before that (the garbage collector, stage 6) are
+in git history at `eddacd5`.
 
 ## The optimizations
 
-| # | flag | default | verdict so far |
+Final verdicts (2026-11-05, `src/results/optbench-2026-11-05.md`); the rest
+of this section is the earlier measurements that led there.
+
+| # | flag | default | verdict |
 |---|---|---|---|
-| 1 | `OPT_NONDET_TRAIL` | on | Big win almost everywhere; less clear on SearchMAC (see the barrier). |
-| 2 | `OPT_TAIL_DISPATCH` | on | Little effect, never slower. |
-| 3 | `OPT_SCOPED_BACKTRACK` | on | Big win on the FunPats programs. With the lazy cutoff, its fixed cost is gone. |
-| 4 | `OPT_COPY_COLLAPSE` | off | Mostly redundant with path compression. Candidate to drop. |
-| 5 | `OPT_EPOCH_TRAIL` | off | Net win since nodes went back to six words (2026-10-28 rerun below). Candidate to turn on. |
-| 6 | `OPT_PATH_COMPRESS` | off | Useful; covers most of what #4 does. |
+| 1 | `OPT_NONDET_TRAIL` | on | Essential: 4.3x alone over naive. |
+| 2 | `OPT_TAIL_DISPATCH` | on | Small win: 4% on average, up to 27%, never meaningfully slower. |
+| 3 | `OPT_SCOPED_BACKTRACK` | on | Essential for functional patterns: up to 494x. |
+| 4 | `OPT_COPY_COLLAPSE` | off | No measurable effect. Remove in 3.0. |
+| 5 | `OPT_EPOCH_TRAIL` | on (since 2026-11-05) | 9% on average with #1 on, up to 5.3x, at most 9% slower. |
+| 6 | `OPT_PATH_COMPRESS` | off | No measurable effect. Remove in 3.0. |
 | – | `OPT_WRITE_BARRIER` | on iff #1 and #5 | Required for #1+#5 soundness. |
 
 All flags on: `-DOPT_NONDET_TRAIL=1 -DOPT_SCOPED_BACKTRACK=1
