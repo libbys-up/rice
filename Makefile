@@ -65,7 +65,7 @@ prelude: stdlib
 SEED_CC     := $(shell tools/find-cc.sh 2>/dev/null)
 SEED_CFLAGS := -std=c11 -O2 -Iruntime -Iseed/gen
 SEED_RUNTIME := runtime.c trail.c machine.c heap.c gc.c ext.c
-SEED_C   = $(shell find seed/gen -name '*.c' 2>/dev/null) seed/rice-main.c \
+SEED_C   = $(shell find seed/gen -name '*.c' -not -name '._*' 2>/dev/null) seed/rice-main.c \
            $(addprefix runtime/,$(SEED_RUNTIME)) \
            $(addprefix runtime/ext/,$(addsuffix .c,$(shell cat seed/ext.txt 2>/dev/null)))
 SEED_OBJ = $(patsubst %.c,seed/obj/%.o,$(SEED_C))

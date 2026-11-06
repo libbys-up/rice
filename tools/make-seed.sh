@@ -81,5 +81,9 @@ echo "   $(find "$SEED/gen" -name '*.c' | wc -l | tr -d ' ') C files," \
      "$(wc -l < "$SEED/ext.txt" | tr -d ' ') externals files"
 
 echo "== writing $OUT"
-tar -C "$WORK" -cJf "$OUT" "$NAME"
+# macOS's tar would add a hidden "._" companion file for every file with
+# extended attributes (macOS tags files with com.apple.provenance), which
+# unpack as ordinary files on Linux; COPYFILE_DISABLE stops those, and
+# --no-xattrs drops the attributes themselves. GNU tar takes --no-xattrs too.
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$WORK" -cJf "$OUT" "$NAME"
 echo "   $(du -h "$OUT" | cut -f1)"
