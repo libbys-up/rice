@@ -264,7 +264,10 @@ buildExecutable opts modNames externals = do
       -- can't clash with a module's .c, even on a case-insensitive file
       -- system, where main.c and a module Main's Main.c are the same file.
       mainPath       = includeDir rootModule rootHPath </> "rice-main.c"
-      codeFlags    = ["-std=c11", "-O2"] ++ debugFlag ++ cflags
+      -- -std=c11 alone makes glibc hide POSIX functions the runtime uses
+      -- (localtime_r, pread, setenv, ...); _DEFAULT_SOURCE brings them back.
+      -- macOS shows them either way.
+      codeFlags    = ["-std=c11", "-D_DEFAULT_SOURCE", "-O2"] ++ debugFlag ++ cflags
       incFlags     = map ("-I" ++) (runtimeDir : incDirs)
       runtimeFiles = map (runtimeDir </>) [ "runtime.c", "trail.c", "machine.c"
                                           , "heap.c", "gc.c", "ext.c" ]

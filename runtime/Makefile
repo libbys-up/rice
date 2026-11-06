@@ -20,7 +20,7 @@
 # provides main()
 
 CC      ?= gcc
-CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -g
+CFLAGS  ?= -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -g
 AR      ?= ar
 
 SRC := runtime.c trail.c machine.c heap.c gc.c

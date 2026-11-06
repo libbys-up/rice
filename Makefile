@@ -63,7 +63,9 @@ prelude: stdlib
 # The same C compiler rice would choose (tools/find-cc.sh): clang if
 # there is one, not make's default cc, which is often an older gcc.
 SEED_CC     := $(shell tools/find-cc.sh 2>/dev/null)
-SEED_CFLAGS := -std=c11 -O2 -Iruntime -Iseed/gen
+# _DEFAULT_SOURCE: with -std=c11, glibc hides the POSIX functions the
+# runtime uses (Rice.Main's codeFlags has the same).
+SEED_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -O2 -Iruntime -Iseed/gen
 SEED_RUNTIME := runtime.c trail.c machine.c heap.c gc.c ext.c
 SEED_C   = $(shell find seed/gen -name '*.c' -not -name '._*' 2>/dev/null) seed/rice-main.c \
            $(addprefix runtime/,$(SEED_RUNTIME)) \
