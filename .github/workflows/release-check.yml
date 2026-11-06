@@ -1,0 +1,57 @@
+# Checks a rice release on Linux the way a user installs it: download the
+# release tarball, `make from-seed` with only a C compiler and the front
+# end, then run the test suite with the rice that built.
+#
+# It runs when a release is published, or by hand for a given tag.
+name: Release check (Linux)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to check (e.g. v2.0.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    # The front end releases are tagged frontend-<version>; skip those.
+    if: ${{ github.event_name == 'workflow_dispatch' || !startsWith(github.event.release.tag_name, 'frontend-') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang make xz-utils time
+          clang --version
+
+      - name: Download the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'rice-*.tar.xz'
+          tar -xJf rice-*.tar.xz
+          rm rice-*.tar.xz
+          echo "RICE_DIR=$PWD/$(ls -d rice-*/)" >> "$GITHUB_ENV"
+
+      - name: Build from the seed
+        run: |
+          cd "$RICE_DIR"
+          make -j"$(nproc)" from-seed
+
+      - name: Test suite
+        run: |
+          cd "$RICE_DIR"
+          PATH="$RICE_DIR/bin:$PATH" RICEHOME="$RICE_DIR" tests/run.sh
+
+      - name: Install
+        run: |
+          cd "$RICE_DIR"
+          make install PREFIX="$HOME/rice-install"
+          printf 'main :: IO ()\nmain = putStrLn "hello"\n' > /tmp/Hello.curry
+          cd /tmp && "$HOME/rice-install/bin/rice" Hello.curry && ./Hello

@@ -1,0 +1,70 @@
+# Builds the Curry front end rice is pinned to (the frontend/ submodule)
+# for each platform, and attaches the binaries to the GitHub release
+# frontend-<version>, where tools/get-frontend.sh downloads them.
+#
+# Run it by hand (Actions > Front end binaries > Run workflow) when the
+# pinned front end changes. Then add the checksum lines it prints (in each
+# job's "Checksum" step) to tools/frontend-checksums.txt and commit them.
+name: Front end binaries
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: "3.1.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An older Ubuntu, so the binary runs on older glibcs too.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-14
+            platform: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Cache Stack
+        uses: actions/cache@v4
+        with:
+          path: ~/.stack
+          key: stack-${{ matrix.os }}-${{ hashFiles('frontend/stack.yaml', 'frontend/*.cabal') }}
+
+      - name: Install Stack
+        run: command -v stack || curl -sSL https://get.haskellstack.org/ | sh
+
+      - name: Build
+        run: tools/get-frontend.sh --source
+
+      - name: Libraries it needs
+        run: |
+          if [ "$(uname)" = Darwin ]; then otool -L bin/curry-frontend; else ldd bin/curry-frontend; fi
+
+      - name: Package
+        run: |
+          file="curry-frontend-$VERSION-${{ matrix.platform }}.gz"
+          gzip -9 -c bin/curry-frontend > "$file"
+          echo "FILE=$file" >> "$GITHUB_ENV"
+
+      - name: Checksum
+        run: |
+          if command -v sha256sum >/dev/null; then sha256sum "$FILE"; else shasum -a 256 "$FILE"; fi
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="frontend-$VERSION"
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" --title "Curry front end $VERSION" \
+              --notes "Prebuilt curry-frontend $VERSION for rice (tools/get-frontend.sh). Built from the frontend/ submodule; curry-frontend is BSD-3 licensed (frontend/LICENSE)." || true
+          gh release upload "$tag" "$FILE" --clobber

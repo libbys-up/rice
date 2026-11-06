@@ -1,6 +1,7 @@
 module replace_Prelude where
 
--- replacements for Prelude that we need for RICE
+-- Rice's own definitions of some Prelude functions. Rice.Files.Replace
+-- swaps each one in for the Prelude function of the same name.
 
 aValueNat :: Int -> Int
 aValueNat n = n ? -n ? aValueNat (n+1)
@@ -28,18 +29,21 @@ aValueInt = 0 ? aValueNat 1
 --              else nat2float (m / 10) (i `div` 10) + m * fromInt (i `mod` 10)
 
 
--- Make sure these are all the PAKCS versions
--- except for =:<<=
+-- These follow PAKCS's Prelude, except for the types of (=:=) and (=:<=).
+-- The front end compiles Prelude's KiCS2 branch, where they have no
+-- `Data a =>` constraint, so every call passes two arguments. A replacement
+-- has to have the same type as the function it replaces: a constraint here
+-- would add a dictionary parameter that no call supplies.
 ioError :: IOError -> IO _
 ioError err = error (show err)
 
-(=:=) :: Data a => a -> a -> Bool
+(=:=) :: a -> a -> Bool
 x =:= y = constrEq x y
 
 constrEq :: a -> a -> Bool
 constrEq external
 
-(=:<=) :: Data a => a -> a -> Bool
+(=:<=) :: a -> a -> Bool
 x =:<= y = nonstrictEq x y
 
 nonstrictEq :: a -> a -> Bool

@@ -1,3 +1,12 @@
+------------------------------------------------------------------------------
+--- Turns every string literal (a list of `Char` literals) into a single
+--- constructor whose module is empty and whose name is the string, like
+--- `("", "hello")`. The code generator builds the list at run time from a
+--- C string (`toCurryString`), instead of a node per character in the code.
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
+
 module Rice.Transform.StrLit (condenseStrings) where
 
 import FlatCurry.Typed.Types
@@ -19,9 +28,8 @@ condense (TOr e1 e2)         = TOr (condense e1) (condense e2)
 condense (TCase ct e bs)     = TCase ct (condense e) (map (\(TBranch p e) -> TBranch p (condense e)) bs)
 condense (TTyped e t)        = TTyped (condense e) t
 
--- check to see if our expression is really a literal string.
--- The empty parameter is to avoid us matching an empty list by itself.
--- It has to be part of a string literal.
+-- Is this expression a string literal? `empty` is True at the top, so that
+-- a bare `[]` isn't mistaken for the empty string.
 isString :: TExpr -> Bool -> Bool
 isString c empty = case c of
     TComb _ ConsCall ("Prelude","[]") []     -> not empty
@@ -34,6 +42,6 @@ isChar c = case c of
     _                -> False
 
 getString :: TExpr -> String
-getString (TComb _ ConsCall ("Prelude","[]") []) = ""
+getString (TComb _ ConsCall ("Prelude","[]") [])     = ""
 getString (TComb _ ConsCall ("Prelude",":")  [h, t]) = char h : getString t
  where char (TLit _ (Charc c)) = c

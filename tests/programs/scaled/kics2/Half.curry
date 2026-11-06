@@ -1,0 +1,27 @@
+-- Scaled-up copy of tests/programs/kics2_bench/Half.curry, for optbench.sh's timing:
+-- main runs KiCS2's goal1 (half of 10000) instead of goal2 (half of 1600).
+
+-- From KiCS2's benchmark suite (kics2/benchmarks/suite/Half.curry), unchanged.
+module Half where
+
+data Peano = O | S Peano
+
+toPeano :: Int -> Peano
+toPeano n = if n==0 then O else S (toPeano (n-1))
+
+equal :: Peano -> Peano -> Bool
+equal O O = True
+equal (S p) (S q) = equal p q
+equal (S _) O = False
+equal O (S _) = False
+
+add :: Peano -> Peano -> Peano
+add O     p = p
+add (S p) q = S (add p q)
+
+half y | equal (add x x) y = x where x free
+
+goal1 = equal (toPeano 5000) (half (toPeano 10000))
+goal2 = equal (toPeano 800) (half (toPeano 1600))
+
+main = goal1

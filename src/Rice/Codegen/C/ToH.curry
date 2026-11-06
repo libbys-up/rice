@@ -1,250 +1,286 @@
-module Rice.Codegen.C.ToH (toH) where
+------------------------------------------------------------------------------
+--- Generates a module's C header (`Module.h`).
+---
+--- Every constructor and every function that isn't an inline primitive
+--- gets a tag `#define`, a static `Symbol`, and the inline functions
+--- `make_X` (allocate a node) and `set_X` (rewrite `root` in place).
+--- Constructors also get `make_X_free` and `set_X_free`, which build the
+--- constructor with free variables as its children, for narrowing.
+---
+--- Boxed `Int`, `Char` and `Float` are ordinary one-constructor types here;
+--- the only thing special about them is the raw child their `reps` record.
+--- Even a constructor with no children is allocated fresh by `make_X`; we
+--- don't share preallocated copies.
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
 
-import Codegen.C.C
+module Rice.Codegen.C.ToH (toHeader) where
+
+import Data.Maybe (isJust)
+import Text.Pretty
+
 import ICurry.Types
-import ICurry.Goodies
-import Data.Functional.DList
-import Codegen.Names
-import Codegen.CodeGen
+import Rice.Codegen.C.C
+import Rice.Codegen.C.PrimOps (lookupPrim)
+import Rice.Codegen.Names (mangle, uninstance, toName, getTag)
+import Rice.Codegen.FieldReps (FieldRep (..), FieldRepTable (..), isRaw)
+import qualified Data.Map as Map
 
+--- A module's whole header, as one `Doc` -- `pPrint` it and write the
+--- result to `ModuleName.h`.
+toHeader :: FieldRepTable -> IProg -> Doc
+toHeader reps (IProg name imps types allFuns) = vcat $
+  [ text ("#ifndef " ++ guardName ++ "_H")
+  , text ("#define " ++ guardName ++ "_H")
+  , text ""
+  , cinclude "runtime"
+  ] ++ map cinclude imps ++
+  [ text "" ] ++
+  map declareFun funs ++
+  [ text "" ] ++
+  concatMap makeTagsFor types ++
+  concatMap (writeConSymbol reps) cons ++
+  concatMap (writeFunSymbol reps) funs ++
+  [ text "" ] ++
+  concatMap setCon cons ++
+  concatMap setFun funs ++
+  concatMap makeCon cons ++
+  concatMap makeFun funs ++
+  concatMap (setConFree reps) cons ++
+  concatMap (makeConFree reps) cons ++
+  [ text ("#endif //" ++ guardName ++ "_H") ]
+ where
+  -- The whole module name, with `.` (not allowed in a macro name) as `_`.
+  -- Just the last component wouldn't be unique: Foo.Types and Bar.Types.
+  guardName = map (\c -> if c == '.' then '_' else c) name
+  -- Primitives are inlined at every call site (Rice.Codegen.C.PrimOps),
+  -- so they get nothing here.
+  funs = [f | f@(IFunction n _ _ _ _) <- allFuns, not (isJust (lookupPrim n))]
+  cons = [c | IDataType _ cs <- types, c <- cs]
 
-toH :: IProg -> String -> IO ()
-toH ip file = do let ((), dlist) = runWriter (toHeader ip)
-                 writeFile file (toList dlist)
+------------------------------------------------------------------------------
+-- Function prototypes, for the Symbols and for other modules' code
+------------------------------------------------------------------------------
 
-toHeader :: IProg -> CodeGen ()
-toHeader (IProg name imps types allFuns)
- = do let internal = filter (not . isExternal) allFuns
-      let external = filter isExternal allFuns
-      makeIntro name imps allFuns
-      mapM_ makeTags types 
-      writeSymbols types funs
-      -- optimization: Don't make multiple copies of constant values.
-      -- This is part of the flywheel pattern.
-      mapM_ declConstant [n | (IDataType _ cs) <- types, (n,0) <- cs]
-      mapM_ setType types
-      mapM_ setFun funs
-      mapM_ makeType types
-      mapM_ makeFun funs
-      mapM_ setTypeFree types
-      mapM_ makeTypeFree types
-      emit $ "#endif //"++name++"_H"
-
-makeIntro :: String -> [String] -> [IFuncDecl] -> CodeGen ()
-makeIntro name imps funs
- = do emit $ "#ifndef "++name++"_H"
-      emit $ "#define "++name++"_H"
-      nl
-      cinclude "runtime"
-      mapM_ cinclude imps
-      nl
-      mapM_ declareFun funs
-      nl
-
--- declare the f_hnf functions
 declareFun :: IFunction -> CStmt
-declareFun (IFunction f _ _ _ _) = cfunDecl "void" (hnf f) [("field", "root")]
+declareFun (IFunction f _ _ _ _) = cfunDecl hnfRet (hnf f) hnfParams
 
--- declare the constants for the flywheel pattern
-declConstant :: IQName -> CStmt
-declConstant n = emit $ "extern field " ++ mangle n ++ ";\n"
+------------------------------------------------------------------------------
+-- Tags
+------------------------------------------------------------------------------
 
-
--- #define all of the tages for constructors
-makeTags :: IDataType -> CStmt
-makeTags (IDataType name constrs)
- = do comment $ "tags for "++name
-      mapM_ makeTag constrs
-      nl
+makeTagsFor :: IDataType -> [CStmt]
+makeTagsFor (IDataType _ cs) = map makeTag cs
  where makeTag (n,_) = cdefine (tag n) (getTag n + 5)
 
----------------------------------------------------------------------
--- Write out the symbol table for each constructor and function
--- The symbol for 
--- q.f :: Int -> Int -> Int
--- will look like
--- static Symbol q_f_symbol = { .tag = "FUNCTION_TAG", 
---                              .arity = 2, 
---                              .name = "q.f", 
---                              .hnf = &q_f_hnf };
---
--- The symbol for 
--- data Maybe a = Nothing | Just a
--- will look like
--- static Symbol Prelude_Nothing_symbol = { .tag = "Prelude_Nothing_TAG",
---                                          .arity = 0,
---                                          .name = "Prelude.Nothing",
---                                          .hnf = &CTR_hnf };
----------------------------------------------------------------------
-writeSymbols :: [IDataType] -> [IFunction] -> CodeGen ()
-writeSymbols types funs =
- do mapM_ conSymbol [c | t <- types, c <- cons t]
-    mapM_ funSymbol funs
-    nl
+------------------------------------------------------------------------------
+-- Symbols
+------------------------------------------------------------------------------
+
+symbolName :: IQName -> CName
+symbolName n = mangle n ++ "_symbol"
+
+repsName :: IQName -> CName
+repsName n = mangle n ++ "_reps"
+
+--- A symbol's definition, preceded by its `reps` array (`node.h`'s
+--- `FieldRep`) when it has a raw slot. Without one, `.reps` is left out
+--- and so is NULL: every child a pointer.
+symbolLit :: IQName -> CExpr -> IArity -> [FieldRep] -> CExpr -> [CStmt]
+symbolLit n tagExpr arity rs hnfExpr =
+  [ (text "static const unsigned char" <+> text (repsName n) <> text "[]")
+      .= carray (map repLit rs)
+  | hasRaw ] ++
+  [ (text "static Symbol" <+> text (symbolName n)) .=
+      carray ([ dinit "tag"   tagExpr
+              , dinit "arity" (int arity)
+              , dinit "name"  (cstring (toName n)) ] ++
+              [ dinit "reps"  (text (repsName n)) | hasRaw ] ++
+              [ dinit "hnf"   hnfExpr ])
+  ]
  where
-  cons (IDataType _ cs) = cs
-  conSymbol (n,a)                 = symbol n (tag n)        a "&CTR_hnf" 
-  funSymbol (IFunction n a _ _ _) = symbol n "FUNCTION_TAG" a ("&"++hnf n)
-  tag n = mangle n ++ "_TAG"
+  hasRaw = any isRaw rs
+  repLit r = text $ case r of
+    RPtr   -> "R_PTR"
+    RInt   -> "R_INT"
+    RChar  -> "R_CHAR"
+    RFloat -> "R_FLOAT"
 
-symbol :: String -> String -> Int -> String -> String -> CStmt
-symbol name tag arity hnf 
-  = do stmt $ "static Symbol "++ (sym name) .=
-                   (carray [ ".tag" .= tag,
-                             ".arity" .= show arity,
-                             ".name" .= quote (toName name),
-                             ".hnf" .= hnf])
+--- The reps for a symbol, from the table; a name the table doesn't have
+--- is all pointers.
+lookupReps :: (FieldRepTable -> Map.Map (String, String) [FieldRep])
+           -> FieldRepTable -> IQName -> [FieldRep]
+lookupReps sel reps (m,n,_) = Map.findWithDefault [] (m,n) (sel reps)
 
---------------------------------------------------------------------
--- set_f functions
--- These overwrite the contents of the root node to match f.
--- q.f :: Int -> Int -> Int
--- will have a set_f function that looks like
--- void set_q_f(field root, field v1, field v2, int missing)
--- {
---     root.n = &q_f_symbol;
---     root.missing = missing;
---     child_at_i(root,0) = v2;
---     child_at_i(root,1) = v1;
---     child_at_i(root,2) = NULL;
--- }
---------------------------------------------------------------------
+writeConSymbol :: FieldRepTable -> (IQName, IArity) -> [CStmt]
+writeConSymbol reps (n,a) =
+  symbolLit n (text (tag n)) a (lookupReps frCons reps n) (text "&CTR_hnf")
 
-set :: (IQName, Int) -> CStmt
-set (name,arity) 
- = do comment $ uninstance name
-      let args = (("field", "root") : makeArgs [1..arity] ++ [("int", "missing")])
-      hfunDefn "void" args ("set_"++mangle name) 
-         do stmt $ symbol "root" .= (symptr name)
-            stmt $ missing "root" .= "missing"
-            stmt $ makeArray True arity
-            mapM_ stmt $ [children "root" [x] .= var y)  
-                              | (x,y) <- zip [0..] (reverse [1 .. arity])]
-            mapM_ stmt $ [children "root" [x] ++ ".n" .= "NULL" | x <- [arity..2]] 
-      nl
+writeFunSymbol :: FieldRepTable -> IFunction -> [CStmt]
+writeFunSymbol reps (IFunction n a _ _ _) =
+  symbolLit n (text "FUNCTION_TAG") a (lookupReps frFuns reps n)
+            (text ('&' : hnf n))
 
-setType :: IDataType -> CStmt
-setType (IDataType _ cons) = mapM_ set cons
+------------------------------------------------------------------------------
+-- set_X / make_X: shared child-array plumbing
+------------------------------------------------------------------------------
 
-setFun :: IFunction -> CStmt
-setFun (IFunction name arity _ _ _) = set (name,arity)
+makeArgs :: [Int] -> [(CType,CName)]
+makeArgs = map (\v -> ("field", varName v))
 
---------------------------------------------------------------------
--- make_f functions
--- These allocate memory for a new node holding either a function
--- or a constructor
--- q.f :: Int -> Int -> Int
--- will have a make_q_f function that looks like
--- field make_q_f(int missing, field v1, field v2)
--- {
---     field root;
---     root.n = alloc(3);
---     root.n->symbol = &q_f_symbol;
---     root.missing = missing;
---     child_at_i(root,0) = v2;
---     child_at_i(root,1) = v1;
---     child_at_i(root,2) = NULL;
---     return root;
--- }
---------------------------------------------------------------------
+--- Children 3 and up live in a spill array at `children[3].a` (`node.h`).
+--- We always set that slot, to the array or to `NULL`, because `set_X`
+--- may be rewriting a node that had a spill array before.
+setChildArray :: IArity -> CStmt
+setChildArray arity
+  | arity > 3 = (root <> text ".n->children[3].a") .= alloc_f (arity - 3)
+  | otherwise = (root <> text ".n->children[3].a") .= text "NULL"
 
-make :: (IQName, Int) -> Stmt
-make (name,arity) 
- = do comment $ uninstance name
-      let args = makeArgs [1..arity] ++ [("int", "missing")]
-      hfunDefn "field" ("make_"++mangle name) args 
-        do stmt "field root"
-           stmt "root.n" .= alloc_n 1
-           symbol "root" .= (symptr name)
-           stmt missing "root" .= "missing"
-           makeArray False arity
-           mapM_ stmt $ [children "root" [x] .= var y ++ ";") |
-                           (x,y) <- zip [0..] (reverse [1..arity]]
-           creturnExp "root"
-      nl
+--- Stores the arguments in `root`'s children in order: child 0 is the
+--- first argument. ICurry's `IVarAccess` and `INodeAssign` index children
+--- this way. (Apply nodes store theirs in reverse; that's in `runtime.h`.
+--- See the developer's manual, "Argument order".)
+setRealChildren :: IArity -> [CStmt]
+setRealChildren arity = zipWith setChild [0 .. arity-1] [1 .. arity]
+ where setChild i v = children root [i] .= var v
 
--- Constants are different because we only ever make one of them,
--- so the make function just returns the one that's already made.
--- field make_Prelude_Nothing(int missing)
--- {
---     return Prelude_Nothing;
--- }
-makeConstant :: IQName -> CStmt
-makeConstant name 
-  = do comment $ uninstance name
-       hfunDefn "field" (mangle name) [("int", "missing")]
-           do creturnExp (mangle name)
-       nl
+--- Clears child slots 0 to 2 that have no argument, since `root` may have
+--- held something else before.
+setUnusedChildren :: IArity -> [CStmt]
+setUnusedChildren arity = map nullChild [arity .. 2]
+ where nullChild i = (children root [i] <> text ".n") .= text "NULL"
 
-makeType :: IDataType -> CStmt
-makeType (IDataType _ cons) 
-  = do mapM_ make         [(n,a) | (n,a) <- cons, a > 0]
-       mapM_ makeConstatn [n | (n,0) <- cons]
+--- Records the epoch a new node was created in (optimization #5). Only
+--- `make_X` does this: `set_X` rewrites an existing node, whose age
+--- doesn't change.
+epochStamp :: CStmt
+epochStamp = cifdef "OPT_EPOCH_TRAIL" [epoch root .= text "current_epoch"]
 
-makeFun :: IFunction -> CStmt
-makeFun (IFunction name arity _ _ _) = make (name,arity)
+------------------------------------------------------------------------------
+-- set_X
+------------------------------------------------------------------------------
 
------------------------------------------------------------------------
--- functions for making and seting free variables
------------------------------------------------------------------------
+--- `set_X` rewrites a node that already exists, so it goes through the
+--- collector's write barrier first (`runtime/gc.h`, `gc_remember`).
+setEntry :: IQName -> IArity -> [CStmt]
+setEntry name arity =
+  [ comment (uninstance name)
+  , hfunDefn "void" ("set_" ++ mangle name) args
+      ( [ scall "gc_remember" [root <> text ".n"]
+        , symbol root .= (text "&" <> text (symbolName name))
+        , missing root .= text "missing"
+        , setChildArray arity
+        ] ++
+        setRealChildren arity ++
+        setUnusedChildren arity ++
+        [ layoutCheck ("set_" ++ mangle name) ]
+      )
+  , text ""
+  ]
+ where args = ("field","root") : makeArgs [1..arity] ++ [("int","missing")]
 
-setTypeFree :: IDataType -> CStmt
-setTypeFree (IDataType _ cons) = mapM_ setConFree cons
+setCon :: (IQName, IArity) -> [CStmt]
+setCon (n,a) = setEntry n a
 
-setConFree :: (IQName, IArity) -> CStmt
-setConFree (n, a) 
- = do comment $ uninstance n
-      hfunDefn "void" (mangle n) [("field", "root")] body
-        do stmt $ symbol "root" .= (symptr n)
-           stmt $ nondet "root" .= "true"
-           stmt $ missing "root" .= "0"
-           makeArray True a
-           mapM_ stmt $ [children "root" [x] .= var y ++ ";") |
-                           (x,y) <- zip [0..] (reverse [1..a])]
-      nl
+setFun :: IFunction -> [CStmt]
+setFun (IFunction n a _ _ _) = setEntry n a
 
-makeTypeFree :: IDataType -> CStmt
-makeTypeFree (IDataType _ cons) = mapM_ makeConFree cons
+------------------------------------------------------------------------------
+-- make_X
+------------------------------------------------------------------------------
 
-makeConFree :: (IQName, IArity) -> CStmt
-makeConFree (n, a) 
- = do hfunDefn "field" (mangle name) []
-        do stmt "field root"
-           stmt $ "root.n" .= alloc_n 1
-           stmt $ nondet "root" .= "true"
-           stmt $ symbol "root" .= (symptr name)
-           stmt $ missing "root" .= "0"
-           makeArray False a
-           mapM_ stmt $ [children "root" [x] .= "free_var();" | x <- [0..a-1]]
-           returnExp "root"
-      nl
+makeEntry :: IQName -> IArity -> [CStmt]
+makeEntry name arity =
+  [ comment (uninstance name)
+  , hfunDefn "field" ("make_" ++ mangle name) args
+      ( [ text "field root" <> semi
+        , (root <> text ".n") .= alloc_n 1
+        , epochStamp
+        , symbol root .= (text "&" <> text (symbolName name))
+        , missing root .= text "missing"
+        , setChildArray arity
+        ] ++
+        setRealChildren arity ++
+        [ layoutCheck ("make_" ++ mangle name)
+        , creturnExpr root ]
+      )
+  , text ""
+  ]
+ where args = makeArgs [1..arity] ++ [("int","missing")]
 
-------------------------------------------------------------------------
--- helper functions
-------------------------------------------------------------------------
+--- `check_layout` (runtime.c) on a node just built, in builds with
+--- `CHECK_LAYOUT` on. A NULL child is allowed here: it's a recursive
+--- `let`'s placeholder, filled in right after.
+layoutCheck :: String -> CStmt
+layoutCheck fn =
+  cifdef "CHECK_LAYOUT"
+    [ scall "check_layout" [root, text "true", cstring fn] ]
 
+makeCon :: (IQName, IArity) -> [CStmt]
+makeCon (n,a) = makeEntry n a
 
--- get q_f_symbol for function f
-sym :: IQName -> String
-sym n = mangle n ++ "_symbol"
+makeFun :: IFunction -> [CStmt]
+makeFun (IFunction n a _ _ _) = makeEntry n a
 
--- get &q_f_symbol for function f
-symptr :: IQName -> String
-symptr n = "&" ++ (sym n)
+------------------------------------------------------------------------------
+-- set_X_free / make_X_free, for narrowing (constructors only)
+------------------------------------------------------------------------------
 
--- turn a list of args into (field v1, field v2, ...)
-makeArgs :: [Int] -> [(String, String)]
-makeArgs = map (\v -> ("field", var v))
+setChildFree :: Int -> CStmt
+setChildFree i = children root [i] .= call "free_var" []
 
--- because I use calloc for memory allocation,
--- I don't need to actually NULL out the array pointer
--- for the node that are newly allocated.
--- so anything coming from make_f is fine.
---
--- I DO need to NULL out the array pointer for any set_f function,
--- since it might have been used before and have a non-NULL array pointer.
-makeArray :: Bool -> Int -> CStmt
-makeArray nullable arity
- | arity > 3 = stmt $ "root.n->children[3].a" .= alloc_f (arity - 3)
- | nullable  = stmt $ "root.n->children[3].a" .= "NULL"
- | otherwise = return ()
+--- A free variable can't stand in a raw slot, so narrowing to a
+--- constructor with a raw field (a primitive box) stops with an error
+--- instead (`narrow_raw_error`, runtime.c).
+narrowRawError :: IQName -> CStmt
+narrowRawError n = scall "narrow_raw_error" [text "&" <> text (symbolName n)]
+
+hasRawField :: FieldRepTable -> IQName -> Bool
+hasRawField reps n = any isRaw (lookupReps frCons reps n)
+
+setConFree :: FieldRepTable -> (IQName, IArity) -> [CStmt]
+setConFree reps (n,a)
+ | hasRawField reps n =
+  [ hfunDefn "void" ("set_" ++ mangle n ++ "_free") [("field","root")]
+      [ text "(void)root" <> semi, narrowRawError n ]
+  , text ""
+  ]
+ | otherwise =
+  [ hfunDefn "void" ("set_" ++ mangle n ++ "_free") [("field","root")]
+      ( [ symbol root .= (text "&" <> text (symbolName n))
+        , nondet root .= ctrue
+        , missing root .= int 0
+        , setChildArray a
+        ] ++
+        map setChildFree [0..a-1]
+      )
+  , text ""
+  ]
+
+makeConFree :: FieldRepTable -> (IQName, IArity) -> [CStmt]
+makeConFree reps (n,a)
+ | hasRawField reps n =
+  [ hfunDefn "field" ("make_" ++ mangle n ++ "_free") []
+      [ narrowRawError n
+      , text "field root = {0}" <> semi
+      , creturnExpr root ]
+  , text ""
+  ]
+ | otherwise =
+  [ hfunDefn "field" ("make_" ++ mangle n ++ "_free") []
+      ( [ text "field root" <> semi
+        , (root <> text ".n") .= alloc_n 1
+        , epochStamp
+        , nondet root .= ctrue
+        , symbol root .= (text "&" <> text (symbolName n))
+        , missing root .= int 0
+        , setChildArray a
+        ] ++
+        map setChildFree [0..a-1] ++
+        [ creturnExpr root ]
+      )
+  , text ""
+  ]
+
+------------------------------------------------------------------------------

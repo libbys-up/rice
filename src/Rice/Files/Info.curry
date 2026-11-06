@@ -11,9 +11,7 @@ import Text.Pretty (pPrint)
 
 import Rice.Transform.Order
 
-
--- This is just a module for printing out information about curry programs.
--- A lot of this may be used in compiler flags.
+-- Printing programs and facts about them, for the printing options.
 
 counts :: TProg -> IO ()
 counts (TProg _ _ _ fs _) = do putStrLn $ "impl:  " ++ count impl  fs

@@ -1,39 +1,27 @@
-
+------------------------------------------------------------------------------
+--- A-normal form: every argument of a call or constructor, every case
+--- scrutinee and every choice alternative becomes a variable or literal,
+--- with `let`s for everything else. ICurry generation and the field reps
+--- both rely on this. The rewrite rules, for an evaluation context E:
+---
+---   E[let x = M in N]          ->  let x = M in E[N]
+---   E[case V of P -> M ...]    ->  case V of P -> E[M] ...
+---   E[F V...]                  ->  let t = F V... in E[t]
+---   E[V1 ? V2]                 ->  let t = V1 ? V2 in E[t]
+---
+--- where E is a hole, `let x = E in M`, `case E of ...`, `F V...V E M...M`,
+--- `E ? M` or `M ? E`. `anf` is written in continuation passing style:
+--- `k` builds the context around the normalized expression.
+---
+--- @author Steven Libby
+------------------------------------------------------------------------------
 
 module Rice.Transform.ANF (normalize, normalizeTExpr) where
 
 import Control.Monad.Trans.State
 import FlatCurry.Typed.Types
-import FlatCurry.Typed.Goodies (updTProgTExps)
 import Data.List (maximum)
-import Rice.Util (fresh, newVar)
-
---    $$
---    \begin{array}{lcl}
---    \mathcal{E} & = & \square \\
---                & | & \textbf{let}~x~\mathcal{E}~\textbf{in}~M \\
---                & | & \textbf{case}~\mathcal{E}~\textbf{of}~
---                                    (P~\texttt{->}~M)^* \\
---                & | & F~V\ldots V~\mathcal{E}~M\ldots M\\
---                & | & \mathcal{E} ? M\\
---                & | & M ? \mathcal{E}
---    \end{array}
---    $$\\
---    $$
---    \begin{array}{lcl}
---     \mathcal{E}[\textbf{let}~x = M~\textbf{in}~N] & \rightarrow &
---      \textbf{let}~x = M~\textbf{in}~\mathcal{E}[N]\\
---        \mathcal{E}[\textbf{case}~V~\textbf{of}~(P~\texttt{->}~M)^*] 
---        & \rightarrow & 
---        \textbf{case}~V~\textbf{of}~(P~\texttt{->}~\mathcal{E}[M])^*\\
---     \mathcal{E}[F~V^*] & \rightarrow &
---        \textbf{let}~t = F~V^*~\textbf{in}~\mathcal{E}[t] \\
---     \mathcal{E}[V_1 ? V_2] & \rightarrow &
---        \textbf{let}~t = V_1 ? V_2~\textbf{in}~\mathcal{E}[t] \\
---    \end{array}
---        $$
---    \caption{A-Normal form transformation}
---    \ref{fig:anf}
+import Rice.Util (fresh, newVar, updProgFresh)
 
 type VState e = State VarIndex e
 
@@ -41,7 +29,7 @@ pair :: a -> b -> (a,b)
 pair x y = (x,y)
 
 normalize :: TProg -> TProg
-normalize = updTProgTExps normalizeTExpr
+normalize = updProgFresh (\e -> anf e return)
 
 normalizeTExpr :: TExpr -> TExpr
 normalizeTExpr e = evalState (anf e return) (newVar e)
@@ -50,7 +38,7 @@ anf :: TExpr -> (TExpr -> VState TExpr) -> VState TExpr
 anf v@(TVarE _ _)     k = k v
 anf l@(TLit _ _)      k = k l
 anf (TFree vs e)      k = TFree vs <$> (anf e k)
-anf (TTyped e t)      k = flip TTyped t <$> (anf e k)
+anf (TTyped e t)      k = anf e (\v -> k (TTyped v t))
 anf (TOr e1 e2)       k = anfName e1 (\v1 -> anfName e2 (k . TOr v1))
 anf (TLet ls e)       k = do ls' <- mapM anfLet ls
                              TLet ls' <$> anfName e k

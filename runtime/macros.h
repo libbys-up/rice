@@ -3,57 +3,13 @@
 
 #include "node.h"
 
-// used to implement child_at in runtime.h
-// I just got tired of seeing this in runtime.h
-#define child_at_0(r) r->children[0]
-#define child_at_1(r) r->children[1]
-#define child_at_2(r) r->children[2]
-#define child_at_3(r) r->children[3].a[0]
-#define child_at_4(r) r->children[3].a[1]
-#define child_at_5(r) r->children[3].a[2]
-#define child_at_6(r) r->children[3].a[3]
-#define child_at_7(r) r->children[3].a[4]
-#define child_at_8(r) r->children[3].a[5]
-#define child_at_9(r) r->children[3].a[6]
-#define child_at_10(r) r->children[3].a[7]
-#define child_at_11(r) r->children[3].a[8]
-#define child_at_12(r) r->children[3].a[9]
-#define child_at_13(r) r->children[3].a[10]
-#define child_at_14(r) r->children[3].a[11]
-#define child_at_15(r) r->children[3].a[13]
-#define child_at_16(r) r->children[3].a[14]
-#define child_at_17(r) r->children[3].a[15]
-#define child_at_18(r) r->children[3].a[16]
-#define child_at_19(r) r->children[3].a[17]
-#define child_at_20(r) r->children[3].a[18]
-#define child_at_21(r) r->children[3].a[19]
-#define child_at_22(r) r->children[3].a[20]
-#define child_at_23(r) r->children[3].a[21]
-#define child_at_24(r) r->children[3].a[22]
-#define child_at_25(r) r->children[3].a[23]
-#define child_at_26(r) r->children[3].a[24]
-#define child_at_27(r) r->children[3].a[25]
-#define child_at_28(r) r->children[3].a[26]
-#define child_at_29(r) r->children[3].a[27]
-#define child_at_30(r) r->children[3].a[28]
-#define child_at_31(r) r->children[3].a[29]
-#define child_at_32(r) r->children[3].a[30]
-#define child_at_33(r) r->children[3].a[31]
-#define child_at_34(r) r->children[3].a[32]
-#define child_at_35(r) r->children[3].a[33]
-#define child_at_36(r) r->children[3].a[34]
-#define child_at_37(r) r->children[3].a[35]
-#define child_at_38(r) r->children[3].a[36]
-#define child_at_39(r) r->children[3].a[37]
-#define child_at_40(r) r->children[3].a[38]
-#define child_at_41(r) r->children[3].a[39]
-#define child_at_42(r) r->children[3].a[40]
-#define child_at_43(r) r->children[3].a[41]
-#define child_at_44(r) r->children[3].a[42]
-#define child_at_45(r) r->children[3].a[43]
-#define child_at_46(r) r->children[3].a[44]
-#define child_at_47(r) r->children[3].a[45]
-#define child_at_48(r) r->children[3].a[46]
-#define child_at_49(r) r->children[3].a[47]
+/* Child k of node r, as an lvalue: children 0-2 are in the node, and
+ * children 3 and up are in its spill array. Used to implement child_at in
+ * runtime.h. k is a constant there, so the compiler folds the test away;
+ * the inner (k) < 3 ? (k) : 0 keeps the untaken branch's index in bounds,
+ * so it doesn't draw an array-bounds warning.
+ */
+#define CHILD_AT(r, k) \
+    (*((k) < 3 ? &(r)->children[(k) < 3 ? (k) : 0] : &(r)->children[3].a[(k) - 3]))
 
 #endif // MACROS_H
