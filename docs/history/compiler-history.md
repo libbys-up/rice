@@ -3,9 +3,9 @@
 This file holds the history that used to live in comments in the compiler
 (`src/Rice/`, `replace/`): bugs we fixed, approaches we tried and dropped,
 measurements, and why some code ended up the way it is. The code comments now
-describe only the code as it stands (see `STYLE_GUIDE.md`, "Three kinds of
-comments"). The design is in `src/developers-manual.tex`, and the runtime's
-history is in `src/runtime-history.md`.
+describe only the code as it stands (see `docs/style-guide.md`, "Three kinds of
+comments"). The design is in `docs/developers-manual.tex`, and the runtime's
+history is in `docs/history/runtime-history.md`.
 
 Entries are grouped by module. If you change one of these places, check here
 first, because a lot of these are traps someone has already fallen into.
@@ -85,7 +85,7 @@ dead `let`, and the whole optimized module carried an unresolved choice.
 Forcing it in `writeOptIfChanged`'s `show` failed with "Non-determinism in
 IO occured", which reached us as KiCS2's "List data with no ground term".
 `stripTyped` reintroduced exactly the same symptom the first time it was
-written. See `STYLE_GUIDE.md`, "Pattern matching".
+written. See `docs/style-guide.md`, "Pattern matching".
 
 ### `deadCode` keeps `IO` bindings
 
@@ -229,7 +229,7 @@ worth looking at again (developer's manual, "Planned work").
 - The table is keyed without ICurry's index; matching on it made every
   lookup miss.
 - `primMake`/`primSet` derive both forms from one entry, instead of old_rice's
-  15 hand-written `make`/`set` pairs (`src/codegen-runtime-review.md`).
+  15 hand-written `make`/`set` pairs (`docs/history/codegen-runtime-review.md`).
 
 ## replace/
 

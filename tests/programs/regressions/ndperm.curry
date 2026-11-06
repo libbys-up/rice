@@ -1,4 +1,4 @@
--- Nondeterministic-insert permutation (backtracking-optimizations.md's #4,
+-- Nondeterministic-insert permutation (docs/history/backtracking-optimizations.md's #4,
 -- copy-instead-of-forward at collapse points): the user's own earlier
 -- attempt at constructor copying was found unsound permuting lists of
 -- length >= 5, though possibly a bug in that code rather than the idea
@@ -9,7 +9,7 @@
 -- under both OPT_COPY_COLLAPSE=0 (default) and
 -- RICE_CFLAGS=-DOPT_COPY_COLLAPSE=1 -- this program is exactly the shape
 -- that needs collapse_safe to exclude FREE_TAG and collapse to preserve
--- root's own nondet bit around set_copy (see STATUS.md's account of the
+-- root's own nondet bit around set_copy (see docs/history/status-2026-09.md's account of the
 -- two bugs #4 needed fixing).
 ndinsert :: a -> [a] -> [a]
 ndinsert x []     = [x]

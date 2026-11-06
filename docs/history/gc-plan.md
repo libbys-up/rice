@@ -1,8 +1,8 @@
 Plan: a precise copying garbage collector
 =========================================
 
-Written 2026-10-08. The last stage of `explicit-stack-plan.md` (stage 6).
-Builds on `field-reps-plan.md` (every node child and frame slot is known
+Written 2026-10-08. The last stage of `docs/history/explicit-stack-plan.md` (stage 6).
+Builds on `docs/history/field-reps-plan.md` (every node child and frame slot is known
 to be a pointer or a raw value) and on the evaluation machine (evaluation
 state lives in frames, not on the C stack).
 
@@ -48,7 +48,7 @@ entry by a `musttail` jump (their function is gone), or from `eval_hnf`
 (the C caller's locals are covered by C roots). In particular, a case
 block's variables are in its frame while it waits for its scrutinee. This
 is why frames are pushed eagerly (the lazy-frames experiment in
-`explicit-stack-plan.md` would have broken this).
+`docs/history/explicit-stack-plan.md` would have broken this).
 
 The check itself is one load, compare and branch at each entry:
 
@@ -315,7 +315,7 @@ Stage 7: generational collection (2026-10-30)
 
 **Why.** A program with a large live set copies all of it at every
 collection. Compiling hello world, a self-compiled rice collects 134
-times and copies 59.6 GB, with up to 1.5 GB live (current.md, "Rice vs
+times and copies 59.6 GB, with up to 1.5 GB live (docs/status.md, "Rice vs
 KiCS2"). Most live data is old and stays live, so the usual fix applies:
 collect the young data often and the old data rarely.
 

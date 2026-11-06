@@ -64,9 +64,9 @@ arguments, like `writeFile`'s string) can be collected. Test:
 Version 3.0
 -----------
 
-Rice 2.0 was tagged 2026-11-05 (current.md). Besides the items below, 3.0
+Rice 2.0 was tagged 2026-11-05 (docs/status.md). Besides the items below, 3.0
 removes #4 and path compression from the runtime (measured to make no
-difference, `src/results/optbench-2026-11-05.md`), and turns the optimizer
+difference, `docs/results/optbench-2026-11-05.md`), and turns the optimizer
 back on by default once there's strictness analysis.
 
 4. **Exceptions: `catch`.** `catch act h` pushes a handler frame holding

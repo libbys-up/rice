@@ -1,6 +1,6 @@
 -- Prelude.cond (backs guards: `f x | c = e` compiles to `f x = cond c e`;
 -- also directly callable, since it's exported) had the same bug as
--- strictApply (see debug_repros/strictapply_forward.curry), plus its own
+-- strictApply (see regressions/strictapply_forward.curry), plus its own
 -- second gap: it chased FORWARD_TAG in a loop, but the loop never
 -- redispatched with HNF_SETTLE on whatever it chased *to* -- so if
 -- chasing landed on a still-unresolved CHOICE_TAG or FUNCTION_TAG, the

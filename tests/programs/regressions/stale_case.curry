@@ -1,7 +1,7 @@
 -- From ~/curry/papers/unif/proofs/counterexamples/StaleCase.curry. An old shared
 -- thunk `o` is rewritten deterministically after a choice point, to point
 -- at a young node whose value depends on that choice. Wrong under #1+#5
--- (opt_conflict.md), and under #5 alone until generated code trailed
+-- (developer's manual, "Soundness rules"), and under #5 alone until generated code trailed
 -- root writes outside case branches (ToC.curry's uncaseTrail). Run it
 -- under RICE_CFLAGS="-DOPT_NONDET_TRAIL=0 -DOPT_EPOCH_TRAIL=1" too.
 -- Correct answers checked with PAKCS.

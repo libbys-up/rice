@@ -14,7 +14,7 @@ runtime/*.a
 runtime/runtime_smoke
 runtime/runtime_smoke.dSYM/
 
-# scratch build artifacts (test/test.c's own compiled binary)
+# a scratch binary from an old test/test.c (removed)
 test/a.out
 
 # tests/run.sh's per-test scratch dirs (.curry cache + compiled binaries);

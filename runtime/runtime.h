@@ -288,7 +288,7 @@ static inline bool settle_step(union field* x, bool* nondet)
  *    SCOPED_LOAD_CUTOFF(slot) names that slot; nothing is read until a retry.
  *    The cutoff is per case, not per function: the retry only redoes this case's dispatch,
  *    so it can't flip a choice that an enclosing case's dispatch read
- *    (backtracking_proofs.md, #3 rule 2; regressions/scoped_stale_dispatch.curry).
+ *    (developer's manual, "Soundness rules", #3; regressions/scoped_stale_dispatch.curry).
  *  * The cutoff is recorded lazily. SCOPED_MARK_CUTOFF goes first in the
  *    FUNCTION, CHOICE and FREE branches, the only ones that can push a choice.
  *    Until one runs, the trail can grow only by path compression's retargets
@@ -337,7 +337,7 @@ static inline bool settle_step(union field* x, bool* nondet)
  * SCOPED_FAIL_TRAIL is the trail for the FAIL case's fail(root),
  * which runs after its SCOPED_RETRY.
  *
- * Both always trail, whatever nondet says (backtracking_proofs.md, #3 rule 1).
+ * Both always trail, whatever nondet says (developer's manual, "Soundness rules", #3).
  * The proof of #3 needs the next undo to restore a scope's fail write,
  * and the flag here is only this case's own, which can be false
  * while the case's root depends on a choice (regressions/scoped_nested_nd.curry).
@@ -422,7 +422,7 @@ static inline bool needs_trail(union field root, bool nondet)
  * `nondet` says whether the rewrite read anything nondeterministic.
  * Root's own flag counts too: flags are sticky, so once a node has been
  * rewritten nondeterministically, every later rewrite of it counts as
- * nondeterministic (backtracking_proofs.md, nondet tracking rule 2).
+ * nondeterministic (developer's manual, "Soundness rules", the nondet flag, rule 2).
  * We set root's flag whether or not we pushed an entry,
  * because readers, early backtracking, copy collapse and the barrier read it.
  * The snapshot is taken before the flag changes, so undo() restores both.
@@ -484,7 +484,7 @@ static inline bool push_node(union field root, bool nondet)
     return nondet;
 }
 
-/* The write barrier (backtracking_proofs.md, "The write barrier").
+/* The write barrier (developer's manual, "Soundness rules").
  * Under #1, a deterministic rewrite of an old node isn't trailed.
  * If the new value points at nodes built for it,
  * a later nondeterministic rewrite of one of those would be skipped by #5 (young),
@@ -552,7 +552,7 @@ static inline union field stamp_node(union field n, unsigned int stamp)
  *    and under #5 alone it is when r is older than the current epoch.
  *    The entry saves r's one-hop target, so undo puts r back before any hop it skipped.
  *  * r keeps its own flag and epoch.
- * (backtracking_proofs.md, "Path compression").
+ * (developer's manual, "Soundness rules").
  */
 static inline field follow_forward(field r)
 {

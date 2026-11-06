@@ -475,7 +475,7 @@ void push_choice(union field left, union field right)
 // ?(left, right, false) reduces to FORWARD(left) and backtracks to ?(left,right,true)
 // ?(left, right, true) reduces to FORWARD(right) and backtracks to ?(left,right,false)
 // Both sides mark root nondet and trail it: a choice is nondeterministic
-// even in its last alternative (backtracking_proofs.md, nondet tracking rule 4).
+// even in its last alternative (developer's manual, "Soundness rules", the nondet flag, rule 4).
 //
 // if we reduce to left, then we will backtrack later
 // so our backtracking condition is side == 0

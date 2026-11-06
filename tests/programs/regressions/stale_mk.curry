@@ -1,4 +1,4 @@
--- #1+#5 write barrier, minimal (backtracking_proofs.md). `p` is old and
+-- #1+#5 write barrier, minimal (developer's manual, "Soundness rules"). `p` is old and
 -- rewritten deterministically to `(n, ())` with `n` new; `n` is then
 -- rewritten nondeterministically. Without the barrier #1 skips `p`'s
 -- entry and #5 skips `n`'s (young), so after backtracking `fst p` still

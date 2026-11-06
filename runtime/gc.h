@@ -44,7 +44,7 @@ extern size_t rice_gc_threshold;
 #define GC_MIN_TRAIL ((size_t)1 << 16)
 #endif
 
-/* Generations (gc-plan.md, stage 7).
+/* Generations (docs/history/gc-plan.md, stage 7).
  * Everything is allocated in the nursery. A minor collection, when the
  * nursery is full, copies the young nodes that are alive: a node's first
  * survival moves it to the survivor space, still young, and its second

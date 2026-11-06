@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rice's performance benchmark bench: builds and times a curated set of
 # compute-heavy Curry programs under several OPT_* flag combinations
-# (src/backtracking-optimizations.md), to measure the actual wall-clock
+# (docs/history/backtracking-optimizations.md), to measure the actual wall-clock
 # and allocation-count effect of each toggle. tests/run.sh only checks
 # correctness; this checks speed -- the two are deliberately separate
 # scripts since a benchmark run can take much longer than a correctness
@@ -106,7 +106,7 @@ RESULTS="$SCRATCH/results.tsv"
 # `default` (today's shipped defaults: #1/#3 on, rest off) and `all-on`
 # (everything, path compression included; #1+#5 turns on the write
 # barrier) stay as bonus reference points, not part of the pairwise isolation
-# itself. Not a full 2^4 factorial -- backtracking-optimizations.md's own
+# itself. Not a full 2^4 factorial -- docs/history/backtracking-optimizations.md's own
 # "Orthogonality" notes already argue the five don't interact in ways a
 # factorial sweep would need to expose, and 16 configs would multiply
 # this script's already-long runtime for little extra signal.

@@ -3,7 +3,7 @@
 --- needs in dependency order, then build and link the executable.
 ---
 --- The pipeline is described in the developer's manual
---- (`src/developers-manual.tex`, "The compiler").
+--- (`docs/developers-manual.tex`, "The compiler").
 ---
 --- @author Steven Libby
 ------------------------------------------------------------------------------

@@ -100,14 +100,14 @@ A test can carry these as comments anywhere in its source:
   under N MB, measured with `/usr/bin/time` (`-l` on macOS, `-v` with GNU
   time). Going over is a failure even if the output is right; an `XFAIL`
   test that goes over counts as its expected failure. This is how a
-  garbage collector regression shows up (`src/gc-plan.md`, stage 3).
+  garbage collector regression shows up (`docs/history/gc-plan.md`, stage 3).
 
 Each set of C flags gets its own runtime and Prelude objects (`obj-<hash>`
 directories), so runs with different `RICE_CFLAGS` don't share objects.
 Two runs at once still need `--no-clean` on the second, because a clean
 start wipes the compiled Prelude the first one is using.
 
-Every compile also gets `--lint-fieldreps` (`src/field-reps-plan.md`), so
+Every compile also gets `--lint-fieldreps` (`docs/history/field-reps-plan.md`), so
 a lint failure is a compile failure.
 
 ## `manifest.txt`
@@ -125,7 +125,7 @@ Four statuses, one line per exception:
   leave stale in the manifest.
 - `SLOW` — compiles and runs *correctly*, just not fast enough for a
   before-every-commit pass (old_rice's own benchmarks are deliberately
-  large — see `STATUS.md`'s Phase 1 verification pass for why: no
+  large — see `docs/history/status-2026-09.md`'s Phase 1 verification pass for why: no
   trampoline or backtracking optimizations beyond the toggle
   infrastructure and #1/#3 exist yet, Phase 2). Skipped by default, run
   with a longer timeout under `--slow`.
@@ -156,7 +156,7 @@ tests/bench.sh --configs="a=;b=-DOPT_EPOCH_TRAIL=1"  # replace the default combo
 
 Benches every `SLOW`-tagged program (the only ones both compute-heavy
 enough for wall-clock time to be meaningful and confirmed to actually
-finish) under a handful of `backtracking-optimizations.md` `OPT_*` combos
+finish) under a handful of `docs/history/backtracking-optimizations.md` `OPT_*` combos
 by default: a fully-disabled floor (`naive`), the shipped defaults, each
 of `#4`/`#5` added on top individually, and both together (`all-on`) --
 see the script's own header comment for the full flag list and why a full
@@ -169,7 +169,7 @@ one sample regardless of `--runs`. Results land in `tests/.bench/`
 (gitignored, same as `run.sh`'s `.run/`) and aren't committed anywhere as
 a golden — a benchmark number is a snapshot of one machine on one day, not
 something to regress against the way `run.sh`'s `.expected` files are;
-see `STATUS.md`'s dated write-ups for point-in-time findings instead.
+see `docs/history/status-2026-09.md`'s dated write-ups for point-in-time findings instead.
 
 `tests/lib.sh` holds the small amount of logic `run.sh` and `bench.sh`
 both need (`$RICEHOME`/`rice` resolution, manifest lookup, substring
@@ -179,7 +179,7 @@ filtering) — sourced by both rather than duplicated.
 
 `bench.sh` times the SLOW benchmarks under a few configs. `optbench.sh`
 is built around the optimizations instead (#1, #3, #4, #5 and path
-compression, `backtracking_proofs.md`):
+compression, the developer's manual, "Soundness rules"):
 
 ```
 tests/optbench.sh                      # every config, every program, 3 timing rounds

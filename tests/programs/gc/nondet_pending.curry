@@ -8,7 +8,7 @@
 -- keeps that iteration's list cell and accumulator alive. Only the oldest
 -- snapshot per node between two backtracking stop points can ever be
 -- restored, but the collector can't drop the others without knowing every
--- trail height held in frames (src/gc-plan.md, stage 3). Until then this
+-- trail height held in frames (docs/history/gc-plan.md, stage 3). Until then this
 -- uses memory in proportion to the loop: see manifest.txt.
 -- rice-maxrss: 150
 sumStrict :: Int -> [Int] -> Int

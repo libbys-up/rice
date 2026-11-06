@@ -4,7 +4,7 @@ This documents the conventions the working parts of Rice actually follow today,
 plus concrete suggestions where the codebase is inconsistent with itself. It's
 descriptive first (so new code fits in) and prescriptive second (so drift gets
 cleaned up over time). It doesn't cover things the project hasn't decided yet —
-see `STATUS.md` for open design questions (case-shortcutting, codegen ABI, etc).
+see `docs/history/status-2026-09.md` for open design questions (case-shortcutting, codegen ABI, etc).
 
 The clearest reference for "good Rice style" right now is the pipeline that's
 actually wired together and building: `Rice.Transform.*`, `Rice.Files.*`,
@@ -86,7 +86,7 @@ similarly tricky code, don't feel obligated to add LaTeX to simple modules).
 
 Long design-rationale prose (the kind in `Unbox`/`ANF`) is welcome inline when
 it explains *why*, not just *what*. Keep pure scratch-reasoning (the kind in
-`src/Rice/Codegen/CodeGen.txt` and `Scrutinee.txt`) out of the source tree —
+`src/Rice/Codegen/CodeGen.txt` and `docs/history/scrutinee-notes.txt`) out of the source tree —
 see the Documentation section below.
 
 **Don't narrate bug-fix history in a comment.** See "Three kinds of comments"
@@ -218,13 +218,13 @@ We write three kinds of comments, and each one has its own home.
 2. **Architecture.** How the pieces fit together, and why the system is
    designed the way it is: the node representation, the evaluation machine, the
    trail, the garbage collector, the compiler's passes. These go in the
-   developer's manual, `src/developers-manual.tex`, which explains the whole
+   developer's manual, `docs/developers-manual.tex`, which explains the whole
    design in one place for someone new to the project. A code comment can point
    to it in a line (or to a paper or web page for a general idea), but shouldn't
    repeat it.
 3. **Process.** What we tried that didn't work, old bugs and how we found them,
    measurements, and things that are no longer true. These go in a `.md` file
-   (`src/runtime-history.md` for the runtime, `src/compiler-history.md` for the
+   (`docs/history/runtime-history.md` for the runtime, `docs/history/compiler-history.md` for the
    compiler, or the plan document for the piece of work), where future sessions
    can find them. People reading the code
    don't need them, and they go stale as soon as the code changes again.
@@ -386,10 +386,10 @@ These aren't style rules so much as loose ends worth tidying when convenient
 - ~~`test/a.out` is checked into the repo~~ — resolved: it's ignored
   (`.gitignore`) and no longer tracked.
 - ~~`src/archetecture.md` has a typo'd filename~~ — resolved (2026-10-27): it
-  and `src/architecture.tex` are replaced by `src/developers-manual.tex`, with
-  the case shortcutting design moved to `src/case-shortcutting-plan.md`.
-  `src/Rice/Codegen/C/CodeGen.txt` and `Scrutinee.txt` are still informal
+  and `src/architecture.tex` are replaced by `docs/developers-manual.tex`, with
+  the case shortcutting design moved to `docs/plans/case-shortcutting-plan.md`.
+  `docs/history/codegen-notes.txt` and `docs/history/scrutinee-notes.txt` are still informal
   design notes sitting next to source files.
 - ~~`runtime/external.c` and `runtime/Prelude_external.c` currently implement
   overlapping externals differently~~ — resolved (2026-09-04): both deleted,
-  superseded by the single `runtime/ext/Prelude.c` (see `STATUS.md`'s Phase 2).
+  superseded by the single `runtime/ext/Prelude.c` (see `docs/history/status-2026-09.md`'s Phase 2).

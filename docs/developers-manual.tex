@@ -99,16 +99,16 @@ see the documentation of the \code{flatcurry}, \code{flatcurry-typed} and
 \subsection{Where things are documented}
 
 We write three kinds of documentation, and each has its own home
-(\file{STYLE_GUIDE.md}, ``Three kinds of comments''):
+(\file{docs/style-guide.md}, ``Three kinds of comments''):
 \begin{enumerate}
   \item \textbf{What the code does} is in comments in the code.
   \item \textbf{How the pieces fit together, and why} is in this manual.
   \item \textbf{History}: bugs we fixed, things we tried and dropped,
-    measurements.  That's in \file{src/compiler-history.md},
-    \file{src/runtime-history.md} and the plan documents in \file{src/}
+    measurements.  That's in \file{docs/history/compiler-history.md},
+    \file{docs/history/runtime-history.md} and the plan documents in \file{src/}
     (\S\ref{sec:docs}).
 \end{enumerate}
-\file{STATUS.md} and \file{current.md} record what state the project is in.
+\file{docs/history/status-2026-09.md} and \file{docs/status.md} record what state the project is in.
 
 %======================================================================
 \section{Getting started}
@@ -140,7 +140,7 @@ Users install from a release tarball instead, which needs only \code{make}
 and a C compiler: \code{make -j from-seed} builds \file{bin/rice} from the C
 Rice generated for itself (\file{seed/}, made by \code{make seed},
 \file{tools/make-seed.sh}), and \code{make install PREFIX=...} installs it
-(the README has the steps).  \file{src/bootstrap-plan.md} has the design.
+(the README has the steps).  \file{docs/history/bootstrap-plan.md} has the design.
 
 At run time Rice finds its standard library (\file{lib/}), its runtime
 (\file{runtime/}) and its Prelude replacements (\file{replace/}) in its home
@@ -227,13 +227,15 @@ These are C preprocessor flags, set with \code{--cflags}:
   (\S\ref{sec:replace}) \\
 \file{runtime/} & the runtime system, in C (\S\ref{sec:runtime}) \\
 \file{tests/} & the regression and benchmark test bench (\S\ref{sec:testing}) \\
-\file{test/} & a C smoke test for the runtime, and small examples \\
-\file{tools/} & \file{sync-lib.sh}, which refreshes \file{lib/} from KiCS2 \\
+\file{tools/} & scripts for building and releasing: the front end, the seed,
+  the C compiler search, precompiling \file{lib/}, and \file{sync-lib.sh},
+  which refreshes \file{lib/} from KiCS2 \\
 \file{frontend/} & the Curry front end, a git submodule (\S\ref{sec:frontend}) \\
 \file{bin/} & \code{make frontend}'s output; never commit it \\
-\file{debug_repros/} & small programs that reproduced past runtime bugs \\
-\file{src/*.md}, \file{src/*.tex} & this manual, the history files, and
-  plan documents (\S\ref{sec:docs}) \\
+\file{docs/} & this manual, the style guide, the project status, plans,
+  results and history (\S\ref{sec:docs}) \\
+\file{.github/workflows/} & GitHub Actions: the front end binaries, and a
+  check of each release on Linux \\
 \midrule
 \file{.curry/rice-<version>/} & next to each compiled module: Rice's caches and the
   generated C (\S\ref{sec:caching}); never edit or commit these \\
@@ -316,7 +318,7 @@ FlatCurry expressions, which the \code{flatcurry-typed} package lacks.
 \file{ext.h}, \file{.c} & helpers for writing them \\
 \file{prim.h} & C helpers for primitives (\code{div}, \code{mod}, rounding) \\
 \file{debug.h} & leveled debug output \\
-\file{Makefile} & builds the runtime alone, for \file{test/runtime_smoke.c} \\
+\file{Makefile} & builds the runtime alone, for \file{tests/runtime_smoke.c} \\
 \bottomrule
 \end{longtable}
 
@@ -325,25 +327,16 @@ FlatCurry expressions, which the \code{flatcurry-typed} package lacks.
 
 \begin{longtable}{@{}p{0.42\textwidth}p{0.54\textwidth}@{}}
 \toprule
-\file{STYLE_GUIDE.md} & coding and commenting conventions \\
-\file{STATUS.md}, \file{current.md} & the state of the project \\
-\file{src/compiler-history.md} & the compiler's history: bugs and dead ends \\
-\file{src/runtime-history.md} & the same for the runtime \\
-\file{src/backtracking-optimizations.md} & the design of the backtracking
-  optimizations \\
-\file{backtracking_proofs.md} & how to implement them so the proofs apply \\
-\file{opt_conflict.md} & why \#1 and \#5 need the write barrier \\
-\file{src/explicit-stack-plan.md} & the plan the evaluation machine was built
-  from \\
-\file{src/gc-plan.md} & the plan for the collector \\
-\file{src/field-reps-plan.md} & the plan for field reps \\
-\file{src/opt4-opt5-plan.md} & making \#4 and \#5 fire more often \\
-\file{src/bootstrap-plan.md} & compiling Rice with Rice \\
-\file{src/case-shortcutting-plan.md} & case shortcutting (\S\ref{sec:planned}) \\
-\file{src/codegen-runtime-review.md} & the review that shaped the port from
-  old\_rice \\
-\file{src/epoch.tex} & a write-up of \#5 \\
-\file{src/scoped-retry-failures.tex} & a write-up of \#3's failure cases \\
+\file{AGENTS.md} & a quick guide to working on Rice, for people and AI tools \\
+\file{docs/style-guide.md} & coding and commenting conventions \\
+\file{docs/status.md} & where the project stands, and what's next \\
+\file{docs/plans/} & plans for work not done yet: the missing features
+  (\file{features-plan.md}), case shortcutting (\S\ref{sec:planned}) \\
+\file{docs/results/} & the measurements behind the defaults: the backtracking
+  optimizations, and Rice against KiCS2 \\
+\file{docs/history/} & finished plans, the compiler's and the runtime's histories
+  (bugs and dead ends), old status snapshots and reviews.  They explain why
+  things are the way they are; the code and this manual say what they are. \\
 \bottomrule
 \end{longtable}
 
@@ -1287,17 +1280,17 @@ This doesn't make IO after a choice right in \code{--interactive}.  When
 \code{nf_all} backtracks to a choice made before an action ran, the commit has
 already dropped the trail entries made inside the action, including snapshots
 of nodes older than the choice, so those nodes keep their state from the first
-run.  See \file{src/features-plan.md}.
+run.  See \file{docs/plans/features-plan.md}.
 
 %----------------------------------------------------------------------
 \subsection{Making backtracking cheaper}
 \label{sec:opts}
 
-Each of these is a compile-time flag in \file{runtime.h}, so we can compare
-them.  The design is in \file{src/backtracking-optimizations.md}, and each
+Each of these is a compile-time flag in \file{opts.h}, so we can compare
+them.  The design is in \file{docs/history/backtracking-optimizations.md}, and each
 combination is proved to give the same answers as the baseline on a model of
-the machine; \file{backtracking_proofs.md} says what the implementation has to
-do for the proofs to apply.  The generated code is the same for every setting:
+the machine (the paper); \S\ref{sec:soundness} says what the implementation
+has to do for the proofs to apply.  The generated code is the same for every setting:
 the flags only change what the runtime's macros (\code{trail_node},
 \code{SCOPED_RETRY}, \code{collapse}, \dots) expand to.
 
@@ -1335,9 +1328,80 @@ the flags only change what the runtime's macros (\code{trail_node},
 
 \#1 and \#5 are each sound alone, but not together: \#1 can leave an old node's
 deterministic rewrite untrailed, pointing at a young node whose rewrite \#5
-didn't trail.  The write barrier fixes that (\file{opt_conflict.md}), and the
-build refuses \#1 and \#5 without it.  The measurements behind the defaults
-are in \file{src/results/optbench-2026-11-05.md}: \#1 and \#3 are essential,
+didn't trail.  The write barrier fixes that (\S\ref{sec:soundness}), and the
+build refuses \#1 and \#5 without it.
+
+\subsubsection{Soundness rules}
+\label{sec:soundness}
+
+The optimizations are proved correct on a model of Rice's machine: every
+subset of \#1, \#3, \#4, \#5 and path compression gives the unoptimized
+machine's answers, given the write barrier when \#1 and \#5 are both on.
+(\#2 only changes how a call jumps, and isn't modeled.)  The proofs are in
+the paper; this section is what the runtime has to do for them to apply to
+Rice.  Every rule here is implemented.  The regression test named after each
+one goes wrong when the rule is broken.  If you change the trail, the case
+loop, \code{collapse} or allocation, keep all of them.
+
+The proofs assume Curry's pattern-matching compilation (linear constructor
+patterns, inductively sequential rules), choices in the form
+\code{f x = f1 x ? f2 x} (which ICurry produces), and no node that can reach
+itself through a function call (\code{let x = not x}; a cycle through a
+constructor, \code{let xs = True : xs}, is fine).
+
+\paragraph{The nondet flag (\#1, and \#4 with \#1).}  \#1 skips the trail
+entry for a rewrite whose \code{nondet} is false, so the flag has to cover
+everything the rewrite read.
+\begin{enumerate}
+  \item Every node the match reads counts: each hop of a forward chain, and
+    each node of a nested pattern, not just the final scrutinee.
+  \item Flags are sticky: a node's later rewrites count as nondeterministic
+    once one was.  \code{trail_node} ORs in \code{root}'s own flag, and a case
+    loop's flag starts at \code{root}'s, not at false.
+  \item Evaluating a needed argument keeps the flag collected on the way to it.
+  \item A choice is always nondeterministic, including its last alternative.
+  \item Free-variable bindings are always trailed and flagged
+    (\code{save_copy}, \code{push_choice}, \code{choose}).
+\end{enumerate}
+
+\paragraph{\#3, scoped backtracking.}  The write that fails a case's root is
+always trailed when \#3 is on (\code{SCOPED_RESAVE}, \code{SCOPED_FAIL_TRAIL}),
+whatever the flag says (test: \code{scoped_nested_nd}).  The retry cutoff is
+per case, not per function, so a retry only flips choices made since its own
+case began (\code{scoped_stale_dispatch}).  The cutoff is recorded lazily,
+the first time the case reaches a function, choice or free variable.
+
+\paragraph{\#4, copy collapse.}  Copy only a value that can't be undone: a
+constructor, not a function, choice or free variable, and with \code{nondet}
+false (\code{collapse_safe}; test \code{copy_unjust}).  The copy is trailed
+exactly as the forward it replaces would be, and keeps the destination's own
+flag and epoch.
+
+\paragraph{\#5, epoch trailing.}  Skip the trail entry when
+\code{root.epoch >= current_epoch} (\code{needs_trail}).  Each choice point
+advances the epoch once; \code{undo} restores the epoch saved with the choice.
+A snapshot keeps the node's own epoch, so \code{undo} brings an old node back
+as old.  Every trail site makes the same decision.
+
+\paragraph{The write barrier (\#1 with \#5).}  When a node is rewritten
+deterministically, every node allocated to build its new value is stamped
+\code{min(root.epoch, current_epoch)}, as old as the node it hangs from,
+instead of \code{current_epoch} (\code{REWRITE_STAMP}, \code{STAMPED}).
+Without it, an untrailed deterministic rewrite of an old node can point at a
+young node whose later nondeterministic rewrite \#5 doesn't trail, and
+backtracking leaves the old node seeing a stale value (tests:
+\code{stale_apply}, \code{stale_case}, \code{stale_mk}, \code{stale_pick}; they
+all fail when built with \code{-DOPT_ALLOW_UNSOUND=1}).  Lowering a stamp
+further is safe, since it only makes \#5 trail more; raising one never is.
+\#5 without \#1 doesn't need the barrier.
+
+\paragraph{Path compression.}  Skip only forwards whose \code{nondet} is
+false.  The retargeting write goes through the ordinary trail decision as a
+deterministic write (\code{trail_node(r, false)}), and keeps \code{r}'s own
+flag and epoch.
+
+The measurements behind the defaults
+are in \file{docs/results/optbench-2026-11-05.md}: \#1 and \#3 are essential,
 \#5 is a further 9\% on average with \#1 on (up to $5\times$), \#2 a small win,
 and \#4 and path compression make no measurable difference.
 
@@ -1436,7 +1500,7 @@ Under a pending choice, a loop whose state depends on the choice rewrites its
 root every iteration, and each rewrite is trailed.  If the trail were an
 ordinary root, every snapshot would keep that iteration's data alive, and the
 loop would leak (\code{gc/nondet_pending}).  So a major collection trims the
-trail first (\file{src/gc-plan.md}, stage 8).  The heights where \code{undo}
+trail first (\file{docs/history/gc-plan.md}, stage 8).  The heights where \code{undo}
 or \code{trail_pop_to} can stop are every choice entry plus every frame slot
 whose rep is \code{R_TRAIL} (a height) or \code{R_CUTOFF} (height + 1, or 0
 for none), so code that keeps a trail height across an evaluation has to keep
@@ -1524,7 +1588,7 @@ which \code{nf} evaluates things means a program ported from somewhere else
 doesn't always exercise the same path.
 
 \file{tests/bench.sh} and \file{tests/optbench.sh} measure speed and count
-runtime events across flag settings.  \file{test/runtime_smoke.c} tests the
+runtime events across flag settings.  \file{tests/runtime_smoke.c} tests the
 runtime on its own (\code{make test} in \file{runtime/}).
 
 Two test runs can go at the same time, even with different C flags, as long
@@ -1535,7 +1599,7 @@ Prelude the first run is using.
 \section{Conventions}
 %======================================================================
 
-\file{STYLE_GUIDE.md} has the full conventions.  The ones that bite:
+\file{docs/style-guide.md} has the full conventions.  The ones that bite:
 \begin{itemize}
   \item \textbf{Use \code{case}, not overlapping equations.}  In Curry, two
     equations whose patterns overlap (a specific one and a catch-all) are
@@ -1595,7 +1659,7 @@ go on the trail, and the trail can't point at a static node that will be reused.
 old\_rice's answer was a second entry point \code{f_RET_hnf(backup)} for every
 function, which allocates a real node only once a choice shows up.  The
 \code{hnf_RET} field of \code{Symbol} and \code{make_restore} in
-\file{runtime.h} are placeholders for this.  \file{src/case-shortcutting-plan.md}
+\file{runtime.h} are placeholders for this.  \file{docs/plans/case-shortcutting-plan.md}
 has the details, including three designs that don't work.
 
 \paragraph{Removing boxes.}  A strictness analysis, then a worker/wrapper split:
@@ -1622,7 +1686,7 @@ not constructors and literals, would give \code{inline} more to do.
 
 \paragraph{Gaps.}  Narrowing a free variable of a primitive type stops with an
 error.  \code{catch}, file IO and the \code{read...Literal} functions are stubs.
-The trail can keep old snapshots alive (\file{current.md}).  Constructors with
+The trail can keep old snapshots alive (\file{docs/status.md}).  Constructors with
 no children are allocated fresh every time instead of shared.
 
 \end{document}

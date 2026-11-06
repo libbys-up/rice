@@ -3,9 +3,9 @@
 This file holds the history that used to live in comments in `runtime/`:
 bugs we fixed, approaches we tried and dropped, and why some code ended up
 the way it is. The code comments now describe only the code as it stands
-(see `STYLE_GUIDE.md`, "Three kinds of comments"). The big picture design is in
-`src/developers-manual.tex`, and the compiler's history is in
-`src/compiler-history.md`.
+(see `docs/style-guide.md`, "Three kinds of comments"). The big picture design is in
+`docs/developers-manual.tex`, and the compiler's history is in
+`docs/history/compiler-history.md`.
 
 Entries are grouped by the file and function they're about. If you change one
 of these places, check here first, because a lot of these are traps someone
@@ -64,7 +64,7 @@ in the future".
 `missing` used to be an `int`. With `OPT_EPOCH_TRAIL` on, the 4-byte `epoch`
 didn't fit in the first word after it, so `symbol` moved to offset 16 and every
 node grew from 48 to 56 bytes. That extra word was most of #5's fixed cost on
-deterministic programs (`current.md`, 2026-10-27). With all flags on, best of
+deterministic programs (`docs/status.md`, 2026-10-27). With all flags on, best of
 7–9 runs, int vs `int16_t`, against #5 off:
 
 | program | 56 bytes | 48 bytes | #5 off |
@@ -116,7 +116,7 @@ the node's symbol, and it ignored its `new_node` argument. Narrowing uses
   last component to its first.
 - `print_string`, `print_list` and `print_final` read `(:)`'s children
   backwards (tail as head). Nothing had printed a list or string as the
-  top-level result until `tests/run.sh` got its crash detection (STATUS.md),
+  top-level result until `tests/run.sh` got its crash detection (docs/history/status-2026-09.md),
   so it went unnoticed. `putStr` goes through `toCStr`, which was already
   right.
 - `print_final` checked for a constructor named `"char"`, which never matched
@@ -188,7 +188,7 @@ backends), so we only get here if a Curry program calls them itself.
 
 `prelude.c` replaced the old `external.c`/`external.h` and
 `Prelude_external.c`, which implemented overlapping externals differently and
-had raw `exit()` calls (see STATUS.md, Phase 2).
+had raw `exit()` calls (see docs/history/status-2026-09.md, Phase 2).
 
 ### Unifying a variable with itself
 

@@ -222,7 +222,7 @@ ICurry-lifted functions. Each case gets one static `FrameInfo`, with a
 `reps` array only when it has raw slots, the same convention as `Symbol`.
 
 Raw *return values* (unboxed results from future worker/wrapper workers,
-`field-reps-plan.md` step 7) don't occur yet: the field-rep lint forbids a
+`docs/history/field-reps-plan.md` step 7) don't occur yet: the field-rep lint forbids a
 raw result. If they're added, the returned value goes in a second machine
 register (`rice_ret`), and the continuation's `FrameInfo` records its rep.
 

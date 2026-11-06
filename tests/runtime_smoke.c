@@ -1,5 +1,5 @@
-// Hand-written smoke test for runtime/ (Phase 0 -- see STATUS.md's
-// "runtime/ and Codegen" section, and src/codegen-runtime-review.md's case
+// Hand-written smoke test for runtime/ (Phase 0 -- see docs/history/status-2026-09.md's
+// "runtime/ and Codegen" section, and docs/history/codegen-runtime-review.md's case
 // for testing the runtime directly, decoupled from codegen). Builds a few
 // small node graphs by hand, straight against runtime.h's own
 // set0/set1/set2/make_choice/etc., the same way codegen will eventually --

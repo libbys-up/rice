@@ -271,11 +271,11 @@ writeBack v
 --- The loop's `nondet` starts at `root`'s own flag, not false: a node that
 --- was rewritten nondeterministically stays that way. For a nested case,
 --- this also brings in the enclosing case's flag, which its `trail_node`
---- put on `root`. (`backtracking_proofs.md`, nondet tracking rules 2, 3.)
+--- put on `root`. (developer's manual, "Soundness rules", the nondet flag, rules 2 and 3.)
 ---
 --- The retry cutoff is per case, not per function: a retry only redoes
 --- this case's dispatch, so it may only flip choices made since this case
---- began (`backtracking_proofs.md`, #3 rule 2).
+--- began (developer's manual, "Soundness rules", #3).
 enterCase :: Gen -> IVarIndex -> [IConsBranch] -> G [CStmt]
 enterCase gen v bs = do
   (k, done) <- get
@@ -308,7 +308,7 @@ enterCase gen v bs = do
 
 --- The prototype, reps array and `FrameInfo` of case block `k`.
 --- `slotReps` are the reps' C names, and `layout` names each slot, for a
---- comment above them (STYLE_GUIDE.md, "Frame layouts").
+--- comment above them (docs/style-guide.md, "Frame layouts").
 caseDecls :: Gen -> Int -> CName -> [String] -> [String] -> [CStmt]
 caseDecls gen k fname slotReps layout =
   [ comment ("frame: [" ++ intercalate ", " layout ++ "]")

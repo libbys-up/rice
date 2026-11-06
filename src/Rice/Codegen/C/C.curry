@@ -104,7 +104,7 @@ cifdef cond body = (text "#if" <+> text cond) $$ vcat body $$ text "#endif"
 ------------------------------------------------------------------------------
 
 --- The indentation of a block's body. Blocks use Allman braces, the same
---- as the hand-written runtime (`STYLE_GUIDE.md`).
+--- as the hand-written runtime (`docs/style-guide.md`).
 blockIndent :: Int
 blockIndent = 4
 

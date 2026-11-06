@@ -2,7 +2,7 @@ Plan: case shortcutting (`RET`)
 ===============================
 
 Moved here from `src/archetecture.md` (now replaced by
-`src/developers-manual.tex`). The design comes from old_rice and its
+`docs/developers-manual.tex`). The design comes from old_rice and its
 dissertation (chapter 7). Nothing here is implemented yet; the placeholders
 are `Symbol.hnf_RET` in `runtime/node.h` and `make_restore` in
 `runtime/runtime.h`.

@@ -1,6 +1,6 @@
 -- Non-strict equational constraint / narrowing, in the spirit of kics2's
 -- own testsuite/SpecialTests/TestUnification.curry -- exercises (=:<=)
--- directly (see STATUS.md's "Phase 2, item 2" write-up on the real bug
+-- directly (see docs/history/status-2026-09.md's "Phase 2, item 2" write-up on the real bug
 -- this once hit) via the same last-element idiom old_rice's own
 -- last.curry/lastEq.curry use, just at a size small enough to run in the
 -- default (non---slow) pass. Monomorphic on Int (matching old_rice's own

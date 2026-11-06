@@ -4,7 +4,7 @@
 #include "memory.h"
 #include "gc.h"
 
-/* The heap (gc-plan.md, stage 7). Each space is a linked list of chunks of
+/* The heap (docs/history/gc-plan.md, stage 7). Each space is a linked list of chunks of
  * zeroed memory with a bump allocator in its current chunk.
  *
  *  * The nursery is where the program allocates: one chunk of

@@ -3,11 +3,11 @@ Codegen & Runtime: Simplification and Engineering-Practice Review
 
 A design review of what's about to get ported (old_rice's `Compile/*.curry`)
 and what's already sitting in `runtime/`, done *before* Phase 1/2 of
-`STATUS.md`'s scope, specifically looking for (1) places the design can be
+`docs/history/status-2026-09.md`'s scope, specifically looking for (1) places the design can be
 simplified, not just fixed, and (2) places better engineering practice would
 make future modification easier — directly motivated by how much of
 `~/curry/old_rice`'s own history was spent modifying exactly these two areas.
-Cross-checked against `STYLE_GUIDE.md` throughout, since several findings here
+Cross-checked against `docs/style-guide.md` throughout, since several findings here
 are cases where old_rice's code (about to be ported) would violate a
 convention Rice has already documented for itself.
 
@@ -133,7 +133,7 @@ into one generic combinator plus one `make` expression per primitive.
 
 `Compile.ToC`'s `FunPos = (Path, [IVarIndex], IQName)` gets threaded
 positionally through most of the module's functions (`showBlock`, `showStmt`,
-`save`, ...) as an unnamed 3-tuple. `STYLE_GUIDE.md` already states Rice's own
+`save`, ...) as an unnamed 3-tuple. `docs/style-guide.md` already states Rice's own
 preference here directly: *"Reach for a record only when a type genuinely has
 several independent, named config-style fields"* — `FunPos` is exactly that
 case (old_rice's own single record example, `CompileOptions` in
@@ -150,7 +150,7 @@ Codegen: engineering-practice notes
 
 - **Stay inside the DSL, don't fall back to raw string concatenation.**
   `showConsCase`'s `nondetCode` (the RET/backup logic — already flagged in
-  `STATUS.md` as the densest, most bug-prone-looking part of the file) mixes
+  `docs/history/status-2026-09.md` as the densest, most bug-prone-looking part of the file) mixes
   the `.=`/`scall`/`cif` combinators with raw `++`-concatenated string
   literals inconsistently, in the same function. A `Doc`-based rewrite (above)
   makes this enforceable structurally; even without that, treating "always go
@@ -158,13 +158,13 @@ Codegen: engineering-practice notes
   this file specifically would help, since it's already the part most likely
   to need real changes once case-shortcutting (Phase 2) actually gets
   implemented against it.
-- **Module naming**: `STYLE_GUIDE.md` already documents the exact
+- **Module naming**: `docs/style-guide.md` already documents the exact
   inconsistency in the current `Rice/Codegen/` tree (`CodeGen`/`Codegen`/
   `codegen` casing, missing `Rice.` prefixes) and names `Rice.Codegen.*` as
   the target. The port is the natural point to actually fix this, not just
   note it again.
 - **Doc comments**: old_rice's `Compile.*` has essentially none. Per
-  `STYLE_GUIDE.md`'s stated bar ("every exported function should get at least
+  `docs/style-guide.md`'s stated bar ("every exported function should get at least
   a one-line `---` doc comment"), the port is the point to add them —
   cheapest to write while the translation logic is freshly re-understood,
   expensive to reconstruct later from generated-C output alone.
@@ -176,7 +176,7 @@ Runtime: engineering-practice notes
 
 ### Route every fatal path through the existing `error()` helper
 
-`STYLE_GUIDE.md` already states this as the intended convention
+`docs/style-guide.md` already states this as the intended convention
 (`runtime/runtime.h:192`'s `error(msg, expr)`) and already flags a few
 existing violations. Reading `external.c` directly this pass turned up more:
 `Prelude_ensureNotFree_hnf` (`printf(...); exit(0);`) and
@@ -230,7 +230,7 @@ being run.
 
 ### Test the runtime independently of codegen
 
-Right now the plan (`STATUS.md`'s Phase 0 → Phase 1) only lets the runtime be
+Right now the plan (`docs/history/status-2026-09.md`'s Phase 0 → Phase 1) only lets the runtime be
 exercised *after* codegen also works, since the only way to get a program
 into it is through generated C. That serializes two independently-testable
 concerns unnecessarily. A small number of hand-written `.c` test files —
@@ -246,7 +246,7 @@ natural first tier below whole compiled Curry programs.
 
 ### The `TEST`-as-ordinal-macro pattern is the same issue, already flagged
 
-`backtracking-optimizations.md`'s implementation plan already recommends
+`docs/history/backtracking-optimizations.md`'s implementation plan already recommends
 replacing the current `#if TEST == NO_OPTS / PUSH_NONDET / ...` ordinal
 progression with independent, per-optimization compile-time flags, for
 exactly the "easier to modify, testable in isolation" reasons this review is
@@ -266,4 +266,4 @@ Phase 1 gets built, not just what it produces). Everything else here —
 `PrimOps` derivation, `FunPos`-as-record, the debug-build tagged-union
 checks, routing through `error()`, the Makefile's warning flags, and
 hand-written runtime tests — can be folded into Phase 0/1/2 as they happen,
-without changing the phase boundaries `STATUS.md` already lays out.
+without changing the phase boundaries `docs/history/status-2026-09.md` already lays out.

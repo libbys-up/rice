@@ -141,7 +141,7 @@ run_one() {
   fi
   # RICE_CFLAGS (unset by default) passes through to `rice --cflags=...` --
   # e.g. `RICE_CFLAGS=-DOPT_COPY_COLLAPSE=1 tests/run.sh` to verify a
-  # backtracking-optimizations.md toggle actually gets exercised, without
+  # docs/history/backtracking-optimizations.md toggle actually gets exercised, without
   # needing a second copy of this script. Built as a plain, unquoted-
   # expanded string rather than an array: bash 3.2 (macOS's stock
   # /bin/bash) treats `"${arr[@]}"` on an empty array as an
@@ -153,7 +153,7 @@ run_one() {
   # `-DOPT_...` for any flag after the first.
   for cf in ${RICE_CFLAGS:-}; do flags="$flags --cflags=$cf"; done
   # Every module that gets regenerated is checked for raw values that
-  # could reach a pointer slot (src/field-reps-plan.md); a lint failure is
+  # could reach a pointer slot (docs/history/field-reps-plan.md); a lint failure is
   # a compile failure.
   flags="$flags --lint-fieldreps"
   # `-- rice-flags: <flags>` anywhere in the source adds compiler flags for
@@ -173,7 +173,7 @@ run_one() {
   local no_golden=0
   grep -qE 'rice-golden: none' "$src" && no_golden=1
   # `-- rice-maxrss: N` caps the run's peak resident memory at N MB
-  # (src/gc-plan.md, stage 3): a run that otherwise passes but went over
+  # (docs/history/gc-plan.md, stage 3): a run that otherwise passes but went over
   # is a failure, which is how a garbage collector regression shows up.
   local maxrss_mb
   maxrss_mb="$(grep -m1 -oE 'rice-maxrss: [0-9]+' "$src" | awk '{print $2}')"

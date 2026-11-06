@@ -1,5 +1,5 @@
 #!/bin/bash
-# The bootstrap triple test (src/bootstrap-plan.md, Phase C).
+# The bootstrap triple test (docs/history/bootstrap-plan.md, Phase C).
 #
 #   1. rice0, the installed rice (built by KiCS2), compiles Rice.Main into
 #      rice1.

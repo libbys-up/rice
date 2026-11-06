@@ -6,7 +6,7 @@ both, best of 3 alternating rounds, 120 s timeout, 6 GB memory cap).
 Machine: Apple M-series Mac (arm64), 16 GB, macOS. Rice at commit
 `e9a021d`: optimizer off (its default since 2026-11-03); runtime flags at
 their defaults, #1, #2, #3 and #5 on, #4 and path compression off
-(src/results/optbench-2026-11-05.md). KiCS2 3.5.0, default settings,
+(docs/results/optbench-2026-11-05.md). KiCS2 3.5.0, default settings,
 executables built with `:save`. Both compilers' answers match the goldens
 for every program both finished (compared as multisets of answers,
 ignoring term syntax).

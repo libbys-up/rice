@@ -2,7 +2,7 @@
 # Makes a release tarball with the bootstrap seed: rice's own source, the
 # front end's source, the source of the packages rice uses, and the C that
 # rice generates for itself (seed/), so `make from-seed` can build rice
-# with just a C compiler and the front end (src/bootstrap-plan.md, Phase D).
+# with just a C compiler and the front end (docs/history/bootstrap-plan.md, Phase D).
 #
 # The seed is generated from the tarball's own source, not the working
 # tree: the committed tree (git archive HEAD) is staged first, and rice

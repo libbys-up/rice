@@ -1,7 +1,7 @@
 -- #1+#5 write barrier: `n` (built by `mk`'s deterministic rewrite of `p`)
 -- is first reached through `pick`'s node, not through `p`. A barrier that
 -- tracks the evaluation path instead of allocation stamps gets this
--- wrong (backtracking_proofs.md, "the pick example"). The fields are in
+-- wrong (developer's manual, "Soundness rules"). The fields are in
 -- the reverse of the notes' order, because Rice normalizes a tuple's last
 -- field first: `b`'s choice comes first, then `pick b p` reaches `n`.
 mk :: Bool -> (Bool, ())

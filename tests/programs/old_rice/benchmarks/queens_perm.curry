@@ -12,7 +12,7 @@
 -- solutions) ~54MB, n=7 (5040 solutions) ~738MB, n=8 (40320 solutions)
 -- exceeded 4GB before completing even a third of them. That's a much
 -- worse than n!-linear blowup -- consistent with this stage of the
--- runtime having no GC yet (STATUS.md), so nothing explored and
+-- runtime having no GC yet (docs/history/status-2026-09.md), so nothing explored and
 -- discarded during the backtracking search is ever reclaimed; total
 -- memory tracks *cumulative* work done, not what's actually still
 -- live. Do not casually bump this back up without re-measuring peak

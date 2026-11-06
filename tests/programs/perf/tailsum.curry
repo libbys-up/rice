@@ -9,7 +9,7 @@
 -- rather than silently fixed, since they're easy to hit again:
 --
 -- 1. Uses a `case`, not parallel equations, for the base/recursive
---    split -- see STYLE_GUIDE.md's "Pattern matching: flexible
+--    split -- see docs/style-guide.md's "Pattern matching: flexible
 --    equations vs. rigid case" for why a literal-vs-variable equation
 --    pair here would recurse forever instead of terminating.
 --

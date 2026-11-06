@@ -8,13 +8,13 @@ What 2.0 is:
   buildable from a release tarball with only `make` and a C compiler
   (`make seed`, `make -j from-seed`, `make install`; README).
 - `Data.IORef`, `unsafePerformIO`, any number of constructor fields, and
-  shared IO actions that run every time (src/features-plan.md).
+  shared IO actions that run every time (docs/plans/features-plan.md).
 - Backtracking optimizations #1, #2, #3, #5 on by default; #4 and path
   compression kept as flags, measured to make no difference
-  (`src/results/optbench-2026-11-05.md`).
+  (`docs/results/optbench-2026-11-05.md`).
 - Against KiCS2: 1.53x faster by geometric mean over 51 programs, up to
   477x on nondeterministic ones, 2.4x slower on deterministic ones
-  (`src/results/kics2-comparison-2026-11-05.md`). The paper's numbers are
+  (`docs/results/kics2-comparison-2026-11-05.md`). The paper's numbers are
   these two files, and the commits they name.
 - Suite: 138 pass, 0 fail, 11 xfail. Bootstrap: 165 files identical.
 
@@ -24,7 +24,7 @@ Next, before 3.0:
   `rice-2.0.0.tar.xz` as a GitHub release, which runs the Linux release
   check (`.github/workflows/`).
 
-3.0 (src/features-plan.md has the details):
+3.0 (docs/plans/features-plan.md has the details):
 - Optimizations: strictness analysis, then the optimizer back on by
   default; dictionary specialization for the deterministic gap.
 - Remove #4 and path compression from the runtime.
@@ -54,7 +54,7 @@ in git history at `eddacd5`.
 
 ## The optimizations
 
-Final verdicts (2026-11-05, `src/results/optbench-2026-11-05.md`); the rest
+Final verdicts (2026-11-05, `docs/results/optbench-2026-11-05.md`); the rest
 of this section is the earlier measurements that led there.
 
 | # | flag | default | verdict |
@@ -120,8 +120,8 @@ On SearchMAC (`scaled/kics2/SearchMAC`, goal 40 39) #1+#5 trails 4.25M
 rewrites, against 0.82M for #5 alone, because the barrier stamps nodes old.
 We've accepted this. Trailing only the rewrites that must be undone isn't
 decidable, and the barrier was always an approximation; a better rule would
-be original research (and need the proofs in `backtracking_proofs.md`,
-"The write barrier", extended).
+be original research (and need the barrier proof, in the paper repository,
+extended).
 
 The pattern, minimal:
 
@@ -199,7 +199,7 @@ anyway. Reducing it needs a different sound rule, which means proof work.
 ## Toward 2.0 (2026-11-03)
 
 - `Data.IORef`, `unsafePerformIO`, and constructors with any number of
-  children (`CHILD_AT`) are in (src/features-plan.md, "Version 2.0").
+  children (`CHILD_AT`) are in (docs/plans/features-plan.md, "Version 2.0").
 - A shared IO action runs every time it's used: bindIO runs a fresh copy
   and points the bind node at the copy (developer's manual, "Shared
   actions"). Tests: `externals/{shared_io,ioref,unsafe_io}`, matching
@@ -216,13 +216,13 @@ anyway. Reducing it needs a different sound rule, which means proof work.
   all of a small program's compile. A warm compile now takes about 0.2 s
   and 126 MB; a cold one (compiling Prelude) 15 s and 2 GB.
 - Open: `--interactive` with IO after a choice doesn't rerun the action's
-  effects correctly on backtracking (features-plan.md, "Also").
+  effects correctly on backtracking (docs/plans/features-plan.md, "Also").
 
 ## Collector and IO (2026-11-01)
 
 - `readFile` is lazy (4 KB blocks, re-readable by offset), and
   `writeFile`/`appendFile` stream (`13f2e76`).
-- The collector is generational (`5cc1a98`, gc-plan.md stage 7): nursery,
+- The collector is generational (`5cc1a98`, docs/history/gc-plan.md stage 7): nursery,
   survivor space, old generation; write barrier `gc_remember` in every
   rewrite; trail and stack watermarks. rice1 compiling hello world: 30 s,
   2.6 GB (was 43 s, 5.7 GB). Programs that keep everything they allocate
@@ -230,7 +230,7 @@ anyway. Reducing it needs a different sound rule, which means proof work.
   SearchKanMis about 1.7-2.5x (their trails keep everything alive).
 - `-DGC_VERIFY` checks the barrier and the watermarks at every minor
   collection. Open: tuning the nursery size.
-- Leak 2 is closed (gc-plan.md stage 8): each major collection compacts
+- Leak 2 is closed (docs/history/gc-plan.md stage 8): each major collection compacts
   the trail, drops entries no view can restore, and overwrites nodes no
   view can read. `gc/nondet_pending` 645 MB to 47 MB, fib 2.7 GB to
   49 MB, SearchKanMis 201 MB to 57 MB. Open: whether a later bindIO
@@ -262,7 +262,7 @@ generational).
 
 ## Bootstrapping (2026-11-03)
 
-Both goals of src/bootstrap-plan.md are met: the fixpoint test passes,
+Both goals of docs/history/bootstrap-plan.md are met: the fixpoint test passes,
 and `make seed` / `make from-seed` build rice from a release tarball with
 only a C compiler and the front end. See the plan's 2026-11-03 status.
 
@@ -270,7 +270,7 @@ only a C compiler and the front end. See the plan's 2026-11-03 status.
 
 Rice is self-hosting: `tests/bootstrap.sh` (the triple test) passes, with
 rice1's generated C identical to rice0's for all 157 files. Status and next steps are in
-`src/bootstrap-plan.md`. Externals of library modules are in
+`docs/history/bootstrap-plan.md`. Externals of library modules are in
 `runtime/ext/<Module>.c` (developer's manual, "External functions").
 
 ## Distribution (2026-10-29)
@@ -334,7 +334,7 @@ the biggest single speedup for ordinary programs.
 - `=:<=`'s CHOICE handling: fixed in `62ecb1c`, with
   `regressions/lazy_unify_choice`.
 - Dropped the "lazy frames experiment" stash (2026-10-08). It
-  predates root/sp-as-arguments, and `src/explicit-stack-plan.md`
+  predates root/sp-as-arguments, and `docs/history/explicit-stack-plan.md`
   records its numbers and why it wasn't adopted.
 - `runtime-review.md` (root) stays untracked on purpose: personal notes
   from the 2026-10-24 runtime review.

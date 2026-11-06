@@ -1,9 +1,9 @@
 Plan: making optimizations #4 and #5 actually fire
 ===================================================
 
-Written 2026-10-02. Numbering follows `backtracking-optimizations.md`.
+Written 2026-10-02. Numbering follows `docs/history/backtracking-optimizations.md`.
 Background and the formal side live in `~/curry/papers/unif/proofs/`
-(`current.md`, `Machine.v`, `Opt5_EpochTrail.v`, and
+(`docs/status.md`, `Machine.v`, `Opt5_EpochTrail.v`, and
 `copy_forward_optimization.md` for #4). `opt_conflict.md` (this repo)
 covers the #1+#5 interaction.
 

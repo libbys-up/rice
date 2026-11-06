@@ -83,10 +83,11 @@ Limitations
 - In `--interactive`, an IO action run after a nondeterministic choice
   isn't run again correctly when the search backtracks over that choice.
 
-`src/features-plan.md` has the plans for these.
+`docs/plans/features-plan.md` has the plans for these.
 
 Working on rice
 ---------------
 
-See `src/developers-manual.tex`. The test bench is `tests/run.sh`
-(`tests/README.md`); the coding standards are in `STYLE_GUIDE.md`.
+Start with `AGENTS.md`: building, testing, and the rules for long jobs.
+The design is in `docs/developers-manual.tex`, the coding standards in
+`docs/style-guide.md`, and the rest of the documentation in `docs/`.

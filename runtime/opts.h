@@ -6,7 +6,7 @@
 // later would come too late for it.
 
 /* The backtracking optimizations (developer's manual, "Making backtracking
- * cheaper"; the soundness arguments are in backtracking_proofs.md).
+ * cheaper"; the rules are in the developer's manual, "Soundness rules").
  * Each one is its own 0/1 flag so we can turn them on and off independently
  * (-DOPT_EPOCH_TRAIL=1 on the command line, or rice's RICE_CFLAGS).
  *  * OPT_NONDET_TRAIL (#1): only trail a rewrite if it read something nondeterministic.
@@ -19,9 +19,9 @@
  *    as the node they're built for (rewrite_stamp below).
  *    It's required when #1 and #5 are both on, and on by default then.
  * Every subset of these is proved to give the baseline's answers on a model
- * of the machine (backtracking_proofs.md), given the barrier when #1 and #5 are both on.
+ * of the machine (developer's manual, "Soundness rules"), given the barrier when #1 and #5 are both on.
  * #4 and path compression are off by default: measured on 56 programs
- * (src/results/optbench-2026-11-05.md), neither changed run time by more
+ * (docs/results/optbench-2026-11-05.md), neither changed run time by more
  * than noise, either way. #5 is on: it saves 9% on average with #1 on, up
  * to 5x, and costs at most 9%.
  *  * OPT_TAIL_DISPATCH (#2): a tail call jumps straight to the callee's code.

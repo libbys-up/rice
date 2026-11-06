@@ -56,7 +56,7 @@ Left:
 - A Linux run of `make from-seed`, and CI that runs both build paths.
 - rice1 parses `.tfcy` with derived `read` (9 s for Prelude). A reader
   written for rice, building terms from the file's bytes with no
-  `String`, would fix that and replace rw-data (features-plan.md).
+  `String`, would fix that and replace rw-data (docs/plans/features-plan.md).
 - An uncaught `error` in a rice-built program prints its message, then the
   raw `prim_error(...)` term.
 

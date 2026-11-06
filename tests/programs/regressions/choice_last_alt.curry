@@ -1,7 +1,7 @@
 -- A choice is nondeterministic even in its last alternative. If taking
 -- x's False were treated as deterministic, it would survive the retry of
--- y and (S Z, True) would be lost (backtracking_proofs.md, nondet
--- tracking rule 4).
+-- y and (S Z, True) would be lost (developer's manual, "Soundness rules",
+-- the nondet flag, rule 4).
 data N = Z | S N
 
 main :: (N, Bool)

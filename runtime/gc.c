@@ -5,7 +5,7 @@
 #include "gc.h"
 
 /* A generational, block allocated copy collector using a depth first search
- * (gc-plan.md, stage 7).
+ * (docs/history/gc-plan.md, stage 7).
  * Block allocated, so we don't have to have an explicit to space until we run the collector.
  *
  *  * A minor collection copies only young nodes. A pointer to an old node is

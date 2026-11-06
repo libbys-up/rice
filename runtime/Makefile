@@ -1,4 +1,4 @@
-# Builds the runtime on its own, for test/runtime_smoke.c (`make test`).
+# Builds the runtime on its own, for tests/runtime_smoke.c (`make test`).
 # rice doesn't use this: Rice.Main compiles the runtime itself, with -O2.
 # Running it overwrites the runtime/*.o files rice links with unoptimized
 # -g builds; if that happens, rm runtime/*.o runtime/*.o.flags.
@@ -27,7 +27,7 @@ SRC := runtime.c trail.c machine.c heap.c gc.c
 OBJ := $(SRC:.c=.o)
 LIB := libriceruntime.a
 
-TEST_SRC := ../test/runtime_smoke.c
+TEST_SRC := ../tests/runtime_smoke.c
 TEST_BIN := runtime_smoke
 
 .PHONY: all test clean

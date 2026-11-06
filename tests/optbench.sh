@@ -1,6 +1,6 @@
 #!/bin/bash
 # The backtracking-optimization bench: how much each of #1-#5 and path
-# compression (backtracking_proofs.md, src/backtracking-optimizations.md)
+# compression (the developer's manual, "Soundness rules", docs/history/backtracking-optimizations.md)
 # actually buys, and on what. tests/bench.sh times the SLOW benchmarks under a few configs;
 # this one is built around the optimizations instead:
 #

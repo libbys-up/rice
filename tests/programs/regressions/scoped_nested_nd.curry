@@ -2,7 +2,7 @@
 -- entered); its inner case reads a deterministic y and has no branch for
 -- it. The inner case's own nondet flag is false, so a fail write gated
 -- on it is untrailed, and f's node stays FAIL after backtracking flips x
--- (backtracking_proofs.md, #3 rule 1).
+-- (developer's manual, "Soundness rules", #3).
 -- Rice lifts the inner case into its own function (f_CASE0), so the
 -- inner case is a separate rewrite whose fail is undone by the entry f's
 -- own case pushed: this passed before the fix too. It guards the shape.

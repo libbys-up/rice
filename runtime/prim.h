@@ -9,8 +9,8 @@
 // standard sign-adjusted formulas.
 //  - div rounds toward negative infinity,
 //  - mod takes the divisor's sign
-// verified against test/test.c's own
-// worked examples for all four sign combinations before being written
+// (tests/programs/prelude_prims/int_arith.curry checks them, with a
+// negative dividend too)
 
 static inline long prim_mod(long a, long b)
 {
