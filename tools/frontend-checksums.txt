@@ -3,3 +3,5 @@
 #   <sha256>  curry-frontend-<version>-<os>-<arch>.gz
 # tools/get-frontend.sh only downloads a file listed here. The release
 # workflow (.github/workflows/release.yml) prints the lines to add.
+da37c2082fad4d11a5feed261e4ba5b343d6b4ab82f57d46633362e2c7e6bf42  curry-frontend-3.1.0-darwin-arm64.gz
+1a0d9ccc6e48b97e94f1b1d8c523c5ecdf2bfca305c63407ea162f2ea6261e50  curry-frontend-3.1.0-linux-x86_64.gz

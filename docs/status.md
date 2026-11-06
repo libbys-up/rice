@@ -1,7 +1,10 @@
-# Current state: rice 2.0 (2026-11-05)
+# Current state: rice 2.0 (2026-11-06)
 
-Rice 2.0 is tagged `v2.0.0` on branch `phase1-codegen-and-runtime`. Nothing
-is pushed yet; the GitHub release and CI are the next steps (see below).
+Rice 2.0 is tagged `v2.0.0` (commit `f8e7c6c`), the version the paper's
+measurements and citations refer to. `v2.0.1` is the same compiler with the
+documentation moved into `docs/` and the checksums of the prebuilt front
+ends, so `make` can download one; it's the version released to users, as
+`rice-2.0.1.tar.xz` on GitHub. Both are on `main`.
 
 What 2.0 is:
 - Self-hosting, with a fixpoint (`tests/bootstrap.sh --fixpoint`), and
@@ -18,11 +21,15 @@ What 2.0 is:
   these two files, and the commits they name.
 - Suite: 138 pass, 0 fail, 11 xfail. Bootstrap: 165 files identical.
 
-Next, before 3.0:
-- Push the branch; run the "Front end binaries" workflow and add its
-  checksums to `tools/frontend-checksums.txt`; `make seed` and publish
-  `rice-2.0.0.tar.xz` as a GitHub release, which runs the Linux release
-  check (`.github/workflows/`).
+Releasing (see `.github/workflows/`):
+- The front end binaries are on the GitHub release `frontend-3.1.0`, built
+  by the "Front end binaries" workflow, with their checksums in
+  `tools/frontend-checksums.txt`. The Linux one needs glibc 2.35 or later
+  and `libgmp.so.10`.
+- A rice release: set the version in `package.json`, rebuild rice (cypm
+  writes the version into `Rice.PackageConfig`, which the seed copies),
+  commit and tag `v<version>`, push, `make seed`, and create the GitHub
+  release with the tarball. Publishing it runs "Release check (Linux)".
 
 3.0 (docs/plans/features-plan.md has the details):
 - Optimizations: strictness analysis, then the optimizer back on by
