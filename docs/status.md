@@ -1,10 +1,14 @@
 # Current state: rice 2.0 (2026-11-06)
 
 Rice 2.0 is tagged `v2.0.0` (commit `f8e7c6c`), the version the paper's
-measurements and citations refer to. `v2.0.1` is the same compiler with the
-documentation moved into `docs/` and the checksums of the prebuilt front
-ends, so `make` can download one; it's the version released to users, as
-`rice-2.0.1.tar.xz` on GitHub. Both are on `main`.
+measurements and citations refer to. The version released to users is
+`v2.0.3` (`rice-2.0.3.tar.xz` on GitHub, 2026-11-07): the same compiler,
+with the documentation in `docs/`, checksums for downloading the prebuilt
+front ends, the fixes that make it build on Linux (`-D_DEFAULT_SOURCE`, no
+macOS `._` files in the tarball), and cache files written atomically so an
+interrupted compile can't leave a broken cache. Its Linux release check
+passed: built from the seed, 138 tests pass, `make install` works. (2.0.1
+doesn't build on Linux; 2.0.2 does, but has the cache bug.)
 
 What 2.0 is:
 - Self-hosting, with a fixpoint (`tests/bootstrap.sh --fixpoint`), and
