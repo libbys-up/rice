@@ -19,6 +19,9 @@
 #                 haven't changed since the last clean run)
 #   -v, --verbose show each test's actual output as it runs
 #
+# Environment: COMPILE_TIMEOUT, RUN_TIMEOUT and SLOW_RUN_TIMEOUT (seconds;
+# defaults 60, 15, 180) for slower machines.
+#
 # name-substring, if given, filters to tests whose relative path contains
 # any of the given substrings (e.g. `tests/run.sh regressions` or
 # `tests/run.sh fib tak`).
@@ -38,9 +41,10 @@ source "$HERE/lib.sh"
 resolve_ricehome
 resolve_rice
 SCRATCH="$HERE/.run"
-COMPILE_TIMEOUT=60
-RUN_TIMEOUT=15
-SLOW_RUN_TIMEOUT=180
+# Seconds; the environment can override them (a slower machine, like CI).
+COMPILE_TIMEOUT="${COMPILE_TIMEOUT:-60}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-15}"
+SLOW_RUN_TIMEOUT="${SLOW_RUN_TIMEOUT:-180}"
 
 RUN_SLOW=0
 RECORD=0

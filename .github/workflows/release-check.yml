@@ -44,10 +44,23 @@ jobs:
           cd "$RICE_DIR"
           make -j"$(nproc)" from-seed
 
+      # --no-clean: make from-seed has just compiled the library with this
+      # rice, and compiling it cold again doesn't fit run.sh's compile
+      # timeout on CI's machines. They're slower than a desktop, so the
+      # timeouts are longer here too.
       - name: Test suite
         run: |
           cd "$RICE_DIR"
-          PATH="$RICE_DIR/bin:$PATH" RICEHOME="$RICE_DIR" tests/run.sh
+          PATH="$RICE_DIR/bin:$PATH" RICEHOME="$RICE_DIR" \
+            COMPILE_TIMEOUT=300 RUN_TIMEOUT=60 tests/run.sh --no-clean
+
+      - name: Logs of failed tests
+        if: failure()
+        run: |
+          cd "$RICE_DIR"
+          for log in $(ls tests/.run/*/*/build.log 2>/dev/null | head -5); do
+            echo "=== $log"; tail -30 "$log"
+          done
 
       - name: Install
         run: |

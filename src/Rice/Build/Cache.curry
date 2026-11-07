@@ -24,13 +24,18 @@ module Rice.Build.Cache ( needsRecompile,
                           readCachedFcy,
                           writeFcyIfChanged,
                           writeFileIfChanged,
+                          writeFileAtomic,
+                          beginModule,
+                          finishModule,
                           readCachedImports,
                           writeCachedImports
  ) where
 
 import Data.Maybe        (fromMaybe)
+import Control.Monad     (when)
 import System.CurryPath  (modNameToPath)
-import System.Directory  (doesFileExist, getModificationTime, createDirectoryIfMissing)
+import System.Directory  (doesFileExist, getModificationTime, createDirectoryIfMissing,
+                          removeFile, renameFile)
 import System.FilePath   ((</>), (<.>), takeDirectory)
 import FlatCurry.Types       (Prog)
 import FlatCurry.TypesRW     ()
@@ -171,18 +176,40 @@ writeFileIfChanged path new = do
                 length s `seq` return (Just s)
   case old of
     Just o | o == new -> return ()
-    _ -> do createDirectoryIfMissing True (takeDirectory path)
-            writeFile path new
+    _ -> writeFileAtomic path new
 
---- Writes the module's `.rtfcy`, if it changed, then its `.rmode`.
---- The `.rmode` goes last: if the compile stops between the two, the
---- module is still stale next time.
-writeOptIfChanged :: Bool -> String -> TProg -> IO ()
-writeOptIfChanged optimize m prog = do
-  (_, opt) <- modulePaths m
-  writeFileIfChanged opt (showData prog)
+--- Writes `new` to `path` through a temporary file that's then renamed,
+--- so `path` never holds half a file, even if rice is interrupted while
+--- writing it.
+writeFileAtomic :: FilePath -> String -> IO ()
+writeFileAtomic path new = do
+  createDirectoryIfMissing True (takeDirectory path)
+  let tmp = path ++ ".tmp"
+  writeFile tmp new
+  renameFile tmp path
+
+--- Called before compiling module `m`: removes its `.rmode`, so if this
+--- compile is interrupted, the module counts as stale next time, whatever
+--- its other cache files hold.
+beginModule :: String -> IO ()
+beginModule m = do
+  path <- modePath m
+  exists <- doesFileExist path
+  when exists (removeFile path)
+
+--- Called once every cache file of module `m` is written: records how it
+--- was compiled (`optimize`), which makes the cache valid.
+finishModule :: Bool -> String -> IO ()
+finishModule optimize m = do
   path <- modePath m
   writeFileIfChanged path (modeString optimize)
+
+--- Writes the module's `.rtfcy`, if it changed. (`finishModule` writes its
+--- `.rmode`, once the rest of the module is written too.)
+writeOptIfChanged :: String -> TProg -> IO ()
+writeOptIfChanged m prog = do
+  (_, opt) <- modulePaths m
+  writeFileIfChanged opt (showData prog)
 
 --- Read a module's cached post-ANF, untyped FlatCurry `Prog`.
 readCachedFcy :: String -> IO Prog

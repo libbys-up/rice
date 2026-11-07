@@ -47,6 +47,7 @@ import Rice.Optimize.FunTable (FunTable, makeFunTable)
 import Rice.Optimize.Inline   (optimizeProg, optimizeRules)
 import Rice.Build.Deps        (ModuleGraph, buildModuleGraph, topoSort)
 import Rice.Build.Cache       (needsRecompile, readCachedOpt, writeOptIfChanged,
+                               beginModule, finishModule, writeFileAtomic,
                                cPaths, fcyPath, readCachedFcy,
                                writeFcyIfChanged, writeFileIfChanged)
 import Rice.Codegen.FieldReps (FieldRepTable, emptyReps, fieldRepTable,
@@ -121,6 +122,10 @@ run graph rootModule opts (importedFT, impFcys, impReps) mname = do
                 || mname `elem` [n | SForceRecompileModule n <- opts]
   when (has SPrintLoops) (readModule mname >>= showLoops)
   stale <- if forced then return True else needsRecompile (has SOptimize) mname imports
+  -- A stale module's cache is invalid until it's all written again
+  -- (Rice.Build.Cache.beginModule, finishModule), so an interrupted compile
+  -- leaves it stale rather than half written.
+  when stale (beginModule mname)
   optimized <- if stale
     then optimizeModule opts importedFT mname
     else do say opts ("Skipping " ++ mname)
@@ -137,6 +142,7 @@ run graph rootModule opts (importedFT, impFcys, impReps) mname = do
   fcy <- if stale || inspecting || not cachesExist
     then generateModule opts impFcys reps mname optimized
     else time "readCachedFcy" (readCachedFcy mname)
+  when stale (finishModule (has SOptimize) mname)
   return (Map.union localFT importedFT, fcy : impFcys, reps)
  where
   has opt = opt `elem` opts
@@ -174,7 +180,7 @@ optimizeModule opts importedFT mname = do
               else return replaced
   stopIf SStopOptimize "after optimize" result
   when (has STraceOptimize) (mapM_ (traceOptimize fullFT) (tProgTFuncs replaced))
-  timeIO timing (stage "writeOptIfChanged") (writeOptIfChanged (has SOptimize) mname result)
+  timeIO timing (stage "writeOptIfChanged") (writeOptIfChanged mname result)
   return result
  where
   has opt     = opt `elem` opts
@@ -219,8 +225,8 @@ generateModule opts impFcys impReps mname optimized = do
   createDirectoryIfMissing True (takeDirectory hPath)
   timeIO timing (stage "write .h/.c") $ do
     let codeReps = addLiftedReps ownReps icy
-    writeFile hPath (pPrint (toHeader codeReps icy))
-    writeFile cPath (pPrint (toSource codeReps icy))
+    writeFileAtomic hPath (pPrint (toHeader codeReps icy))
+    writeFileAtomic cPath (pPrint (toSource codeReps icy))
   return fcy
  where
   has opt  = opt `elem` opts
